@@ -6,6 +6,7 @@ use crate::ast::*;
 use crate::diagnostics::Diagnostic;
 use crate::ide::*;
 use crate::patterns::{self, Ctor, Pat, Space};
+use crate::project::{FileKind, Resolved, SourceFile, Target};
 use crate::span::Span;
 use crate::tast::*;
 use crate::types::*;
@@ -22,18 +23,37 @@ struct FuncSig {
     span: Span,
 }
 
-/// A standard-library module checked together with the user's program.
-pub struct ModuleInput<'a> {
-    pub name: &'a str,
-    pub program: &'a Program,
-    pub source: &'a str,
-    pub base: u32,
-}
-
+/// `import geometry`: a module bound to a name in one file.
 struct ImportInfo {
     module_ns: usize,
     span: Span,
     used: bool,
+    /// The whole line goes when it's unused (`import x`, not `from m import x`).
+    whole_line: bool,
+}
+
+/// What `from geometry import x` brought in.
+#[derive(Clone, Copy)]
+enum Imported {
+    Struct(StructId),
+    Func(FuncId),
+}
+
+/// `from geometry import Point`: a name of another module usable unqualified in one file.
+struct NameImport {
+    target: Imported,
+    span: Span,
+    used: bool,
+}
+
+/// A `from` import whose name is looked up once the modules' declarations are known.
+struct PendingName {
+    ns: usize,
+    module_ns: usize,
+    /// `geometry`, as written in the import.
+    module: String,
+    name: Ident,
+    binding: Ident,
 }
 
 fn is_private(name: &str) -> bool {
@@ -134,11 +154,20 @@ pub struct Checker {
     func_index: HashMap<(usize, String), FuncId>,
     /// The namespace currently being checked.
     ns: usize,
+    /// Per namespace: the module's name (empty for the entry file).
     ns_names: Vec<String>,
+    /// Per namespace: a unique name for generated symbols.
+    ns_symbols: Vec<String>,
+    ns_kinds: Vec<FileKind>,
+    ns_paths: Vec<Option<std::path::PathBuf>>,
     /// (span base, source text) per namespace, for doc comments.
     ns_sources: Vec<(u32, String)>,
-    module_ns: HashMap<String, usize>,
+    /// (namespace, name) -> module, for `import` (and `from` imports of a module file).
     imports: HashMap<(usize, String), ImportInfo>,
+    /// (namespace, name) -> a struct or function brought in by `from ... import`.
+    names: HashMap<(usize, String), NameImport>,
+    /// Names whose import failed (already reported): their uses stay quiet.
+    failed_imports: std::collections::HashSet<(usize, String)>,
     methods: HashMap<(StructId, String), FuncId>,
     diags: Vec<Diagnostic>,
     // per-function state
@@ -156,16 +185,17 @@ pub struct Checker {
 }
 
 /// Type-check: `Ok((program, warnings))` or `Err(errors and warnings)`.
-pub fn check(program: &Program, source: &str, modules: &[ModuleInput]) -> Result<(TProgram, Vec<Diagnostic>), Vec<Diagnostic>> {
-    let a = analyze(program, source, modules);
+pub fn check(files: &[SourceFile]) -> Result<(TProgram, Vec<Diagnostic>), Vec<Diagnostic>> {
+    let a = analyze(files);
     match a.program {
         Some(p) => Ok((p, a.diagnostics)),
         None => Err(a.diagnostics),
     }
 }
 
-/// Type-check and collect everything an editor needs, even when there are errors.
-pub fn analyze(program: &Program, source: &str, modules: &[ModuleInput]) -> Analysis {
+/// Type-check and collect everything an editor needs, even when there are
+/// errors. File `k` is namespace `k`; file 0 is the entry file.
+pub fn analyze(files: &[SourceFile]) -> Analysis {
     let mut c = Checker {
         structs: Vec::new(),
         def_types: Vec::new(),
@@ -175,10 +205,14 @@ pub fn analyze(program: &Program, source: &str, modules: &[ModuleInput]) -> Anal
         funcs: Vec::new(),
         func_index: HashMap::new(),
         ns: 0,
-        ns_names: std::iter::once(String::new()).chain(modules.iter().map(|m| m.name.to_string())).collect(),
-        ns_sources: std::iter::once((0, source.to_string())).chain(modules.iter().map(|m| (m.base, m.source.to_string()))).collect(),
-        module_ns: modules.iter().enumerate().map(|(i, m)| (m.name.to_string(), i + 1)).collect(),
+        ns_names: files.iter().map(|f| f.name.clone()).collect(),
+        ns_symbols: files.iter().map(|f| f.symbol.clone()).collect(),
+        ns_kinds: files.iter().map(|f| f.kind).collect(),
+        ns_paths: files.iter().map(|f| f.path.clone()).collect(),
+        ns_sources: files.iter().map(|f| (f.base, f.text.clone())).collect(),
         imports: HashMap::new(),
+        names: HashMap::new(),
+        failed_imports: Default::default(),
         methods: HashMap::new(),
         diags: Vec::new(),
         locals: Vec::new(),
@@ -191,13 +225,14 @@ pub fn analyze(program: &Program, source: &str, modules: &[ModuleInput]) -> Anal
         field_spans: Vec::new(),
         pending_struct_hovers: Vec::new(),
     };
-    for (i, m) in modules.iter().enumerate() {
-        let doc = c.leading_comment(i + 1);
-        c.ide.modules.push(ModuleSymbol { name: m.name.to_string(), ns: i + 1, doc });
+    for (ns, f) in files.iter().enumerate().skip(1) {
+        let doc = c.leading_comment(ns);
+        c.ide.modules.push(ModuleSymbol { name: f.name.clone(), ns, doc, path: f.path.clone() });
     }
-    let mut units: Vec<(usize, &Program)> = modules.iter().enumerate().map(|(i, m)| (i + 1, m.program)).collect();
-    units.push((0, program));
-    let funcs = c.program(&units);
+    // Modules first: the entry file's functions come last in the program.
+    let mut units: Vec<(usize, &Program)> = files.iter().enumerate().skip(1).map(|(ns, f)| (ns, &f.program)).collect();
+    units.push((0, &files[0].program));
+    let funcs = c.program(&units, files);
     c.finish_ide();
     let has_errors = c.diags.iter().any(|d| d.is_error());
     let program = if has_errors { None } else { Some(TProgram { structs: c.structs, funcs }) };
@@ -341,36 +376,93 @@ impl Checker {
         Some(info.module_ns)
     }
 
+    /// Hover on a module name, and go-to-definition to its file.
     fn module_hover(&mut self, module_ns: usize, span: Span) {
-        let doc = self.ide.modules.iter().find(|m| m.ns == module_ns).and_then(|m| m.doc.clone());
+        let m = self.ide.modules.iter().find(|m| m.ns == module_ns);
+        let mut doc = m.and_then(|m| m.doc.clone());
+        if self.ns_kinds[module_ns] != FileKind::Std
+            && let Some(file) = m.and_then(|m| m.path.as_ref()).and_then(|p| p.file_name())
+        {
+            let file = format!("`{}`", file.to_string_lossy());
+            doc = Some(match doc {
+                Some(d) => format!("{file}\n\n{d}"),
+                None => file,
+            });
+        }
         self.hover(span, format!("import {}", self.ns_names[module_ns]), doc);
+        let start = self.ns_sources[module_ns].0;
+        self.ide.definitions.push((span, Span { start, end: start }));
     }
 
     /// Hint for a name that exists in a module but was used unqualified.
     fn module_hint(&self, name: &str) -> Option<String> {
-        if self.ns != 0 {
+        if is_private(name) {
             return None;
         }
-        for (mname, &mns) in &self.module_ns {
-            let has = self.func_index.contains_key(&(mns, name.to_string())) || self.struct_index.contains_key(&(mns, name.to_string()));
-            if has && !is_private(name) {
-                return Some(if self.imports.contains_key(&(0, mname.clone())) {
-                    format!("did you mean `{mname}.{name}`?")
-                } else {
-                    format!("it lives in the `{mname}` module: add `import {mname}` and write `{mname}.{name}`")
-                });
+        let mut here: Vec<(&String, usize)> =
+            self.imports.iter().filter(|((ns, _), _)| *ns == self.ns).map(|((_, b), i)| (b, i.module_ns)).collect();
+        here.sort();
+        for (binding, mns) in &here {
+            let key = (*mns, name.to_string());
+            if self.func_index.contains_key(&key) || self.struct_index.contains_key(&key) {
+                return Some(format!("did you mean `{binding}.{name}`?"));
             }
         }
         for m in crate::stdlib::MODULES {
-            if self.module_ns.contains_key(m.name) {
+            if here.iter().any(|(_, mns)| self.ns_kinds[*mns] == FileKind::Std && self.ns_names[*mns] == m.name) {
                 continue;
             }
             let needle = format!("\nfn {name}(");
-            if m.source.contains(&needle) && !is_private(name) {
+            if m.source.contains(&needle) {
                 return Some(format!("it lives in the `{}` module: add `import {}` and write `{}.{name}`", m.name, m.name, m.name));
             }
         }
         None
+    }
+
+    /// Did importing `name` into the current file fail? (The error was reported at the import.)
+    fn import_failed(&self, name: &str) -> bool {
+        self.failed_imports.contains(&(self.ns, name.to_string()))
+    }
+
+    /// Remember the names an `import` line would have bound, after reporting why it failed.
+    fn fail_import(&mut self, ns: usize, im: &Import) {
+        let bindings: Vec<String> = match &im.names {
+            Some(names) => names.iter().map(|n| n.binding().name.clone()).collect(),
+            None => im.binding().map(|b| b.name.clone()).into_iter().collect(),
+        };
+        for b in bindings {
+            self.failed_imports.insert((ns, b));
+        }
+    }
+
+    /// Is there a module file called `name` next to the file being checked?
+    fn module_file_nearby(&self, name: &str) -> bool {
+        let dir = self.ns_paths[self.ns].as_ref().and_then(|p| p.parent());
+        dir.is_some_and(|d| d.join(format!("{name}.isma")).is_file())
+    }
+
+    /// A struct or enum known by its bare name in the current file: defined
+    /// here, or brought in with `from ... import`.
+    fn visible_struct(&mut self, name: &str) -> Option<StructId> {
+        if let Some(&sid) = self.struct_index.get(&(self.ns, name.to_string())) {
+            return Some(sid);
+        }
+        let n = self.names.get_mut(&(self.ns, name.to_string()))?;
+        let Imported::Struct(sid) = n.target else { return None };
+        n.used = true;
+        Some(sid)
+    }
+
+    /// A top-level function known by its bare name in the current file.
+    fn visible_func(&mut self, name: &str) -> Option<FuncId> {
+        if let Some(&fid) = self.func_index.get(&(self.ns, name.to_string())) {
+            return Some(fid);
+        }
+        let n = self.names.get_mut(&(self.ns, name.to_string()))?;
+        let Imported::Func(fid) = n.target else { return None };
+        n.used = true;
+        Some(fid)
     }
 
     fn hover(&mut self, span: Span, code: String, doc: Option<String>) {
@@ -449,40 +541,33 @@ impl Checker {
         let def = self.field_spans[sid][idx];
         self.hover(span, code, doc);
         self.ide.definitions.push((span, def));
+        self.check_field_privacy(sid, idx, span);
+    }
+
+    /// Fields named `_x` belong to the module that defines the struct.
+    fn check_field_privacy(&mut self, sid: StructId, idx: usize, span: Span) {
+        let name = &self.structs[sid].fields[idx].name;
+        if is_private(name) && self.struct_ns[sid] != self.ns {
+            let module = &self.ns_names[self.struct_ns[sid]];
+            self.err(
+                Diagnostic::error(format!("field `{name}` of `{}` is private", self.structs[sid].name), span)
+                    .with_primary("private field")
+                    .with_note(format!("names starting with `_` are internal to the `{module}` module")),
+            );
+        }
     }
 
     // ---------- declarations ----------
 
-    fn program(&mut self, units: &[(usize, &Program)]) -> Vec<TFunc> {
+    fn program(&mut self, units: &[(usize, &Program)], files: &[SourceFile]) -> Vec<TFunc> {
         // Pass 0: imports.
+        let mut pending: Vec<PendingName> = Vec::new();
         for &(ns, program) in units {
-            for item in &program.items {
-                let Item::Import(m) = item else { continue };
-                if let Some(prev) = self.imports.get(&(ns, m.name.clone())) {
-                    let prev_span = prev.span;
-                    self.err(
-                        Diagnostic::error(format!("`{}` is imported more than once", m.name), m.span)
-                            .with_label(prev_span, "first imported here"),
-                    );
-                    continue;
-                }
-                match self.module_ns.get(&m.name) {
-                    Some(&module_ns) => {
-                        self.imports.insert((ns, m.name.clone()), ImportInfo { module_ns, span: m.span, used: false });
-                        self.module_hover(module_ns, m.span);
-                        self.ide.imports.push((m.name.clone(), m.span));
-                    }
-                    None => {
-                        let names: Vec<&str> = crate::stdlib::MODULES.iter().map(|m| m.name).collect();
-                        let mut d = Diagnostic::error(format!("no module named `{}`", m.name), m.span)
-                            .with_primary("unknown module")
-                            .with_note(format!("available modules: {}", names.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", ")));
-                        if let Some(sugg) = suggest(&m.name, names.iter().copied()) {
-                            d = d.with_help(format!("did you mean `{sugg}`?"));
-                        }
-                        self.err(d);
-                    }
-                }
+            self.ns = ns;
+            let resolved = &files[ns].imports;
+            let imports = program.items.iter().filter_map(|i| if let Item::Import(im) = i { Some(im) } else { None });
+            for (im, r) in imports.zip(resolved) {
+                self.import(ns, im, r, &mut pending);
             }
         }
 
@@ -541,6 +626,9 @@ impl Checker {
                 self.pending_struct_hovers.push((name_id.span, id));
             }
         }
+
+        // `from m import Type`: types first, since signatures need them.
+        self.resolve_name_imports(&mut pending, false);
 
         // Pass 2: struct fields, function + method signatures.
         let mut bodies: Vec<(&FnDecl, Option<StructId>, usize)> = Vec::new();
@@ -664,6 +752,10 @@ impl Checker {
             }
         }
 
+        // `from m import function`, and names that don't exist.
+        self.resolve_name_imports(&mut pending, true);
+        self.import_conflicts();
+
         // `main` checks.
         match self.func_index.get(&(0, "main".to_string())) {
             None => self.err(
@@ -687,18 +779,260 @@ impl Checker {
         }
         self.ns = 0;
 
-        // Lint: unused imports.
-        let mut unused: Vec<(String, Span)> =
-            self.imports.iter().filter(|((ns, _), i)| *ns == 0 && !i.used).map(|((_, n), i)| (n.clone(), i.span)).collect();
-        unused.sort_by_key(|(_, s)| s.start);
-        for (name, span) in unused {
+        // Lint: unused imports (in the user's own files).
+        let mut unused: Vec<(String, Span, bool)> = self
+            .imports
+            .iter()
+            .filter(|((ns, _), i)| self.ns_kinds[*ns] != FileKind::Std && !i.used)
+            .map(|((_, n), i)| (n.clone(), i.span, i.whole_line))
+            .chain(
+                self.names
+                    .iter()
+                    .filter(|((ns, _), i)| self.ns_kinds[*ns] != FileKind::Std && !i.used)
+                    .map(|((_, n), i)| (n.clone(), i.span, false)),
+            )
+            .collect();
+        unused.sort_by_key(|(_, s, _)| s.start);
+        for (name, span, whole_line) in unused {
             self.diags.push(
                 Diagnostic::warning(format!("unused import `{name}`"), span)
                     .with_primary("never used")
-                    .with_help("remove this line"),
+                    .with_help(if whole_line { "remove this line" } else { "remove it from the import" }),
             );
         }
         out
+    }
+
+    /// Bind the names one `import` line brings into namespace `ns`.
+    fn import(&mut self, ns: usize, im: &Import, r: &Resolved, pending: &mut Vec<PendingName>) {
+        let path = im.path_text();
+        let path_span = im.path_span();
+        match &r.target {
+            Target::Missing { tried, nearby } => {
+                let mut d = Diagnostic::error(format!("no module named `{path}`"), path_span).with_primary("unknown module");
+                d = match tried.as_slice() {
+                    [] => d.with_note(format!("available modules: {}", nearby.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", "))),
+                    files => d.with_note(format!("there is no file `{}`", files.join("`, `"))),
+                };
+                let last = im.path.last().map(|i| i.name.as_str()).unwrap_or_default();
+                if let Some(sugg) = suggest(last, nearby.iter().map(|s| s.as_str())) {
+                    let fixed = path.rsplit_once('.').map(|(head, _)| format!("{head}.{sugg}")).unwrap_or(sugg);
+                    d = d.with_help(format!("did you mean `{fixed}`?"));
+                }
+                self.err(d);
+                self.fail_import(ns, im);
+                return;
+            }
+            Target::Dir(dir) if im.names.is_none() => {
+                let mut d = Diagnostic::error(format!("`{path}` is a folder, not a module"), path_span).with_primary("a folder");
+                d = match crate::project::module_names(dir).first().cloned() {
+                    Some(first) => d.with_help(format!("import a file inside it, e.g. `from {path} import {first}`")),
+                    None => d.with_note("it contains no `.isma` files"),
+                };
+                self.err(d);
+                self.fail_import(ns, im);
+                return;
+            }
+            &Target::File(t) if t == ns => {
+                self.err(Diagnostic::error("a module cannot import itself", path_span).with_primary("this file"));
+                self.fail_import(ns, im);
+                return;
+            }
+            _ => {}
+        }
+        let Some(names) = &im.names else {
+            let (Target::File(t), Some(binding)) = (&r.target, im.binding()) else { return };
+            let t = *t;
+            self.module_hover(t, path_span);
+            self.bind_module(ns, binding, t, im.span, true);
+            return;
+        };
+        for (i, n) in names.iter().enumerate() {
+            let binding = n.binding().clone();
+            if let Some(&Some(sub)) = r.submodules.get(i) {
+                if sub == ns {
+                    self.err(Diagnostic::error("a module cannot import itself", n.name.span).with_primary("this file"));
+                    self.failed_imports.insert((ns, binding.name.clone()));
+                    continue;
+                }
+                self.module_hover(sub, n.name.span);
+                self.bind_module(ns, &binding, sub, binding.span, false);
+                continue;
+            }
+            match &r.target {
+                Target::File(t) => pending.push(PendingName { ns, module_ns: *t, module: path.clone(), name: n.name.clone(), binding }),
+                Target::Dir(dir) => {
+                    let mut d = Diagnostic::error(format!("there is no module `{}` in `{path}`", n.name.name), n.name.span).with_primary("not found");
+                    let inside = crate::project::module_names(dir);
+                    if let Some(sugg) = suggest(&n.name.name, inside.iter().map(|s| s.as_str())) {
+                        d = d.with_help(format!("did you mean `{sugg}`?"));
+                    } else if !inside.is_empty() {
+                        d = d.with_note(format!("it has: {}", inside.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", ")));
+                    }
+                    self.err(d);
+                    self.failed_imports.insert((ns, binding.name.clone()));
+                }
+                Target::Missing { .. } => {}
+            }
+        }
+    }
+
+    /// The span of an earlier import of the same name into `ns`.
+    fn imported_before(&self, ns: usize, name: &str) -> Option<Span> {
+        let key = (ns, name.to_string());
+        self.imports.get(&key).map(|i| i.span).or_else(|| self.names.get(&key).map(|n| n.span))
+    }
+
+    /// `import geometry` / `from shapes import circle`: `binding` names module `module_ns` in `ns`.
+    fn bind_module(&mut self, ns: usize, binding: &Ident, module_ns: usize, span: Span, whole_line: bool) {
+        if let Some(prev) = self.imported_before(ns, &binding.name) {
+            self.err(
+                Diagnostic::error(format!("`{}` is imported more than once", binding.name), binding.span)
+                    .with_primary("imported again")
+                    .with_label(prev, "first imported here"),
+            );
+            return;
+        }
+        self.module_hover(module_ns, binding.span);
+        self.imports.insert((ns, binding.name.clone()), ImportInfo { module_ns, span, used: false, whole_line });
+        if ns == 0 {
+            self.ide.imports.push((binding.name.clone(), binding.span, module_ns));
+        }
+    }
+
+    /// Look up the names of `from m import a, b` once the declarations they
+    /// may refer to are known: types (`functions` false) or the rest.
+    fn resolve_name_imports(&mut self, pending: &mut Vec<PendingName>, functions: bool) {
+        for p in std::mem::take(pending) {
+            let key = (p.module_ns, p.name.name.clone());
+            let target = match (self.struct_index.get(&key), self.func_index.get(&key)) {
+                (Some(&sid), _) => Imported::Struct(sid),
+                (None, Some(&fid)) if functions => Imported::Func(fid),
+                (None, _) if !functions => {
+                    pending.push(p);
+                    continue;
+                }
+                (None, _) => {
+                    self.no_such_name(&p);
+                    continue;
+                }
+            };
+            self.bind_imported(&p, target);
+        }
+    }
+
+    /// `name` is not defined in `module_ns` but imported into it: say where it's from.
+    fn reexport_hint(&self, module_ns: usize, module: &str, name: &str) -> Option<String> {
+        let n = self.names.get(&(module_ns, name.to_string()))?;
+        let home = match n.target {
+            Imported::Struct(sid) => self.struct_ns[sid],
+            Imported::Func(fid) => self.ide.functions[fid].ns,
+        };
+        let from = &self.ns_names[home];
+        Some(format!("`{module}` imports `{name}` from the `{from}` module, but doesn't define it: import it from `{from}`"))
+    }
+
+    fn no_such_name(&mut self, p: &PendingName) {
+        self.failed_imports.insert((p.ns, p.binding.name.clone()));
+        let name = &p.name.name;
+        let mut d = Diagnostic::error(format!("module `{}` has no `{name}`", p.module), p.name.span).with_primary("not found");
+        if let Some(h) = self.reexport_hint(p.module_ns, &p.module, name) {
+            self.err(d.with_help(h));
+            return;
+        }
+        let candidates: Vec<String> = self
+            .func_index
+            .keys()
+            .chain(self.struct_index.keys())
+            .filter(|(ns, n)| *ns == p.module_ns && !is_private(n))
+            .map(|(_, n)| n.clone())
+            .collect();
+        if let Some(sugg) = suggest(name, candidates.iter().map(|s| s.as_str())) {
+            d = d.with_help(format!("did you mean `{sugg}`?"));
+        } else if let Some(sid) = self.struct_index.iter().find(|((ns, _), sid)| {
+            *ns == p.module_ns && self.structs[**sid].variants.as_ref().is_some_and(|vs| vs.iter().any(|v| &v.name == name))
+        }) {
+            let ename = sid.0.1.clone();
+            d = d.with_help(format!("`{name}` is a variant of the enum `{ename}`: import `{ename}` and write `{ename}.{name}`"));
+        }
+        self.err(d);
+    }
+
+    /// `from geometry import Point`: `Point` now names that struct in `p.ns`.
+    fn bind_imported(&mut self, p: &PendingName, target: Imported) {
+        let name = &p.name.name;
+        // A private name is still bound (marked used), so its uses don't cause more errors.
+        let private = is_private(name) && p.module_ns != p.ns;
+        if private {
+            self.err(
+                Diagnostic::error(format!("`{}.{name}` is private to the `{}` module", p.module, p.module), p.name.span)
+                    .with_primary("private")
+                    .with_note("names starting with `_` are internal to their module"),
+            );
+        }
+        if let Some(prev) = self.imported_before(p.ns, &p.binding.name) {
+            self.err(
+                Diagnostic::error(format!("`{}` is imported more than once", p.binding.name), p.binding.span)
+                    .with_primary("imported again")
+                    .with_label(prev, "first imported here"),
+            );
+            return;
+        }
+        let spans = if p.binding.span == p.name.span { vec![p.name.span] } else { vec![p.name.span, p.binding.span] };
+        for span in spans {
+            match target {
+                Imported::Struct(sid) => {
+                    self.pending_struct_hovers.push((span, sid));
+                    self.ide.definitions.push((span, self.struct_spans[sid]));
+                }
+                Imported::Func(fid) => {
+                    let f = &self.ide.functions[fid];
+                    let doc = Some(format!("from module `{}`{}", p.module, f.doc.as_ref().map(|d| format!("\n\n{d}")).unwrap_or_default()));
+                    let code = f.signature.clone();
+                    self.hover(span, code, doc);
+                    self.ide.definitions.push((span, self.funcs[fid].span));
+                }
+            }
+        }
+        self.names.insert((p.ns, p.binding.name.clone()), NameImport { target, span: p.binding.span, used: private });
+        if p.ns == 0 {
+            let kind = match target {
+                Imported::Struct(sid) => ImportedSymbol::Struct(sid),
+                Imported::Func(fid) => ImportedSymbol::Func(fid),
+            };
+            self.ide.imported.push((p.binding.name.clone(), kind));
+        }
+    }
+
+    /// An imported name that the file also defines itself.
+    fn import_conflicts(&mut self) {
+        let mut found: Vec<(Span, String, Span)> = Vec::new();
+        let defined = |c: &Checker, key: &(usize, String)| match (c.struct_index.get(key), c.func_index.get(key)) {
+            (Some(&sid), _) => Some(c.struct_spans[sid]),
+            (None, Some(&fid)) => Some(c.funcs[fid].span),
+            _ => None,
+        };
+        let keys: Vec<(usize, String)> = self.imports.keys().chain(self.names.keys()).cloned().collect();
+        for key in keys {
+            let Some(def) = defined(self, &key) else { continue };
+            // The local definition wins; don't also call the import unused.
+            if let Some(i) = self.imports.get_mut(&key) {
+                i.used = true;
+                found.push((i.span, key.1.clone(), def));
+            } else if let Some(n) = self.names.get_mut(&key) {
+                n.used = true;
+                found.push((n.span, key.1.clone(), def));
+            }
+        }
+        found.sort_by_key(|(s, _, _)| s.start);
+        for (span, name, def) in found {
+            self.err(
+                Diagnostic::error(format!("`{name}` is imported, but this file also defines `{name}`"), span)
+                    .with_primary("imported here")
+                    .with_label(def, "defined here")
+                    .with_help("rename one of them (an import can be renamed with `as`)"),
+            );
+        }
     }
 
     /// The methods of struct or enum `sid` (`fields`: names they may not reuse).
@@ -766,14 +1100,17 @@ impl Checker {
             None => Type::Unit,
         };
         let module = &self.ns_names[self.ns];
+        let msym = &self.ns_symbols[self.ns];
         let (name, symbol) = match owner {
             Some(sid) => {
                 let sname = &self.structs[sid].name;
-                (format!("{sname}.{}", f.name.name), format!("isma_m_{}_{}", sname.replace('.', "__"), f.name.name))
+                let short = sname.rsplit('.').next().unwrap_or(sname);
+                let symbol = if self.ns == 0 { format!("isma_m_{short}_{}", f.name.name) } else { format!("isma_m_{msym}__{short}_{}", f.name.name) };
+                (format!("{sname}.{}", f.name.name), symbol)
             }
             None if self.ns == 0 && f.name.name == "main" => ("main".into(), "isma_main".into()),
             None if self.ns == 0 => (f.name.name.clone(), format!("isma_fn_{}", f.name.name)),
-            None => (format!("{module}.{}", f.name.name), format!("isma_{module}__{}", f.name.name)),
+            None => (format!("{module}.{}", f.name.name), format!("isma_{msym}__{}", f.name.name)),
         };
         let sig = self.signature(&f.name.name, &params, &ret, owner.is_some());
         let comment = self.doc_comment(f.sig_span.start);
@@ -844,13 +1181,16 @@ impl Checker {
                 Type::List(Box::new(inner))
             }
             _ => {
-                if let Some(&sid) = self.struct_index.get(&(self.ns, name.to_string())) {
+                if let Some(sid) = self.visible_struct(name) {
                     self.ide.definitions.push((t.name.span, self.struct_spans[sid]));
                     self.pending_struct_hovers.push((t.name.span, sid));
                     if !expect_args(self, 0) {
                         return Type::Error;
                     }
                     return self.def_types[sid].clone();
+                }
+                if self.import_failed(name) {
+                    return Type::Error;
                 }
                 let mut d = Diagnostic::error(format!("cannot find type `{name}`"), t.name.span).with_primary("not found");
                 let hint = match name {
@@ -881,8 +1221,11 @@ impl Checker {
     /// `time.DateTime` in a type annotation.
     fn resolve_module_type(&mut self, m: &Ident, t: &TypeExpr) -> Type {
         let Some(module_ns) = self.imported_module(&m.name) else {
+            if self.import_failed(&m.name) {
+                return Type::Error;
+            }
             let mut d = Diagnostic::error(format!("`{}` is not an imported module", m.name), m.span);
-            if crate::stdlib::find(&m.name).is_some() {
+            if self.module_file_nearby(&m.name) || crate::stdlib::find(&m.name).is_some() {
                 d = d.with_help(format!("add `import {}` at the top of the file", m.name));
             }
             self.err(d);
@@ -893,6 +1236,7 @@ impl Checker {
         match self.struct_index.get(&(module_ns, name.clone())) {
             Some(&sid) if !is_private(name) || module_ns == self.ns => {
                 self.pending_struct_hovers.push((t.name.span, sid));
+                self.ide.definitions.push((t.name.span, self.struct_spans[sid]));
                 if !t.args.is_empty() {
                     self.err(Diagnostic::error(format!("type `{}.{name}` does not take type arguments", m.name), t.span));
                     return Type::Error;
@@ -961,7 +1305,7 @@ impl Checker {
             locals: std::mem::take(&mut self.locals),
             body,
             exported: sig.symbol == "isma_main",
-            track_caller: self.ns != 0,
+            track_caller: self.ns_kinds[self.ns] == FileKind::Std,
         }
     }
 
@@ -1758,6 +2102,12 @@ impl Checker {
         if let Type::Struct(_) = ty {
             let fields = self.structs[sid].fields.clone();
             let subs = self.field_patterns(&fields, args, &short, p.span, cx);
+            for (idx, sub) in subs.iter().enumerate() {
+                if !matches!(sub.kind, TPatKind::Wild) && is_private(&fields[idx].name) && self.struct_ns[sid] != self.ns {
+                    self.check_field_privacy(sid, idx, p.span);
+                    cx.errors = true;
+                }
+            }
             return TPat { kind: TPatKind::Struct(sid, subs), ty: ty.clone() };
         }
         let variants = self.structs[sid].variants().to_vec();
@@ -1790,7 +2140,7 @@ impl Checker {
     /// Does `path` (`Shape`, `time.Month`) name the struct or enum `sid`? Adds hovers when it does.
     fn names_type(&mut self, path: &[Ident], sid: StructId) -> bool {
         let found = match path {
-            [name] => self.struct_index.get(&(self.ns, name.name.clone())).copied(),
+            [name] => self.visible_struct(&name.name),
             [module, name] => self.imported_module(&module.name).and_then(|m| self.struct_index.get(&(m, name.name.clone())).copied()),
             _ => None,
         };
@@ -1871,7 +2221,7 @@ impl Checker {
     /// `Shape` or `module.Shape`, when an expression names an enum (to build a variant).
     fn enum_ref(&mut self, e: &Expr) -> Option<StructId> {
         let sid = match &e.kind {
-            ExprKind::Name(n) if self.lookup(n).is_none() => self.struct_index.get(&(self.ns, n.clone())).copied()?,
+            ExprKind::Name(n) if self.lookup(n).is_none() => self.visible_struct(n)?,
             ExprKind::Field(m, n) => {
                 let ExprKind::Name(mn) = &m.kind else { return None };
                 if self.lookup(mn).is_some() || !self.imports.contains_key(&(self.ns, mn.clone())) {
@@ -2304,11 +2654,14 @@ impl Checker {
                     );
                     return Self::error_expr(span);
                 }
-                let d = if self.func_index.contains_key(&(self.ns, name.clone())) || BUILTINS.contains(&name.as_str()) {
+                if self.import_failed(name) {
+                    return Self::error_expr(span);
+                }
+                let d = if self.visible_func(name).is_some() || BUILTINS.contains(&name.as_str()) {
                     Diagnostic::error(format!("`{name}` is a function, not a value"), span)
                         .with_help(format!("call it: `{name}(...)`"))
                         .with_note("functions are not first-class values yet")
-                } else if let Some(&sid) = self.struct_index.get(&(self.ns, name.clone())) {
+                } else if let Some(sid) = self.visible_struct(name) {
                     match self.structs[sid].variants() {
                         [] if self.structs[sid].variants.is_none() => {
                             Diagnostic::error(format!("`{name}` is a struct, not a value"), span).with_help(format!("construct one with `{name}(...)`"))
@@ -2322,6 +2675,10 @@ impl Checker {
                     let hint = match name.as_str() {
                         "True" => Some("true".to_string()),
                         "False" => Some("false".to_string()),
+                        _ if self.module_file_nearby(name) => {
+                            d = d.with_help(format!("`{name}.isma` is a module next to this file: add `import {name}` at the top"));
+                            None
+                        }
                         _ if crate::stdlib::find(name).is_some() => {
                             d = d.with_help(format!("`{name}` is a standard-library module: add `import {name}` at the top of the file"));
                             None
@@ -2820,9 +3177,14 @@ impl Checker {
                     }
                     return Self::error_expr(span);
                 }
-                if let Some(&fid) = self.func_index.get(&(self.ns, name.clone())) {
+                if let Some(fid) = self.visible_func(name) {
                     let code = self.ide.functions[fid].signature.clone();
-                    self.hover(callee.span, code, None);
+                    let fns = self.ide.functions[fid].ns;
+                    let doc = (fns != self.ns).then(|| {
+                        let d = self.ide.functions[fid].doc.as_ref().map(|d| format!("\n\n{d}")).unwrap_or_default();
+                        format!("from module `{}`{d}", self.ns_names[fns])
+                    });
+                    self.hover(callee.span, code, doc);
                     self.ide.definitions.push((callee.span, self.funcs[fid].span));
                     let params = self.funcs[fid].params.clone();
                     let ret = self.funcs[fid].ret.clone();
@@ -2832,28 +3194,10 @@ impl Checker {
                         None => Self::mk(TExprKind::Int(0), if ret == Type::Unit { Type::Unit } else { Type::Error }, span),
                     };
                 }
-                if let Some(&sid) = self.struct_index.get(&(self.ns, name.clone())) {
-                    self.pending_struct_hovers.push((callee.span, sid));
-                    self.ide.definitions.push((callee.span, self.struct_spans[sid]));
-                    if let Some(first) = self.structs[sid].variants.as_ref().map(|vs| vs.first().map(|v| v.name.clone()).unwrap_or_default()) {
-                        self.err(
-                            Diagnostic::error(format!("`{name}` is an enum: a value is one of its variants"), callee.span)
-                                .with_primary("not a constructor")
-                                .with_help(format!("build a variant, e.g. `{name}.{first}(...)`")),
-                        );
-                        for a in args {
-                            let _ = self.expr(&a.value, None);
-                        }
-                        return Self::error_expr(span);
-                    }
-                    let params: Vec<(String, Type)> = self.structs[sid].fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect();
-                    let what = format!("struct `{name}`");
-                    return match self.match_args(&what, &params, args, span) {
-                        Some(targs) => Self::mk(TExprKind::StructNew(sid, targs), Type::Struct(sid), span),
-                        None => Self::mk(TExprKind::Int(0), Type::Struct(sid), span),
-                    };
+                if let Some(sid) = self.visible_struct(name) {
+                    return self.construct(sid, name, callee.span, args, span);
                 }
-                if self.ns != 0 && crate::stdlib::INTRINSICS.iter().any(|(n, _, _)| n == name) {
+                if self.ns_kinds[self.ns] == FileKind::Std && crate::stdlib::INTRINSICS.iter().any(|(n, _, _)| n == name) {
                     return self.intrinsic_call(name, args, span);
                 }
                 if BUILTINS.contains(&name.as_str()) {
@@ -2861,6 +3205,12 @@ impl Checker {
                         self.hover(callee.span, code.to_string(), Some(doc.to_string()));
                     }
                     return self.builtin_call(name, args, span);
+                }
+                if self.import_failed(name) {
+                    for a in args {
+                        let _ = self.expr(&a.value, None);
+                    }
+                    return Self::error_expr(span);
                 }
                 let mut d = Diagnostic::error(format!("cannot find function `{name}` in this scope"), callee.span).with_primary("not found");
                 let ns = self.ns;
@@ -2927,6 +3277,56 @@ impl Checker {
         }
     }
 
+    /// `Point(1, 2)` / `geometry.Point(1, 2)`: build struct `sid` (`name` as written).
+    fn construct(&mut self, sid: StructId, name: &str, name_span: Span, args: &[Arg], span: Span) -> TExpr {
+        self.pending_struct_hovers.push((name_span, sid));
+        self.ide.definitions.push((name_span, self.struct_spans[sid]));
+        let sns = self.struct_ns[sid];
+        let refuse = |c: &mut Checker, d: Diagnostic| {
+            c.err(d);
+            for a in args {
+                let _ = c.expr(&a.value, None);
+            }
+            Self::error_expr(span)
+        };
+        if let Some(first) = self.structs[sid].variants.as_ref().map(|vs| vs.first().map(|v| v.name.clone()).unwrap_or_default()) {
+            return refuse(
+                self,
+                Diagnostic::error(format!("`{name}` is an enum: a value is one of its variants"), name_span)
+                    .with_primary("not a constructor")
+                    .with_help(format!("build a variant, e.g. `{name}.{first}(...)`")),
+            );
+        }
+        let private: Vec<String> = self.structs[sid].fields.iter().filter(|f| is_private(&f.name)).map(|f| format!("`{}`", f.name)).collect();
+        if sns != self.ns && (self.ns_kinds[sns] == FileKind::Std || !private.is_empty()) {
+            let module = self.ns_names[sns].clone();
+            let full = self.structs[sid].name.clone();
+            let ctor_fns: Vec<String> = self
+                .ide
+                .functions
+                .iter()
+                .filter(|f| f.ns == sns && f.owner.is_none() && !is_private(&f.name) && f.signature.ends_with(&format!("-> {full}")))
+                .map(|f| if f.signature.contains("()") { format!("`{module}.{}()`", f.name) } else { format!("`{module}.{}(...)`", f.name) })
+                .collect();
+            let note = if self.ns_kinds[sns] == FileKind::Std {
+                format!("structs from the `{module}` module are created by its functions, which validate the values")
+            } else {
+                format!("it has private fields ({}), so only the `{module}` module can create one", and_list(&private))
+            };
+            let mut d = Diagnostic::error(format!("`{full}` cannot be constructed directly"), name_span).with_primary("not constructible here").with_note(note);
+            if !ctor_fns.is_empty() {
+                d = d.with_help(format!("use {}", ctor_fns.join(", ")));
+            }
+            return refuse(self, d);
+        }
+        let params: Vec<(String, Type)> = self.structs[sid].fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect();
+        let what = format!("struct `{name}`");
+        match self.match_args(&what, &params, args, span) {
+            Some(targs) => Self::mk(TExprKind::StructNew(sid, targs), Type::Struct(sid), span),
+            None => Self::mk(TExprKind::Int(0), Type::Struct(sid), span),
+        }
+    }
+
     fn first_module_fn(&self, module_ns: usize) -> String {
         let mut names: Vec<&String> = self
             .func_index
@@ -2956,6 +3356,7 @@ impl Checker {
             let code = f.signature.clone();
             let doc = Some(format!("in module `{module}`{}", f.doc.as_ref().map(|d| format!("\n\n{d}")).unwrap_or_default()));
             self.hover(func.span, code, doc);
+            self.ide.definitions.push((func.span, self.funcs[fid].span));
             let params = self.funcs[fid].params.clone();
             let ret = self.funcs[fid].ret.clone();
             let what = format!("function `{module}.{}`", func.name);
@@ -2965,24 +3366,14 @@ impl Checker {
             };
         }
         if let Some(&sid) = self.struct_index.get(&key) {
-            self.pending_struct_hovers.push((func.span, sid));
-            let ctor_fns: Vec<String> = self
-                .ide
-                .functions
-                .iter()
-                .filter(|f| f.ns == module_ns && f.owner.is_none() && !is_private(&f.name) && f.signature.ends_with(&format!("-> {}", self.structs[sid].name)))
-                .map(|f| if f.signature.contains("()") { format!("`{module}.{}()`", f.name) } else { format!("`{module}.{}(...)`", f.name) })
-                .collect();
-            let mut d = Diagnostic::error(format!("`{module}.{}` cannot be constructed directly", func.name), func.span)
-                .with_note(format!("structs from the `{module}` module are created by its functions, which validate the values"));
-            if !ctor_fns.is_empty() {
-                d = d.with_help(format!("use {}", ctor_fns.join(", ")));
+            if is_private(&func.name) && module_ns != self.ns {
+                self.err(Diagnostic::error(format!("`{module}.{}` is private to the `{module}` module", func.name), func.span).with_primary("private"));
+                for a in args {
+                    let _ = self.expr(&a.value, None);
+                }
+                return Self::error_expr(span);
             }
-            self.err(d);
-            for a in args {
-                let _ = self.expr(&a.value, None);
-            }
-            return Self::error_expr(span);
+            return self.construct(sid, &format!("{module}.{}", func.name), func.span, args, span);
         }
         let candidates: Vec<String> = self
             .func_index
@@ -2991,7 +3382,9 @@ impl Checker {
             .map(|((_, n), _)| n.clone())
             .collect();
         let mut d = Diagnostic::error(format!("module `{module}` has no function `{}`", func.name), func.span).with_primary("not found");
-        if let Some(sugg) = suggest(&func.name, candidates.iter().map(|s| s.as_str())) {
+        if let Some(h) = self.reexport_hint(module_ns, module, &func.name) {
+            d = d.with_help(h);
+        } else if let Some(sugg) = suggest(&func.name, candidates.iter().map(|s| s.as_str())) {
             d = d.with_help(format!("did you mean `{module}.{sugg}`?"));
         }
         self.err(d);

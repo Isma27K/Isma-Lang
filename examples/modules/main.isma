@@ -1,0 +1,5 @@
+# A program in two files: run it with `isma examples/modules/main.isma`.
+from geometry import Point, dist             # or `import geometry`, then `geometry.dist(...)`
+
+fn main():
+    print(dist(Point(0.0, 0.0), Point(3.0, 4.0)))

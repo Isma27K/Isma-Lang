@@ -179,26 +179,14 @@ impl Parser {
                     Ok(e) => items.push(Item::Enum(e)),
                     Err(()) => self.synchronize(),
                 },
-                Tok::Import => {
-                    self.bump();
-                    match self.expect_ident("a module name, e.g. `import time`") {
-                        Ok(name) => {
-                            if self.at(&Tok::Dot) || self.at(&Tok::Comma) {
-                                let span = self.span();
-                                self.diags.push(
-                                    Diagnostic::error("import one module per line", span)
-                                        .with_help("write `import time` on its own line"),
-                                );
-                                self.synchronize();
-                            } else if self.expect_newline().is_ok() {
-                                items.push(Item::Import(name));
-                            } else {
-                                self.synchronize();
-                            }
-                        }
-                        Err(()) => self.synchronize(),
-                    }
-                }
+                Tok::Import => match self.import_decl() {
+                    Ok(i) => items.push(Item::Import(i)),
+                    Err(()) => self.synchronize(),
+                },
+                Tok::Ident(n) if n == "from" && matches!(self.peek_nth(1), Tok::Ident(_) | Tok::Dot | Tok::DotDot) => match self.parse_from_import() {
+                    Ok(i) => items.push(Item::Import(i)),
+                    Err(()) => self.synchronize(),
+                },
                 Tok::Indent => {
                     let span = self.span();
                     self.diags.push(Diagnostic::error("unexpected indentation", span));
@@ -228,6 +216,103 @@ impl Parser {
             }
         }
         Program { items }
+    }
+
+    /// `import time`, `import shapes.circle`, `import geometry as geo`
+    fn import_decl(&mut self) -> PResult<Import> {
+        let start = self.expect(Tok::Import)?;
+        if self.at(&Tok::Dot) || self.at(&Tok::DotDot) {
+            let span = self.span();
+            return self.error_diag(
+                Diagnostic::error("relative imports use `from`", span)
+                    .with_primary("not allowed after `import`")
+                    .with_help("write `from . import name` (this folder) or `from .. import name` (the folder above)"),
+            );
+        }
+        let path = self.module_path("a module name, e.g. `import time`")?;
+        if self.at(&Tok::Comma) {
+            let span = self.span();
+            return self.error_diag(
+                Diagnostic::error("import one module per line", span).with_help("write each `import` on its own line"),
+            );
+        }
+        let alias = self.import_alias()?;
+        let span = start.merge(self.prev_span);
+        self.expect_newline()?;
+        Ok(Import { level: 0, path, alias, names: None, span })
+    }
+
+    /// `from geometry import Point, area as a`, `from .. import util`
+    fn parse_from_import(&mut self) -> PResult<Import> {
+        let start = self.bump().span; // `from`
+        // `..` lexes as one token (the range operator).
+        let mut level = 0;
+        loop {
+            match self.peek() {
+                Tok::Dot => level += 1,
+                Tok::DotDot => level += 2,
+                _ => break,
+            }
+            self.bump();
+        }
+        let path = if level > 0 && self.at(&Tok::Import) { Vec::new() } else { self.module_path("a module name after `from`")? };
+        if !self.at(&Tok::Import) {
+            return self.unexpected("`import`");
+        }
+        self.bump();
+        if self.at(&Tok::Star) {
+            let span = self.span();
+            return self.error_diag(
+                Diagnostic::error("`import *` is not supported", span)
+                    .with_primary("name what you need instead")
+                    .with_help("name what you use, e.g. `from geometry import Point, area`, or import the module: `import geometry`"),
+            );
+        }
+        let parens = self.eat(&Tok::LParen);
+        let mut names = Vec::new();
+        loop {
+            if parens && self.at(&Tok::RParen) && !names.is_empty() {
+                break;
+            }
+            let name = self.expect_ident("a name to import")?;
+            let alias = self.import_alias()?;
+            names.push(ImportName { name, alias });
+            if !self.eat(&Tok::Comma) {
+                break;
+            }
+            if !parens && matches!(self.peek(), Tok::Newline | Tok::Eof) {
+                break; // trailing comma
+            }
+        }
+        if parens {
+            self.expect(Tok::RParen)?;
+        }
+        let span = start.merge(self.prev_span);
+        self.expect_newline()?;
+        Ok(Import { level, path, alias: None, names: Some(names), span })
+    }
+
+    /// Is there an `import` keyword before the end of the current line?
+    fn import_on_this_line(&self) -> bool {
+        self.tokens[self.pos..].iter().take_while(|t| !matches!(t.tok, Tok::Newline | Tok::Eof)).any(|t| matches!(t.tok, Tok::Import))
+    }
+
+    /// `a.b.c`
+    fn module_path(&mut self, what: &str) -> PResult<Vec<Ident>> {
+        let mut path = vec![self.expect_ident(what)?];
+        while self.eat(&Tok::Dot) {
+            path.push(self.expect_ident("a module name after `.`")?);
+        }
+        Ok(path)
+    }
+
+    /// `as name`
+    fn import_alias(&mut self) -> PResult<Option<Ident>> {
+        if matches!(self.peek(), Tok::Ident(n) if n == "as") {
+            self.bump();
+            return Ok(Some(self.expect_ident("a name after `as`")?));
+        }
+        Ok(None)
     }
 
     fn fn_decl(&mut self) -> PResult<FnDecl> {
@@ -487,6 +572,13 @@ impl Parser {
             && let Some(m) = self.try_match_stmt()
         {
             return m;
+        }
+        if matches!(self.peek(), Tok::Ident(n) if n == "from") && self.import_on_this_line() {
+            let span = self.span();
+            return self.error_diag(
+                Diagnostic::error("`import` must be at the top level of the file", span)
+                    .with_help("move it to the top of the file, above your functions"),
+            );
         }
         match self.peek() {
             Tok::Val | Tok::Var => self.let_stmt(),

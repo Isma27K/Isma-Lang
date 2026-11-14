@@ -40,11 +40,11 @@ text{font-family:system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif}
 <text class="t" x="1060.0" y="117" text-anchor="middle" font-size="13.5" font-weight="600">native binary</text>
 <text class="m" x="1060.0" y="135" text-anchor="middle" font-size="11.5">runs on its own</text>
 <path class="a" d="M982 121.0L996 121.0" marker-end="url(#ah)"/>
-<rect class="box" x="230.0" y="8" width="120" height="58" rx="9"/>
-<text class="t" x="290.0" y="33" text-anchor="middle" font-size="13.5" font-weight="600">stdlib/time.isma</text>
-<text class="m" x="290.0" y="51" text-anchor="middle" font-size="11.5">written in Isma</text>
+<rect class="box" x="205.0" y="8" width="170" height="58" rx="9"/>
+<text class="t" x="290.0" y="33" text-anchor="middle" font-size="13.5" font-weight="600">imported .isma files</text>
+<text class="m" x="290.0" y="51" text-anchor="middle" font-size="11.5">yours + the stdlib</text>
 <path class="a" d="M290.0 68L290.0 88" marker-end="url(#ah)"/>
-<text class="m" x="298.0" y="82.0" font-size="11.5">import time</text>
+<text class="m" x="298.0" y="82.0" font-size="11.5">import</text>
 <rect class="box" x="440" y="192" width="120" height="58" rx="9"/>
 <text class="t" x="500.0" y="217" text-anchor="middle" font-size="13.5" font-weight="600">isma lsp</text>
 <text class="m" x="500.0" y="235" text-anchor="middle" font-size="11.5">language server</text>

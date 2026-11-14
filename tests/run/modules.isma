@@ -1,0 +1,45 @@
+# Importing your own files: a folder of modules, `from` imports, aliases,
+# `..`, two modules that import each other, and two modules with the same
+# file name. The modules live in `mylib/`.
+import mylib.geometry
+import mylib.geometry as geo
+from mylib.geometry import Point, Shape as S, origin
+from mylib import parity
+from mylib.shapes import registry
+from mylib.shapes.registry import Registry, biggest
+from mylib import util
+from mylib.shapes import util as shape_util
+
+fn main():
+    val p = Point(3.0, 4.0)
+    print(p.dist(origin()))
+    val c = geometry.Shape.Circle(p, 2.0)
+    val r = S.Rect(geo.Point(0.0, 0.0), 2.0, 5.0)
+    print(c.area())
+    print(r.area())
+
+    val reg = Registry([])
+    reg.add(c)
+    reg.add(r)
+    reg.add(S.Empty)
+    reg.add(registry.unit_square())
+    print(reg.total_area())
+    print(reg.describe())
+    print(reg.count())
+    print(biggest(reg.shapes)?.name() ?: "none")
+    print(biggest([])?.name() ?: "none")
+
+    match r:
+        case S.Rect(corner, w, h):
+            print(f"rect at {corner.x},{corner.y}: {w} x {h}")
+        case geometry.Shape.Circle(center=c0):
+            print(c0.x)
+        case _:
+            pass
+
+    print(parity.is_even(10))
+    print(parity.is_even(7))
+    print(util.make().first)
+    print(shape_util.make().first)
+    print(util.make().second + shape_util.make().second)
+    print(registry.epoch_year())

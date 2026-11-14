@@ -1,4 +1,5 @@
-use isma::diagnostics::{self, Diagnostic};
+use isma::diagnostics::{self, Diagnostic, RenderFile};
+use isma::project::Project;
 use isma::driver::{self, BuildOptions};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
@@ -138,18 +139,21 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
         unsafe { std::env::set_var("ISMA_ARC_STATS", "1") };
     }
 
+    // The script and every file it imports (parsing them is fast).
+    let project = isma::load_file(&file, &display_path, &src);
+
     if cli.command == "check" {
-        return match isma::check_source(&src) {
+        return match isma::check_project(&project) {
             Ok(checked) => {
-                report_warnings(&checked.warnings, &display_path, &src);
+                report_warnings(&checked.warnings, &project);
                 Ok(ExitCode::SUCCESS)
             }
-            Err(d) => Ok(report(&d, &display_path, &src)),
+            Err(d) => Ok(report(&d, &project)),
         };
     }
 
-    // Fast path: an unchanged script that was already compiled runs immediately.
-    let cached = if cli.command == "run" { driver::cached_program_path(&file, &src, &display_path, &opts) } else { None };
+    // Fast path: an unchanged script (imports included) that was already compiled runs immediately.
+    let cached = if cli.command == "run" { driver::cached_program_path(&file, &project.fingerprint(), &opts) } else { None };
     if let Some((exe, _)) = &cached
         && exe.is_file() {
             return run_program(exe, &file, &cli.program_args);
@@ -157,12 +161,12 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
 
     let clang = driver::find_clang()?;
     let triple = driver::target_triple(&clang);
-    let (ir, mir) = match isma::compile(&src, &display_path, triple.as_deref()) {
+    let (ir, mir) = match isma::compile_project(&project, triple.as_deref()) {
         Ok(c) => {
-            report_warnings(&c.warnings, &display_path, &src);
+            report_warnings(&c.warnings, &project);
             (c.ir, c.mir)
         }
-        Err(d) => return Ok(report(&d, &display_path, &src)),
+        Err(d) => return Ok(report(&d, &project)),
     };
 
     if cli.command == "build" {
@@ -242,22 +246,26 @@ fn plural(n: usize, word: &str) -> String {
     if n == 1 { format!("{n} {word}") } else { format!("{n} {word}s") }
 }
 
-fn render_sorted(diags: &[Diagnostic], path: &str, src: &str) {
+/// Render diagnostics in source order (the entry file first, then the files it imports).
+fn render_sorted(diags: &[Diagnostic], project: &Project) {
     let mut sorted = diags.to_vec();
     sorted.sort_by_key(|d| (d.span.start, !d.is_error()));
-    eprint!("{}", diagnostics::render(&sorted, path, src, color_enabled()));
+    let files: Vec<RenderFile> = project.files.iter().map(|f| RenderFile { name: &f.display, base: f.base, text: &f.text }).collect();
+    eprint!("{}", diagnostics::render_files(&sorted, &files, color_enabled()));
 }
 
-fn report_warnings(warnings: &[Diagnostic], path: &str, src: &str) {
+fn report_warnings(warnings: &[Diagnostic], project: &Project) {
     if warnings.is_empty() {
         return;
     }
-    render_sorted(warnings, path, src);
+    render_sorted(warnings, project);
+    let path = &project.files[0].display;
     eprintln!("{} `{path}` generated {}", yellow("warning:"), plural(warnings.len(), "warning"));
 }
 
-fn report(diags: &[Diagnostic], path: &str, src: &str) -> ExitCode {
-    render_sorted(diags, path, src);
+fn report(diags: &[Diagnostic], project: &Project) -> ExitCode {
+    render_sorted(diags, project);
+    let path = &project.files[0].display;
     let errors = diags.iter().filter(|d| d.is_error()).count();
     let warnings = diags.len() - errors;
     let extra = if warnings > 0 { format!("; {} emitted", plural(warnings, "warning")) } else { String::new() };

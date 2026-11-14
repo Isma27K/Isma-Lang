@@ -1,0 +1,4 @@
+# expect-error: fail/modules/nosuch.isma`
+import modules.nosuch
+fn main():
+    pass

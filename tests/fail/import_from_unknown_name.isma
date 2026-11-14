@@ -1,0 +1,4 @@
+# expect-error: module `modules.lib` has no `Thingy`
+from modules.lib import Thingy
+fn main():
+    pass

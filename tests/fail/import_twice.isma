@@ -1,0 +1,5 @@
+# expect-error: `lib` is imported more than once
+import modules.lib
+from modules import lib
+fn main():
+    print(lib.helper())

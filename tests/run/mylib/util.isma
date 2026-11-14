@@ -1,0 +1,7 @@
+# Same file name as `shapes/util.isma`: two different modules.
+struct Pair:
+    first: String
+    second: Int
+
+fn make() -> Pair:
+    return Pair("top-level util", 1)

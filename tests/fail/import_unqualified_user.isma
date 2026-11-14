@@ -1,0 +1,4 @@
+# expect-error: did you mean `lib.helper`?
+import modules.lib
+fn main():
+    print(helper())

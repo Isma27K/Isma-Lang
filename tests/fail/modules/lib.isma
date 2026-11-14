@@ -1,0 +1,23 @@
+# Helpers for the import tests in `tests/fail`.
+
+struct Thing:
+    name: String
+
+struct Counter:
+    var _count: Int
+
+    fn bump(self):
+        self._count += 1
+
+enum Color:
+    Red
+    Green
+
+fn helper() -> Int:
+    return 1
+
+fn new_counter() -> Counter:
+    return Counter(0)
+
+fn _secret() -> Int:
+    return 42

@@ -1,0 +1,4 @@
+# expect-error: a module cannot import itself
+import import_self
+fn main():
+    pass

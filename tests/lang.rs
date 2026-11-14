@@ -265,6 +265,26 @@ fn cache_reuses_and_invalidates() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn cache_rebuilds_when_an_imported_file_changes() {
+    let dir = scratch("cache-imports");
+    let cache = dir.join("cache");
+    let (main, helper) = (dir.join("main.isma"), dir.join("helper.isma"));
+    let run = || Command::new(ISMA).arg(&main).env("ISMA_CACHE_DIR", &cache).output().unwrap();
+    std::fs::write(&main, "from helper import value\nfn main():\n    print(value())\n").unwrap();
+    std::fs::write(&helper, "fn value() -> Int:\n    return 1\n").unwrap();
+    assert_eq!(String::from_utf8_lossy(&run().stdout), "1\n");
+    std::fs::write(&helper, "fn value() -> Int:\n    return 2\n").unwrap();
+    assert_eq!(String::from_utf8_lossy(&run().stdout), "2\n");
+    // An error in the imported file is shown in that file.
+    std::fs::write(&helper, "fn value() -> Int:\n    return \"3\"\n").unwrap();
+    let out = run();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr.contains("helper.isma:2:12") && stderr.contains("mismatched types"), "{stderr}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[cfg(unix)]
 #[test]
 fn shebang_scripts_run_directly() {
@@ -476,4 +496,61 @@ fn language_server_understands_enums() {
     assert_eq!(shape["kind"], 10); // ENUM
     assert_eq!(shape["children"][0]["name"], "Circle");
     lsp.stop();
+}
+
+#[test]
+fn language_server_works_across_files() {
+    let dir = scratch("lsp-modules");
+    let geometry = dir.join("geometry.isma");
+    let geometry_text = "# Shapes and sizes.\n\nstruct Point:\n    x: Float\n    y: Float\n\n# The distance from the origin.\nfn norm(p: Point) -> Float:\n    return sqrt(p.x * p.x + p.y * p.y)\n\nfn _helper() -> Int:\n    return 1\n";
+    std::fs::write(&geometry, geometry_text).unwrap();
+    let main_text = "import geometry as geo\nfrom geometry import Point, norm\n\nfn main():\n    val p = Point(3.0, 4.0)\n    print(norm(p))\n    print(geo.norm(p))\n";
+    let main = dir.join("main.isma");
+    std::fs::write(&main, main_text).unwrap();
+    let uri = |p: &Path| format!("file://{}", p.display());
+    let (main_uri, geometry_uri) = (uri(&main), uri(&geometry));
+    let mut lsp = Lsp::start();
+    let diags = lsp.open(&main_uri, main_text);
+    let messages: Vec<&str> = diags["params"]["diagnostics"].as_array().unwrap().iter().map(|d| d["message"].as_str().unwrap()).collect();
+    assert!(messages.iter().all(|m| !m.contains("module")), "{messages:?}");
+    // Hover on an imported function shows where it comes from.
+    let hover = lsp.at("textDocument/hover", &main_uri, 5, 11);
+    let shown = hover["result"]["contents"]["value"].as_str().unwrap();
+    assert!(shown.contains("fn norm(p: geometry.Point) -> Float") && shown.contains("from module `geometry`"), "{shown}");
+    // Go to definition jumps into the other file.
+    let def = lsp.at("textDocument/definition", &main_uri, 6, 15);
+    assert_eq!(def["result"]["uri"], geometry_uri.as_str(), "{def}");
+    assert_eq!(def["result"]["range"]["start"]["line"], 7);
+    let def = lsp.at("textDocument/definition", &main_uri, 0, 10);
+    assert_eq!(def["result"]["uri"], geometry_uri.as_str(), "{def}");
+    // Editing the module (unsaved) re-checks the file that imports it.
+    lsp.open(&geometry_uri, &geometry_text.replace("return sqrt(p.x * p.x + p.y * p.y)", "return \"far\""));
+    let republished = loop {
+        let msg = lsp.recv();
+        if msg["method"] == "textDocument/publishDiagnostics" && msg["params"]["uri"] == main_uri.as_str() {
+            break msg;
+        }
+    };
+    let errors = republished["params"]["diagnostics"].as_array().unwrap();
+    let import_error = errors.iter().find(|d| d["message"].as_str().unwrap().contains("an imported file has an error")).unwrap_or_else(|| panic!("{republished}"));
+    assert_eq!(import_error["range"]["start"]["line"], 0);
+    assert!(import_error["message"].as_str().unwrap().contains("geometry.isma:9:12: mismatched types"), "{import_error}");
+    lsp.stop();
+
+    // Completion inside `import` lines, in a fresh session (the files on disk).
+    let mut lsp = Lsp::start();
+    let text = "import \nfrom geometry import \nimport geometry as geo\nfn main():\n    geo.\n";
+    lsp.open(&main_uri, text);
+    // `geo.` lists the module's public names, through the alias.
+    let items = lsp.at("textDocument/completion", &main_uri, 4, 8);
+    let labels: Vec<&str> = items["result"].as_array().unwrap().iter().map(|i| i["label"].as_str().unwrap()).collect();
+    assert!(labels.contains(&"norm") && labels.contains(&"Point") && !labels.contains(&"_helper"), "{labels:?}");
+    let items = lsp.at("textDocument/completion", &main_uri, 0, 7);
+    let labels: Vec<&str> = items["result"].as_array().unwrap().iter().map(|i| i["label"].as_str().unwrap()).collect();
+    assert!(labels.contains(&"geometry") && labels.contains(&"time") && !labels.contains(&"main"), "{labels:?}");
+    let items = lsp.at("textDocument/completion", &main_uri, 1, 21);
+    let labels: Vec<&str> = items["result"].as_array().unwrap().iter().map(|i| i["label"].as_str().unwrap()).collect();
+    assert!(labels.contains(&"Point") && labels.contains(&"norm") && !labels.contains(&"_helper"), "{labels:?}");
+    lsp.stop();
+    let _ = std::fs::remove_dir_all(&dir);
 }

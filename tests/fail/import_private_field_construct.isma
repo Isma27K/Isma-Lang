@@ -1,0 +1,5 @@
+# expect-error: it has private fields (`_count`), so only the `lib` module can create one
+from modules.lib import Counter
+fn main():
+    val c = Counter(5)
+    c.bump()

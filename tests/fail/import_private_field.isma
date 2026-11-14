@@ -1,0 +1,6 @@
+# expect-error: field `_count` of `lib.Counter` is private
+import modules.lib
+fn main():
+    val c = lib.new_counter()
+    c.bump()
+    print(c._count)

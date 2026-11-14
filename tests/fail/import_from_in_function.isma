@@ -1,0 +1,4 @@
+# expect-error: `import` must be at the top level of the file
+fn main():
+    from modules.lib import helper
+    print(helper())

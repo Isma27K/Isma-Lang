@@ -1,0 +1,6 @@
+from parity import is_even
+
+fn is_odd(n: Int) -> Bool:
+    if n == 0:
+        return false
+    return is_even(n - 1)

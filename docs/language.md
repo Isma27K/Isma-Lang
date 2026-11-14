@@ -18,6 +18,8 @@ Isma reads like Python, checks like Kotlin and compiles to native code. This gui
 - [Null safety](#null-safety)
 - [Memory](#memory)
 - [Modules: `import`](#modules-import)
+  - [Your own files](#your-own-files)
+  - [The standard library](#the-standard-library)
 - [Built-in functions](#built-in-functions)
 - [Panics](#panics)
 - [Known limitations](#known-limitations)
@@ -114,7 +116,7 @@ Warnings never stop a program from compiling. They point at code that is probabl
 | `unused variable` / `unused parameter` / `unused loop variable` | Remove it, or start the name with `_` |
 | `` `x` is declared `var` but never reassigned `` | Use `val`. (`val` still lets you change a list's contents or a struct's `var` fields.) |
 | `unreachable code` | Code after `return`, `break`, `continue` or `panic` never runs |
-| `` unused import `time` `` | Remove the `import` line |
+| `` unused import `time` `` | Remove the `import` line (or the name, from a `from` import) |
 | ``unnecessary `?.` `` / `` `?:` `` / `` `!!` `` | The value is never `null` here, often because of a [smart cast](#smart-casts): use `.`, or drop the `?:` or `!!` |
 | `` `n` is never `null`, so this is always `false` `` | Remove the check |
 | ``unreachable `case` `` / `unreachable pattern` | Earlier cases already match everything it would: remove it, or move it up |
@@ -423,6 +425,54 @@ isma arc: 3 allocations, 3 frees, 0 live, peak 96 bytes, 0 cycle collections fre
 
 ## Modules: `import`
 
+Every `.isma` file is a module. A program is one file plus everything it imports.
+
+### Your own files
+
+```
+app/
+├── main.isma
+├── geometry.isma
+└── shapes/
+    ├── registry.isma
+    └── util.isma
+```
+
+```python
+# main.isma
+import geometry                          # geometry.isma, next to this file
+import geometry as geo                   # the same module, under another name
+import shapes.registry                   # shapes/registry.isma, bound as `registry`
+from geometry import Point, Shape, area  # names you can use without `geometry.`
+from shapes import util                  # a file of the folder `shapes`
+from geometry import origin as zero      # renamed
+
+fn main():
+    val p = Point(3.0, 4.0)              # a struct from another file
+    print(geometry.area(geo.Shape.Circle(p, 2.0)))
+    print(area(Shape.Empty))
+    print(registry.count())
+```
+
+```python
+# shapes/registry.isma
+from ..geometry import Shape             # `..` is the folder above this file
+from . import util                       # `.` is this file's folder
+```
+
+- **Where modules are found.** `import a.b` reads `a/b.isma`, starting from the folder of the file that contains the `import`; every file finds its imports the same way, whichever file you run. `from .x` and `from ..x` (`from .. import x`) start from this folder or the one above.
+- **What a plain `import` binds.** The last part of the path: `import shapes.registry` gives you `registry.count()`. With `as`, the name you choose.
+- **What a module contains.** Functions, structs and enums. Its `fn main()`, if any, only runs when you run that file itself, so a module can carry its own demo or tests.
+- **Privacy.** Names starting with `_` are private to their module: functions, types, methods and fields. A struct with private fields can only be created inside its module, so a module can guarantee its structs are valid.
+- **Cycles are fine.** Two modules may import each other, and a module may import the file you run. Modules contain only declarations, so there is no order of initialization to get wrong.
+- **Your files come first.** A `time.isma` next to your file is imported instead of the standard library's `time`.
+- **Errors show where they are.** A type error in `shapes/registry.isma` is reported in that file. In VS Code, it also shows on the `import` line that leads to it.
+- **One program, one binary.** Everything is compiled together into a single native executable, and `isma app.isma` rebuilds when any of its files changes.
+
+`import *` is not supported: name what you use, or import the module.
+
+### The standard library
+
 ```python
 import time
 
@@ -432,9 +482,8 @@ fn main():
 ```
 
 - **Written in Isma.** Standard-library modules live in [`stdlib/`](../stdlib) and are compiled together with your program.
-- **Privacy.** Names starting with `_` are private to their module.
-- **Construction.** A module's structs can only be created through its functions, which validate the values. You can't build a `DateTime` for February 30.
-- **Panic locations.** A panic inside a standard-library function is reported at *your* line that called it, like Rust's `#[track_caller]`:
+- **Construction.** A standard-library struct can only be created through its module's functions, which validate the values. You can't build a `DateTime` for February 30.
+- **Panic locations.** A panic inside a standard-library function is reported at *your* line that called it, like Rust's `#[track_caller]`. (A panic inside your own module is reported where it happened.)
   ```
   panic at app.isma:4:11: invalid date 2023-02-29: February 2023 has 28 days
   ```
@@ -469,7 +518,7 @@ Panics cover:
 
 ## Known limitations
 
-- **One file of your own.** You can `import` standard-library modules, but not your own `.isma` files yet.
+- **No packages to install.** Modules come from your own folders and the standard library; there is no package manager or search path.
 - **No top-level constants.** Everything lives inside functions.
 - **Byte-based strings.** `String.len()` and `substring()` count bytes, and there's no `s[i]` indexing; use `chars()`.
 - **No negative indexing.** `xs[-1]` panics.

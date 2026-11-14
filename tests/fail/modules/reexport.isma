@@ -1,0 +1,5 @@
+# Uses `helper` from `lib`, without re-exporting it.
+from .lib import helper
+
+fn twice() -> Int:
+    return helper() * 2

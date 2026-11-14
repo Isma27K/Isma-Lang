@@ -1,0 +1,6 @@
+struct Pair:
+    first: String
+    second: Int
+
+fn make() -> Pair:
+    return Pair("shapes util", 2)

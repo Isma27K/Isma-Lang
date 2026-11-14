@@ -1,0 +1,6 @@
+# expect-error: `helper` is imported, but this file also defines `helper`
+from modules.lib import helper
+fn helper() -> Int:
+    return 2
+fn main():
+    print(helper())

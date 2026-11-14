@@ -1,0 +1,4 @@
+# expect-warning: unused import `from_unix`
+from time import now, from_unix
+fn main():
+    print(now().year > 2000)

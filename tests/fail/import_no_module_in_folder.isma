@@ -1,0 +1,4 @@
+# expect-error: there is no module `libb` in `modules`
+from modules import libb
+fn main():
+    pass

@@ -1,0 +1,4 @@
+# A panic inside your own module is reported at its own line.
+fn pick(xs: List[Int]) -> Int:
+    val i = xs.len() + 2
+    return xs[i]

@@ -1,0 +1,49 @@
+# A collection of shapes; `..` reaches the folder above this one.
+from ..geometry import Point, Shape
+from .. import parity
+import time
+
+struct Registry:
+    var shapes: List[Shape]
+
+    fn add(self, s: Shape):
+        self.shapes.push(s)
+
+    fn total_area(self) -> Float:
+        var total = 0.0
+        for s in self.shapes:
+            total += s.area()
+        return total
+
+    fn describe(self) -> String:
+        var out = ""
+        for i in 0..self.shapes.len():
+            if i > 0:
+                out += ", "
+            out += self.shapes[i].name()
+        return out
+
+    # How many shapes, and whether that count is even (a call into another module).
+    fn count(self) -> String:
+        val n = self.shapes.len()
+        return f"{n} ({if_even(n)})"
+
+fn if_even(n: Int) -> String:
+    if parity.is_even(n):
+        return "even"
+    return "odd"
+
+fn biggest(shapes: List[Shape]) -> Shape?:
+    var best: Shape? = null
+    for s in shapes:
+        val b = best
+        if b == null or s.area() > b.area():
+            best = s
+    return best
+
+fn unit_square() -> Shape:
+    return Shape.Rect(Point(0.0, 0.0), 1.0, 1.0)
+
+# The standard library works from inside modules too.
+fn epoch_year() -> Int:
+    return time.from_unix(0).year

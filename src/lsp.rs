@@ -4,22 +4,34 @@
 //! the errors `isma build` would report. Features: diagnostics (errors +
 //! lints), hover types, go-to-definition, completion (including `.` member
 //! completion), document outline and inlay type hints.
+//!
+//! Each document is analyzed as the entry file of a program: its imports are
+//! read from the open documents first (so unsaved edits count), then from
+//! disk. Changing a document re-checks the open documents that import it.
 
 use crate::check::Analysis;
 use crate::diagnostics::{Diagnostic as IsmaDiagnostic, Severity};
 use crate::ide::*;
+use crate::project::FileKind;
 use crate::span::Span;
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, Response};
 use lsp_types as lt;
 use std::collections::HashMap;
 use std::error::Error;
+use std::path::{Path, PathBuf};
 
 type BoxError = Box<dyn Error + Send + Sync>;
 
 pub fn run() -> Result<(), BoxError> {
     let (conn, io_threads) = Connection::stdio();
     let caps = lt::ServerCapabilities {
-        text_document_sync: Some(lt::TextDocumentSyncCapability::Kind(lt::TextDocumentSyncKind::FULL)),
+        text_document_sync: Some(lt::TextDocumentSyncCapability::Options(lt::TextDocumentSyncOptions {
+            open_close: Some(true),
+            change: Some(lt::TextDocumentSyncKind::FULL),
+            // Saving a file can fix (or break) the files that import it.
+            save: Some(lt::TextDocumentSyncSaveOptions::Supported(true)),
+            ..Default::default()
+        })),
         hover_provider: Some(lt::HoverProviderCapability::Simple(true)),
         definition_provider: Some(lt::OneOf::Left(true)),
         completion_provider: Some(lt::CompletionOptions {
@@ -42,7 +54,7 @@ pub fn run() -> Result<(), BoxError> {
                 conn.sender.send(Message::Response(resp))?;
             }
             Message::Notification(n) => {
-                if let Some(out) = server.handle_notification(n) {
+                for out in server.handle_notification(n) {
                     conn.sender.send(Message::Notification(out))?;
                 }
             }
@@ -59,15 +71,56 @@ struct Document {
     text: String,
     lines: LineMap,
     ide: IdeInfo,
+    /// The file on disk (imports are found relative to it).
+    path: Option<PathBuf>,
+    /// The user's other files in the program, for go-to-definition into them.
+    others: Vec<OtherFile>,
+}
+
+/// An imported file of the user's, as seen from a document that imports it.
+struct OtherFile {
+    path: PathBuf,
+    uri: lt::Uri,
+    base: u32,
+    len: u32,
+    lines: LineMap,
 }
 
 struct Server {
     docs: HashMap<lt::Uri, Document>,
 }
 
-/// Run the compiler front end, surviving any internal panic.
-fn analyze_safely(text: &str) -> Option<Analysis> {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::analyze(text))).ok()
+/// `file:///a/b%20c.isma` -> `/a/b c.isma`
+fn uri_to_path(uri: &lt::Uri) -> Option<PathBuf> {
+    let rest = uri.as_str().strip_prefix("file://")?;
+    let bytes = rest.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && let Some(b) = rest.get(i + 1..i + 3).and_then(|h| u8::from_str_radix(h, 16).ok())
+        {
+            out.push(b);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    let path = PathBuf::from(String::from_utf8(out).ok()?);
+    Some(std::fs::canonicalize(&path).unwrap_or(path))
+}
+
+fn path_to_uri(path: &Path) -> Option<lt::Uri> {
+    let mut s = String::from("file://");
+    for b in path.to_str()?.bytes() {
+        if b.is_ascii_alphanumeric() || b"/-._~".contains(&b) {
+            s.push(b as char);
+        } else {
+            s.push_str(&format!("%{b:02X}"));
+        }
+    }
+    s.parse().ok()
 }
 
 fn params<P: serde::de::DeserializeOwned>(v: serde_json::Value) -> Result<P, String> {
@@ -75,35 +128,107 @@ fn params<P: serde::de::DeserializeOwned>(v: serde_json::Value) -> Result<P, Str
 }
 
 impl Server {
-    fn handle_notification(&mut self, n: Notification) -> Option<Notification> {
+    fn handle_notification(&mut self, n: Notification) -> Vec<Notification> {
         use lt::notification::*;
         match n.method.as_str() {
             DidOpenTextDocument::METHOD => {
-                let p: lt::DidOpenTextDocumentParams = params(n.params).ok()?;
-                Some(self.update(p.text_document.uri, p.text_document.text, Some(p.text_document.version)))
+                let Ok(p) = params::<lt::DidOpenTextDocumentParams>(n.params) else { return Vec::new() };
+                self.update(p.text_document.uri, p.text_document.text, Some(p.text_document.version))
             }
             DidChangeTextDocument::METHOD => {
-                let p: lt::DidChangeTextDocumentParams = params(n.params).ok()?;
-                let text = p.content_changes.into_iter().last()?.text;
-                Some(self.update(p.text_document.uri, text, Some(p.text_document.version)))
+                let Ok(p) = params::<lt::DidChangeTextDocumentParams>(n.params) else { return Vec::new() };
+                let Some(change) = p.content_changes.into_iter().last() else { return Vec::new() };
+                self.update(p.text_document.uri, change.text, Some(p.text_document.version))
+            }
+            DidSaveTextDocument::METHOD => {
+                // A file that is now on disk may be what another document was missing.
+                let Ok(p) = params::<lt::DidSaveTextDocumentParams>(n.params) else { return Vec::new() };
+                let others: Vec<lt::Uri> = self.docs.keys().filter(|u| **u != p.text_document.uri).cloned().collect();
+                others.into_iter().filter_map(|u| self.reanalyze(u)).collect()
+            }
+            DidChangeWatchedFiles::METHOD => {
+                // `.isma` files created, deleted or changed outside the editor.
+                let Ok(p) = params::<lt::DidChangeWatchedFilesParams>(n.params) else { return Vec::new() };
+                let open: Vec<&lt::Uri> = p.changes.iter().map(|c| &c.uri).filter(|u| self.docs.contains_key(*u)).collect();
+                if p.changes.len() == open.len() {
+                    return Vec::new(); // only open documents, which the editor keeps us up to date on
+                }
+                let all: Vec<lt::Uri> = self.docs.keys().cloned().collect();
+                all.into_iter().filter_map(|u| self.reanalyze(u)).collect()
             }
             DidCloseTextDocument::METHOD => {
-                let p: lt::DidCloseTextDocumentParams = params(n.params).ok()?;
-                self.docs.remove(&p.text_document.uri);
+                let Ok(p) = params::<lt::DidCloseTextDocumentParams>(n.params) else { return Vec::new() };
+                let closed = self.docs.remove(&p.text_document.uri);
                 let clear = lt::PublishDiagnosticsParams { uri: p.text_document.uri, diagnostics: Vec::new(), version: None };
-                Some(lsp_server::Notification::new(PublishDiagnostics::METHOD.into(), clear))
+                let mut out = vec![lsp_server::Notification::new(PublishDiagnostics::METHOD.into(), clear)];
+                // Files that import it now read it from disk again (unsaved edits are gone).
+                if let Some(path) = closed.and_then(|d| d.path) {
+                    out.extend(self.dependents(&path).into_iter().filter_map(|u| self.reanalyze(u)));
+                }
+                out
             }
-            _ => None,
+            _ => Vec::new(),
         }
     }
 
+    /// Open documents that import the file at `path`.
+    fn dependents(&self, path: &Path) -> Vec<lt::Uri> {
+        self.docs.iter().filter(|(_, d)| d.others.iter().any(|o| o.path == path)).map(|(u, _)| u.clone()).collect()
+    }
+
+    /// Re-analyze a changed document, and the open documents that import it.
+    fn update(&mut self, uri: lt::Uri, text: String, version: Option<i32>) -> Vec<Notification> {
+        let mut out = vec![self.publish(uri.clone(), text, version)];
+        if let Some(path) = self.docs.get(&uri).and_then(|d| d.path.clone()) {
+            out.extend(self.dependents(&path).into_iter().filter(|u| *u != uri).filter_map(|u| self.reanalyze(u)));
+        }
+        out
+    }
+
+    fn reanalyze(&mut self, uri: lt::Uri) -> Option<Notification> {
+        let text = self.docs.get(&uri)?.text.clone();
+        Some(self.publish(uri, text, None))
+    }
+
+    /// Run the compiler front end on `text`, the contents of the file at
+    /// `path`. Imported files are read from the open documents first (so
+    /// unsaved edits count), then from disk. Survives any internal panic.
+    fn analyze(&self, path: Option<&Path>, text: &str) -> Option<(Analysis, Vec<OtherFile>)> {
+        let overlay: HashMap<&Path, &str> = self.docs.values().filter_map(|d| Some((d.path.as_deref()?, d.text.as_str()))).collect();
+        let read = |p: &Path| match overlay.get(p) {
+            Some(t) => Ok(t.to_string()),
+            None => std::fs::read_to_string(p),
+        };
+        let run = || {
+            let project = match path {
+                Some(p) => {
+                    let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    crate::project::load(Some(p), &name, text, &read)
+                }
+                None => crate::load_source(text),
+            };
+            let a = crate::analyze_project(&project);
+            let others = project.files[1..]
+                .iter()
+                .filter(|f| f.kind == FileKind::User)
+                .filter_map(|f| {
+                    let path = f.path.clone()?;
+                    Some(OtherFile { uri: path_to_uri(&path)?, path, base: f.base, len: f.text.len() as u32, lines: LineMap::new(&f.text) })
+                })
+                .collect();
+            (a, others)
+        };
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)).ok()
+    }
+
     /// Re-analyze a document and build its `publishDiagnostics` notification.
-    fn update(&mut self, uri: lt::Uri, text: String, version: Option<i32>) -> Notification {
+    fn publish(&mut self, uri: lt::Uri, text: String, version: Option<i32>) -> Notification {
         let lines = LineMap::new(&text);
-        let (diagnostics, ide) = match analyze_safely(&text) {
-            Some(a) => {
+        let path = uri_to_path(&uri);
+        let (diagnostics, ide, others) = match self.analyze(path.as_deref(), &text) {
+            Some((a, others)) => {
                 let ds = a.diagnostics.iter().map(|d| to_lsp_diagnostic(d, &lines, &uri)).collect();
-                (ds, a.ide)
+                (ds, a.ide, others)
             }
             None => {
                 let d = lt::Diagnostic {
@@ -113,10 +238,10 @@ impl Server {
                     message: "internal compiler error while analyzing this file (please report it)".into(),
                     ..Default::default()
                 };
-                (vec![d], IdeInfo::default())
+                (vec![d], IdeInfo::default(), Vec::new())
             }
         };
-        self.docs.insert(uri.clone(), Document { text, lines, ide });
+        self.docs.insert(uri.clone(), Document { text, lines, ide, path, others });
         let p = lt::PublishDiagnosticsParams { uri, diagnostics, version };
         use lt::notification::Notification as _;
         Notification::new(lt::notification::PublishDiagnostics::METHOD.into(), p)
@@ -164,7 +289,13 @@ impl Server {
         let doc = self.docs.get(&pos.text_document.uri)?;
         let off = doc.lines.offset(pos.position);
         let (_, def) = doc.ide.definitions.iter().filter(|(u, _)| contains(*u, off)).min_by_key(|(u, _)| u.end - u.start)?;
-        Some(lt::GotoDefinitionResponse::Scalar(lt::Location { uri: pos.text_document.uri, range: doc.lines.range(*def) }))
+        if def.start as usize <= doc.text.len() {
+            return Some(lt::GotoDefinitionResponse::Scalar(lt::Location { uri: pos.text_document.uri, range: doc.lines.range(*def) }));
+        }
+        // In another of the user's files.
+        let f = doc.others.iter().find(|f| f.base <= def.start && def.start <= f.base + f.len)?;
+        let local = Span { start: def.start - f.base, end: def.end - f.base };
+        Some(lt::GotoDefinitionResponse::Scalar(lt::Location { uri: f.uri.clone(), range: f.lines.range(local) }))
     }
 
     // ------------------------------------------------------------ completion
@@ -181,24 +312,9 @@ impl Server {
         if in_comment_or_string(&doc.text, off) {
             return None;
         }
-        // `import ti|` -> standard-library modules
+        // `import ge|`, `from shapes.ci|`, `from geometry import Po|`
         let line_start = doc.text[..word_start].rfind('\n').map(|i| i + 1).unwrap_or(0);
-        if doc.text[line_start..word_start].trim() == "import" {
-            let items = crate::stdlib::MODULES
-                .iter()
-                .map(|m| lt::CompletionItem {
-                    label: m.name.to_string(),
-                    kind: Some(lt::CompletionItemKind::MODULE),
-                    detail: Some(format!("import {}", m.name)),
-                    documentation: crate::analyze(&format!("import {}\nfn main():\n    pass\n", m.name))
-                        .ide
-                        .modules
-                        .first()
-                        .and_then(|m| m.doc.clone())
-                        .map(|d| markdown(&d)),
-                    ..Default::default()
-                })
-                .collect();
+        if let Some(items) = self.import_completion(doc, &doc.text[line_start..word_start]) {
             return Some(lt::CompletionResponse::Array(items));
         }
         let items = if word_start > 0 && bytes[word_start - 1] == b'.' {
@@ -220,11 +336,22 @@ impl Server {
         // `time.` -> the module's functions and types
         let recv_start = receiver_start(text, dot);
         let receiver = &text[recv_start..dot];
-        if doc.ide.imports.iter().any(|(m, _)| m == receiver) {
-            return Some(doc.ide.module_members(receiver).into_iter().map(member_item).collect());
+        if let Some(ns) = doc.ide.imported_module(receiver) {
+            return Some(doc.ide.module_members(ns).into_iter().map(member_item).collect());
         }
-        // `Shape.` -> the enum's variants
-        if let Some(e) = doc.ide.structs.iter().find(|s| s.ns == 0 && s.name == receiver && s.variants.is_some()) {
+        // `Shape.`, `geo.Shape.` -> the enum's variants
+        let named = match receiver.split_once('.') {
+            None => doc.ide.structs.iter().position(|s| s.ns == 0 && s.name == receiver).or_else(|| {
+                doc.ide.imported.iter().find_map(|(b, k)| match k {
+                    ImportedSymbol::Struct(sid) if b == receiver => Some(*sid),
+                    _ => None,
+                })
+            }),
+            Some((module, name)) => doc.ide.imported_module(module).and_then(|ns| {
+                doc.ide.structs.iter().position(|s| s.ns == ns && s.name.rsplit('.').next() == Some(name))
+            }),
+        };
+        if let Some(e) = named.map(|sid| &doc.ide.structs[sid]).filter(|s| s.variants.is_some()) {
             return Some(e.variants.iter().flatten().map(variant_item).collect());
         }
         let mut word_end = off;
@@ -233,7 +360,7 @@ impl Server {
         }
         // Attempt 1: just drop `.partial` and analyze the file.
         let patched = format!("{}{}", &text[..dot], &text[word_end..]);
-        let mut found = analyze_safely(&patched).and_then(|a| {
+        let mut found = self.analyze(doc.path.as_deref(), &patched).map(|(a, _)| a).and_then(|a| {
             a.ide
                 .expr_types
                 .iter()
@@ -253,7 +380,7 @@ impl Server {
                 let probe_prefix = format!("{indent}val __probe = ");
                 let start = line_start + probe_prefix.len();
                 let patched = format!("{}{probe_prefix}{receiver}{}", &text[..line_start], &text[line_end..]);
-                found = analyze_safely(&patched).and_then(|a| {
+                found = self.analyze(doc.path.as_deref(), &patched).map(|(a, _)| a).and_then(|a| {
                     a.ide
                         .expr_types
                         .iter()
@@ -296,9 +423,27 @@ impl Server {
             };
             add(&l.name, lt::CompletionItemKind::VARIABLE, Some(format!("{}: {}", l.name, l.ty)), Some(kind.into()), "0");
         }
-        for (m, _) in &doc.ide.imports {
-            let d = doc.ide.modules.iter().find(|x| &x.name == m).and_then(|x| x.doc.clone());
-            add(m, lt::CompletionItemKind::MODULE, Some(format!("import {m}")), d, "1");
+        for (m, _, ns) in &doc.ide.imports {
+            let module = doc.ide.modules.iter().find(|x| x.ns == *ns);
+            let d = module.and_then(|x| x.doc.clone());
+            let detail = match module {
+                Some(x) if x.name != *m => format!("import {} as {m}", x.name),
+                _ => format!("import {m}"),
+            };
+            add(m, lt::CompletionItemKind::MODULE, Some(detail), d, "1");
+        }
+        for (name, what) in &doc.ide.imported {
+            match *what {
+                ImportedSymbol::Func(fid) => {
+                    let f = &doc.ide.functions[fid];
+                    add(name, lt::CompletionItemKind::FUNCTION, Some(f.signature.clone()), f.doc.clone(), "1");
+                }
+                ImportedSymbol::Struct(sid) => {
+                    let st = &doc.ide.structs[sid];
+                    let kind = if st.variants.is_some() { lt::CompletionItemKind::ENUM } else { lt::CompletionItemKind::STRUCT };
+                    add(name, kind, Some(format!("{} {}", if st.variants.is_some() { "enum" } else { "struct" }, st.name)), st.doc.clone(), "1");
+                }
+            }
         }
         for f in doc.ide.functions.iter().filter(|f| f.owner.is_none() && f.ns == 0) {
             add(&f.name, lt::CompletionItemKind::FUNCTION, Some(f.signature.clone()), f.doc.clone(), "1");
@@ -321,6 +466,112 @@ impl Server {
         }
         for k in KEYWORDS {
             add(k, lt::CompletionItemKind::KEYWORD, None, None, "4");
+        }
+        items
+    }
+
+    /// Completion inside an `import` or `from` line (`before`: the line up to the word being typed).
+    fn import_completion(&self, doc: &Document, before: &str) -> Option<Vec<lt::CompletionItem>> {
+        let line = before.trim_start();
+        let dir = doc.path.as_deref().and_then(Path::parent);
+        // `from geometry import Po|`, `from geometry import Point, ar|`
+        if let Some(rest) = line.strip_prefix("from ")
+            && let Some((module, _)) = rest.split_once(" import ")
+        {
+            return Some(self.importable_names(doc, dir, module.trim()));
+        }
+        // `import shapes.ci|`, `from ..ge|`
+        let (path, from) = match (line.strip_prefix("import "), line.strip_prefix("from ")) {
+            (Some(p), _) => (p, false),
+            (None, Some(p)) => (p, true),
+            _ => return None,
+        };
+        if path.contains(' ') || (!from && path.starts_with('.')) {
+            return None;
+        }
+        let level = path.chars().take_while(|c| *c == '.').count();
+        let segs: Vec<&str> = path[level..].split('.').collect();
+        let folders = &segs[..segs.len() - 1];
+        let mut items = Vec::new();
+        if level == 0 && folders.is_empty() {
+            for m in crate::stdlib::MODULES {
+                let doc = crate::analyze(&format!("import {}\nfn main():\n    pass\n", m.name)).ide.modules.first().and_then(|m| m.doc.clone());
+                items.push(module_item(m.name, format!("import {}", m.name), doc, lt::CompletionItemKind::MODULE));
+            }
+        }
+        let Some(mut dir) = dir.map(Path::to_path_buf) else { return Some(items) };
+        for _ in 1..level.max(1) {
+            dir.pop();
+        }
+        for f in folders {
+            dir.push(f);
+        }
+        let own = doc.path.as_deref();
+        for name in crate::project::module_names(&dir) {
+            let file = dir.join(format!("{name}.isma"));
+            if Some(file.as_path()) == own || items.iter().any(|i| i.label == name) {
+                continue;
+            }
+            let docs = std::fs::read_to_string(&file).ok().and_then(|t| leading_doc(&t));
+            items.push(module_item(&name, format!("{name}.isma"), docs, lt::CompletionItemKind::MODULE));
+        }
+        for sub in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let name = sub.file_name().to_string_lossy().into_owned();
+            let is_package = sub.path().is_dir() && !name.starts_with('.') && !crate::project::module_names(&sub.path()).is_empty();
+            if is_package && !items.iter().any(|i| i.label == name) {
+                items.push(module_item(&name, format!("{name}/"), None, lt::CompletionItemKind::FOLDER));
+            }
+        }
+        Some(items)
+    }
+
+    /// The public names of the module at `module` (as written after `from`),
+    /// plus its folder's modules.
+    fn importable_names(&self, doc: &Document, dir: Option<&Path>, module: &str) -> Vec<lt::CompletionItem> {
+        // Analyze a probe that imports the module the same way, from the same folder.
+        let probe_path = dir.map(|d| d.join("__isma_probe__.isma"));
+        let level = module.chars().take_while(|c| *c == '.').count();
+        let (head, last) = match module[level..].rsplit_once('.') {
+            Some((h, l)) => (format!("{}{h}", &module[..level]), l.to_string()),
+            None if level > 0 => (module[..level].to_string(), module[level..].to_string()),
+            None => (String::new(), module.to_string()),
+        };
+        let probe = if head.is_empty() {
+            format!("import {last} as __m\nfn main():\n    pass\n")
+        } else {
+            format!("from {head} import {last} as __m\nfn main():\n    pass\n")
+        };
+        let mut items = Vec::new();
+        if let Some((a, _)) = self.analyze(probe_path.as_deref(), &probe)
+            && let Some(ns) = a.ide.imported_module("__m")
+        {
+            for m in a.ide.module_members(ns) {
+                let kind = if m.kind == MemberKind::Function { lt::CompletionItemKind::FUNCTION } else { lt::CompletionItemKind::STRUCT };
+                items.push(lt::CompletionItem {
+                    label: m.name.clone(),
+                    kind: Some(kind),
+                    detail: Some(m.signature.clone()),
+                    documentation: if m.doc.is_empty() { None } else { Some(markdown(&m.doc)) },
+                    ..Default::default()
+                });
+            }
+        }
+        // `from shapes import ci|`: the files in the folder `shapes/`.
+        if let Some(mut folder) = dir.map(Path::to_path_buf) {
+            for _ in 1..level.max(1) {
+                folder.pop();
+            }
+            for seg in module[level..].split('.').filter(|s| !s.is_empty()) {
+                folder.push(seg);
+            }
+            let own = doc.path.as_deref();
+            for name in crate::project::module_names(&folder) {
+                let file = folder.join(format!("{name}.isma"));
+                if Some(file.as_path()) != own && !items.iter().any(|i| i.label == name) {
+                    let docs = std::fs::read_to_string(&file).ok().and_then(|t| leading_doc(&t));
+                    items.push(module_item(&name, format!("{name}.isma"), docs, lt::CompletionItemKind::MODULE));
+                }
+            }
         }
         items
     }
@@ -413,6 +664,29 @@ fn member_item(m: Member) -> lt::CompletionItem {
         insert_text_format: Some(format),
         ..Default::default()
     }
+}
+
+fn module_item(name: &str, detail: String, doc: Option<String>, kind: lt::CompletionItemKind) -> lt::CompletionItem {
+    lt::CompletionItem {
+        label: name.to_string(),
+        kind: Some(kind),
+        detail: Some(detail),
+        documentation: doc.map(|d| markdown(&d)),
+        ..Default::default()
+    }
+}
+
+/// A module's documentation: the comment block at the top of its file.
+fn leading_doc(text: &str) -> Option<String> {
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .take_while(|l| l.starts_with('#'))
+        .filter(|l| !l.starts_with("#!"))
+        .map(|l| l.trim_start_matches('#').trim())
+        .collect();
+    let doc = lines.join("\n").trim().to_string();
+    (!doc.is_empty()).then_some(doc)
 }
 
 fn variant_item(v: &VariantSymbol) -> lt::CompletionItem {
@@ -644,7 +918,7 @@ mod tests {
 
     fn doc(text: &str) -> Document {
         let a = crate::analyze(text);
-        Document { text: text.to_string(), lines: LineMap::new(text), ide: a.ide }
+        Document { text: text.to_string(), lines: LineMap::new(text), ide: a.ide, path: None, others: Vec::new() }
     }
 
     fn server_with(text: &str) -> (Server, lt::Uri) {

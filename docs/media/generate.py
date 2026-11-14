@@ -383,9 +383,9 @@ def pipeline_svg() -> str:
         box(xs[i], y1, t, s, "box hot" if i == len(stages) - 1 else "box")
         if i:
             arrow(xs[i - 1] + bw + 2, y1 + bh / 2, xs[i] - 4, y1 + bh / 2)
-    # standard library modules are lexed + parsed with your file
-    box(xs[1] + (bw + gap) / 2, 8, "stdlib/time.isma", "written in Isma")
-    arrow(xs[1] + (bw + gap) / 2 + bw / 2, 8 + bh + 2, xs[1] + (bw + gap) / 2 + bw / 2, y1 - 4, "import time")
+    # imported files (yours and the standard library's) are lexed + parsed with your file
+    box(xs[1] + (bw + gap) / 2 - 25, 8, "imported .isma files", "yours + the stdlib", w=170)
+    arrow(xs[1] + (bw + gap) / 2 + bw / 2, 8 + bh + 2, xs[1] + (bw + gap) / 2 + bw / 2, y1 - 4, "import")
     # the same checker powers the editor
     box(xs[3], 192, "isma lsp", "language server")
     arrow(xs[3] + bw / 2, y1 + bh + 2, xs[3] + bw / 2, 188)

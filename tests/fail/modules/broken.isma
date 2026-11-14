@@ -1,0 +1,3 @@
+# A module with a type error.
+fn half(n: Int) -> Int:
+    return n / "2"

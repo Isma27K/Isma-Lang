@@ -1,0 +1,4 @@
+# expect-error: `import *` is not supported
+from modules.lib import *
+fn main():
+    pass

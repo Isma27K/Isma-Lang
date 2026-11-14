@@ -1,0 +1,4 @@
+# expect-error: `modules.lib._secret` is private to the `modules.lib` module
+from modules.lib import _secret
+fn main():
+    print(_secret())

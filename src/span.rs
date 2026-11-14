@@ -48,16 +48,9 @@ impl<'a> LineIndex<'a> {
     }
 }
 
-/// Spans inside standard-library module `k` start at `(k + 1) * MODULE_BASE`,
-/// so a single `u32` offset space covers the user's file and every module.
-pub const MODULE_BASE: u32 = 1 << 28;
 
-/// Is this span in the user's own file (not inside a standard-library module)?
-pub fn is_user_span(s: Span) -> bool {
-    s.start < MODULE_BASE
-}
-
-/// All source files of a compilation: the user's file plus imported modules.
+/// All source files of a compilation: the entry file plus imported modules.
+/// They share one offset space: each file starts at its own base offset.
 pub struct SourceMap<'a> {
     files: Vec<(String, u32, LineIndex<'a>)>,
 }

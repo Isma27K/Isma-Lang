@@ -1,0 +1,4 @@
+# expect-error: `Red` is a variant of the enum `Color`: import `Color` and write `Color.Red`
+from modules.lib import Red
+fn main():
+    pass

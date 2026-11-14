@@ -19,10 +19,12 @@ pub struct IdeInfo {
     pub functions: Vec<FnSymbol>,
     /// Indexed by struct id.
     pub structs: Vec<StructSymbol>,
-    /// Standard-library modules loaded for this file.
+    /// Every module loaded for this file (imported directly or not).
     pub modules: Vec<ModuleSymbol>,
-    /// `import` lines of the user's file: (module name, span).
-    pub imports: Vec<(String, Span)>,
+    /// Modules the entry file imports: (the name it binds, its span, the module's namespace).
+    pub imports: Vec<(String, Span, usize)>,
+    /// Names the entry file brings in with `from m import name`: (the name it binds, what it is).
+    pub imported: Vec<(String, ImportedSymbol)>,
 }
 
 #[derive(Debug, Clone)]
@@ -31,6 +33,16 @@ pub struct ModuleSymbol {
     /// Namespace index (functions and structs carry the same `ns`).
     pub ns: usize,
     pub doc: Option<String>,
+    /// The file, for the user's own modules.
+    pub path: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportedSymbol {
+    /// A struct or enum (index into `structs`).
+    Struct(usize),
+    /// A function (index into `functions`).
+    Func(usize),
 }
 
 #[derive(Debug, Clone)]
@@ -154,13 +166,17 @@ impl IdeInfo {
         }
     }
 
-    /// Public functions and types of an imported module, for `time.` completion.
-    pub fn module_members(&self, module: &str) -> Vec<Member> {
-        let Some(m) = self.modules.iter().find(|m| m.name == module) else { return Vec::new() };
+    /// The module the entry file imports as `binding` (`time`, or `geo` in `import geometry as geo`).
+    pub fn imported_module(&self, binding: &str) -> Option<usize> {
+        self.imports.iter().find(|(b, _, _)| b == binding).map(|(_, _, ns)| *ns)
+    }
+
+    /// Public functions and types of a module, for `time.` completion.
+    pub fn module_members(&self, ns: usize) -> Vec<Member> {
         let mut out: Vec<Member> = self
             .functions
             .iter()
-            .filter(|f| f.ns == m.ns && f.owner.is_none() && !f.name.starts_with('_'))
+            .filter(|f| f.ns == ns && f.owner.is_none() && !f.name.starts_with('_'))
             .map(|f| Member {
                 name: f.name.clone(),
                 signature: f.signature.clone(),
@@ -169,14 +185,14 @@ impl IdeInfo {
                 takes_args: !f.signature.contains("()"),
             })
             .collect();
-        for s in self.structs.iter().filter(|s| s.ns == m.ns) {
+        for s in self.structs.iter().filter(|s| s.ns == ns) {
             let short = s.name.rsplit('.').next().unwrap_or(&s.name).to_string();
             if short.starts_with('_') {
                 continue;
             }
             out.push(Member {
                 name: short,
-                signature: format!("struct {}", s.name),
+                signature: format!("{} {}", if s.variants.is_some() { "enum" } else { "struct" }, s.name),
                 doc: s.doc.clone().unwrap_or_default(),
                 kind: MemberKind::Struct,
                 takes_args: false,

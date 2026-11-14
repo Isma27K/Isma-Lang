@@ -1,0 +1,4 @@
+# expect-error: relative imports use `from`
+import ..modules.lib
+fn main():
+    pass

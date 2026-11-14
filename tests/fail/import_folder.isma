@@ -1,0 +1,4 @@
+# expect-error: `modules` is a folder, not a module
+import modules
+fn main():
+    pass

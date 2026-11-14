@@ -1,0 +1,7 @@
+# Two modules that import each other: `parity` and `parity_odd`.
+import parity_odd
+
+fn is_even(n: Int) -> Bool:
+    if n == 0:
+        return true
+    return parity_odd.is_odd(n - 1)

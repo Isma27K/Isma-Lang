@@ -1,5 +1,5 @@
 use crate::span::Span;
-use ariadne::{Color, Config, IndexType, Label, Report, ReportKind, Source};
+use ariadne::{Color, Config, IndexType, Label, Report, ReportKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
@@ -61,10 +61,29 @@ impl Diagnostic {
     }
 }
 
-/// Render diagnostics to a string, Rust-style.
+/// One source file, for rendering: its name, where its spans start, its text.
+pub struct RenderFile<'a> {
+    pub name: &'a str,
+    pub base: u32,
+    pub text: &'a str,
+}
+
+/// Render diagnostics of a single file to a string, Rust-style.
 pub fn render(diags: &[Diagnostic], path: &str, src: &str, color: bool) -> String {
+    render_files(diags, &[RenderFile { name: path, base: 0, text: src }], color)
+}
+
+/// Render diagnostics whose spans may point into any of `files` (a label can
+/// sit in another file than the error itself).
+pub fn render_files(diags: &[Diagnostic], files: &[RenderFile], color: bool) -> String {
     let mut out = Vec::new();
-    let path = path.to_string();
+    // (file name, range within that file) of a global span.
+    let locate = |s: Span| -> (String, std::ops::Range<usize>) {
+        let i = files.iter().rposition(|f| f.base <= s.start).unwrap_or(0);
+        let f = &files[i];
+        let local = Span { start: s.start - f.base.min(s.start), end: s.end.saturating_sub(f.base) };
+        (f.name.to_string(), clamp(local, f.text).range())
+    };
     for d in diags {
         let config = Config::default().with_index_type(IndexType::Byte).with_color(color);
         let (kind, primary_color) = match d.severity {
@@ -72,23 +91,14 @@ pub fn render(diags: &[Diagnostic], path: &str, src: &str, color: bool) -> Strin
             Severity::Warning => (ReportKind::Warning, Color::Yellow),
         };
         let secondary_color = Color::Blue;
-        let span = clamp(d.span, src);
-        let mut primary = Label::new((path.clone(), span.range())).with_color(primary_color).with_order(0);
+        let at = locate(d.span);
+        let mut primary = Label::new(at.clone()).with_color(primary_color).with_order(0);
         if !d.primary_label.is_empty() {
             primary = primary.with_message(&d.primary_label);
         }
-        let mut report = Report::build(kind, (path.clone(), span.range()))
-            .with_config(config)
-            .with_message(&d.message)
-            .with_label(primary);
+        let mut report = Report::build(kind, at).with_config(config).with_message(&d.message).with_label(primary);
         for (i, (s, msg)) in d.labels.iter().enumerate() {
-            let s = clamp(*s, src);
-            report = report.with_label(
-                Label::new((path.clone(), s.range()))
-                    .with_message(msg)
-                    .with_color(secondary_color)
-                    .with_order(i as i32 + 1),
-            );
+            report = report.with_label(Label::new(locate(*s)).with_message(msg).with_color(secondary_color).with_order(i as i32 + 1));
         }
         for n in &d.notes {
             report = report.with_note(n);
@@ -96,7 +106,8 @@ pub fn render(diags: &[Diagnostic], path: &str, src: &str, color: bool) -> Strin
         if let Some(h) = &d.help {
             report = report.with_help(h);
         }
-        let _ = report.finish().write((path.clone(), Source::from(src)), &mut out);
+        let cache = ariadne::sources(files.iter().map(|f| (f.name.to_string(), f.text)));
+        let _ = report.finish().write(cache, &mut out);
     }
     String::from_utf8_lossy(&out).into_owned()
 }

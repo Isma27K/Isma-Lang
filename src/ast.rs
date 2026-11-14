@@ -18,8 +18,55 @@ pub enum Item {
     Fn(FnDecl),
     Struct(StructDecl),
     Enum(EnumDecl),
-    /// `import time`
-    Import(Ident),
+    /// `import time`, `import shapes.circle as c`, `from ..geometry import Point`
+    Import(Import),
+}
+
+#[derive(Debug, Clone)]
+pub struct Import {
+    /// Leading dots of a `from` import: `from .x` is 1, `from ..x` is 2.
+    pub level: usize,
+    /// `shapes.circle`: a file path relative to the importing file. Empty in `from .. import x`.
+    pub path: Vec<Ident>,
+    /// `import geometry as geo`
+    pub alias: Option<Ident>,
+    /// `Some` for `from path import a, b as c`.
+    pub names: Option<Vec<ImportName>>,
+    pub span: Span,
+}
+
+impl Import {
+    /// `..shapes.circle`, as written.
+    pub fn path_text(&self) -> String {
+        let dots = ".".repeat(self.level);
+        let segs: Vec<&str> = self.path.iter().map(|i| i.name.as_str()).collect();
+        format!("{dots}{}", segs.join("."))
+    }
+
+    /// The span of the module path (or of the dots alone).
+    pub fn path_span(&self) -> Span {
+        match (self.path.first(), self.path.last()) {
+            (Some(a), Some(b)) => a.span.merge(b.span),
+            _ => self.span,
+        }
+    }
+
+    /// The name a plain `import` binds: the alias, else the last segment.
+    pub fn binding(&self) -> Option<&Ident> {
+        self.alias.as_ref().or(self.path.last())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ImportName {
+    pub name: Ident,
+    pub alias: Option<Ident>,
+}
+
+impl ImportName {
+    pub fn binding(&self) -> &Ident {
+        self.alias.as_ref().unwrap_or(&self.name)
+    }
 }
 
 #[derive(Debug)]

@@ -190,6 +190,29 @@ fn main():
     print(time.now().to_iso())
 ```
 
+Bigger programs split into files. Every `.isma` file is a module:
+
+```python
+# geometry.isma
+struct Point:
+    x: Float
+    y: Float
+
+fn _square(x: Float) -> Float:               # `_names` are private to their module
+    return x * x
+
+fn dist(a: Point, b: Point) -> Float:
+    return sqrt(_square(a.x - b.x) + _square(a.y - b.y))
+```
+
+```python
+# main.isma
+from geometry import Point, dist             # or `import geometry`, then `geometry.dist(...)`
+
+fn main():
+    print(dist(Point(0.0, 0.0), Point(3.0, 4.0)))
+```
+
 The [**language guide**](docs/language.md) covers everything: types, strictness rules, lints, structs, enums and `match`, lists, strings, null safety, modules, built-ins and panics.
 
 <a id="time"></a>
@@ -224,7 +247,8 @@ The VS Code extension (in the companion `isma-vscode` project) gets all its smar
 - **Live type checking and lints** as you type. Unused and unreachable code is faded out.
 - **Hover** shows the type of any variable or expression, including inferred types and smart casts, plus `#` doc comments.
 - **Inlay type hints**: `val total = price * qty` shows as `val total: Float = …`.
-- **Completion** for members after `.` and `?.`, module functions after `time.`, modules after `import `, and variables in scope. Completing after `.` on a value that might be null turns it into `?.`.
+- **Completion** for members after `.` and `?.`, module functions after `time.`, files and folders after `import` and `from`, a module's names after `from geometry import`, and variables in scope. Completing after `.` on a value that might be null turns it into `?.`.
+- **Multi-file aware.** Go to definition jumps into your other files. Editing a module re-checks the open files that import it, even before you save, and an error inside an imported file shows on the `import` line that leads to it.
 - **Go to definition**, an **outline view**, syntax highlighting, snippets and a **▶ Run** button.
 - **Automatic restarts**: when you reinstall `isma`, the extension notices and restarts the language server by itself.
 
@@ -255,10 +279,11 @@ These are the best of 3 runs on an AMD Ryzen 5 5500. Reproduce them with `./benc
 ## 🔧 How it works
 
 <p align="center">
-  <img src="docs/media/pipeline.svg" alt="Diagram: your .isma file goes through the lexer, parser, type checker, MIR with automatic reference counting, LLVM IR codegen and clang -O3 with a small C runtime, producing a native binary. stdlib/time.isma joins at the parser via `import time`. The type checker also powers `isma lsp`, which feeds VS Code." width="100%">
+  <img src="docs/media/pipeline.svg" alt="Diagram: your .isma file goes through the lexer, parser, type checker, MIR with automatic reference counting, LLVM IR codegen and clang -O3 with a small C runtime, producing a native binary. Imported .isma files, yours and the standard library's, join at the parser. The type checker also powers `isma lsp`, which feeds VS Code." width="100%">
 </p>
 
 - **One front end, two uses.** The same lexer, parser and type checker compile your programs and power the editor through `isma lsp`.
+- **Every file is a namespace of one type checker.** [`src/project.rs`](src/project.rs) finds each `import` relative to the file that contains it and loads every file once, so modules may import each other. All files share one offset space for source positions, which is how errors, panic locations and go-to-definition land in the right file. The whole program becomes one LLVM module, so calls across files inline like any others.
 - **The standard library is Isma code** ([`stdlib/time.isma`](stdlib/time.isma)), compiled together with your program, so it's as fast as your own functions. A panic inside it reports *your* calling line, like Rust's `#[track_caller]`.
 - **Memory management happens on a mid-level IR.** The typed program is lowered to a control-flow graph in which every intermediate value has a name ([`src/mir.rs`](src/mir.rs)). [`src/arc.rs`](src/arc.rs) then adds reference counting in the style of Perceus (Koka, Lean 4). It drops each value right after its last use. Parameters are borrowed unless consumed, and projections stay borrowed while interprocedural write-effect summaries prove their slot can't change. A unique struct's memory is reused for the next one, and unique strings are appended to in place. Types that can form cycles get a trial-deletion cycle collector. [`src/cycles.rs`](src/cycles.rs) decides which, from the type graph: a cycle needs a reference that can be replaced after construction, so immutable trees never pay for it.
 - **`match` is checked with Maranget's usefulness algorithm** ([`src/patterns.rs`](src/patterns.rs)), as in Rust and OCaml. The same pass that proves a `match` exhaustive produces the missing cases for the error message and finds unreachable ones. Cases compile to chains of tag tests, which LLVM merges into a `switch`. Enums without data are plain integers, and data-less variants of other enums are shared constants.
@@ -268,7 +293,7 @@ These are the best of 3 runs on an AMD Ryzen 5 5500. Reproduce them with `./benc
   - Integer `+ - *` use LLVM's overflow-checking intrinsics.
   - Panic paths are marked cold.
   - List indexing is bounds-checked inline.
-- **About 11,700 lines of Rust.** The only dependencies are `ariadne` (error rendering) and `lsp-server` / `lsp-types` (the language server).
+- **About 13,000 lines of Rust.** The only dependencies are `ariadne` (error rendering) and `lsp-server` / `lsp-types` (the language server).
 
 <a id="roadmap"></a>
 ## 🗺️ Roadmap
@@ -280,9 +305,9 @@ These are the best of 3 runs on an AMD Ryzen 5 5500. Reproduce them with `./benc
 - [x] Null safety: `Int?`, `?.`, the elvis operator `?:`, `!!`, smart casts
 - [x] Memory management through automatic reference counting, with a cycle collector
 - [x] `enum` + `match` with exhaustiveness checking
+- [x] Importing your own `.isma` files: `import`, `from ... import`, `as`, folders and `..`
 - [ ] Generics for user code: `fn max[T](a: T, b: T) -> T`
 - [ ] Operator functions (so that `time.now() - start` works)
-- [ ] Importing your own `.isma` files
 - [ ] More modules: `math`, `fs`, maps, more string utilities
 
 <a id="development"></a>

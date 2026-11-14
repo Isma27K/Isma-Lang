@@ -217,16 +217,14 @@ pub fn build_executable(clang: &Path, ir: &str, output: &Path, opts: &BuildOptio
 
 /// Where the cached executable for this script lives, plus the prefix shared
 /// by all cached versions of the same script (used to prune stale ones).
-pub fn cached_program_path(script: &Path, src: &str, display_path: &str, opts: &BuildOptions) -> Option<(PathBuf, String)> {
+/// `sources` identifies the contents (and shown paths) of the script and of
+/// every file it imports, so editing any of them triggers a rebuild.
+pub fn cached_program_path(script: &Path, sources: &str, opts: &BuildOptions) -> Option<(PathBuf, String)> {
     let abs = std::fs::canonicalize(script).unwrap_or_else(|_| script.to_path_buf());
     let mut script_key = Fnv::new();
     script_key.write(abs.as_os_str().as_encoded_bytes()).write(&opts.key());
     let mut content_key = Fnv::new();
-    content_key
-        .write(compiler_fingerprint().as_bytes())
-        .write(src.as_bytes())
-        .write(display_path.as_bytes())
-        .write(&opts.key());
+    content_key.write(compiler_fingerprint().as_bytes()).write(sources.as_bytes()).write(&opts.key());
     let prefix = format!("{}-", script_key.hex());
     let path = cache_dir()?.join("bin").join(format!("{prefix}{}", content_key.hex()));
     Some((path, prefix))

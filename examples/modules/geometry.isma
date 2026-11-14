@@ -1,0 +1,15 @@
+# Points and distances. Imported by `main.isma` in this folder.
+
+struct Point:
+    x: Float
+    y: Float
+
+fn _square(x: Float) -> Float:               # `_names` are private to their module
+    return x * x
+
+fn dist(a: Point, b: Point) -> Float:
+    return sqrt(_square(a.x - b.x) + _square(a.y - b.y))
+
+# Runs only when you run this file itself: `isma geometry.isma`.
+fn main():
+    print(dist(Point(0.0, 0.0), Point(1.0, 1.0)))

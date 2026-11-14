@@ -1,0 +1,4 @@
+# expect-error: `modules.reexport` imports `helper` from the `lib` module, but doesn't define it: import it from `lib`
+from modules.reexport import helper
+fn main():
+    print(helper())

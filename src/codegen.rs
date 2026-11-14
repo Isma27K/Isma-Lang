@@ -13,8 +13,17 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 
 pub fn generate(prog: &Program, sources: &SourceMap, target_triple: Option<&str>) -> String {
+    // LLVM type names: the struct's name, made unique when two modules
+    // (`a/util.isma`, `b/util.isma`) define types with the same name.
+    let type_names: Vec<String> = prog
+        .structs
+        .iter()
+        .enumerate()
+        .map(|(sid, s)| if prog.structs.iter().filter(|o| o.name == s.name).count() > 1 { format!("{}.{sid}", s.name) } else { s.name.clone() })
+        .collect();
     let mut g = Codegen {
         prog,
+        type_names,
         sources,
         f: &prog.funcs[0],
         caller_loc: None,
@@ -47,18 +56,18 @@ pub fn generate(prog: &Program, sources: &SourceMap, target_triple: Option<&str>
     out.push('\n');
     // Every heap object starts with its reference count.
     out.push_str("%IsmaList = type { i64, i64, i64, ptr }\n");
-    for s in &prog.structs {
+    for (s, tname) in prog.structs.iter().zip(&g.type_names) {
         match &s.variants {
             // Every variant of an enum with data: { rc, tag, fields... }
             Some(variants) => {
                 for v in variants {
                     let fields: Vec<&str> = ["i64", "i64"].into_iter().chain(v.fields.iter().map(|f| llty(&f.ty))).collect();
-                    let _ = writeln!(out, "%enum.{}.{} = type {{ {} }}", s.name, v.name, fields.join(", "));
+                    let _ = writeln!(out, "%enum.{tname}.{} = type {{ {} }}", v.name, fields.join(", "));
                 }
             }
             None => {
                 let fields: Vec<&str> = std::iter::once("i64").chain(s.fields.iter().map(|f| llty(&f.ty))).collect();
-                let _ = writeln!(out, "%struct.{} = type {{ {} }}", s.name, fields.join(", "));
+                let _ = writeln!(out, "%struct.{tname} = type {{ {} }}", fields.join(", "));
             }
         }
     }
@@ -230,6 +239,8 @@ fn variant_switch(code: &[String]) -> String {
 
 struct Codegen<'a> {
     prog: &'a Program,
+    /// Per struct or enum: its name in LLVM types (`%struct.<name>`).
+    type_names: Vec<String>,
     sources: &'a SourceMap<'a>,
     /// The function being generated.
     f: &'a Func,
@@ -325,7 +336,7 @@ impl<'a> Codegen<'a> {
         if is_pair(&self.prog.structs[sid].fields[idx].ty) {
             return String::new();
         }
-        let class = format!("field.{}.{idx}", self.prog.structs[sid].name);
+        let class = format!("field.{}.{idx}", self.type_names[sid]);
         self.tbaa(&class)
     }
 
@@ -333,14 +344,14 @@ impl<'a> Codegen<'a> {
         if is_pair(&self.prog.structs[sid].variants()[k].fields[i].ty) {
             return String::new();
         }
-        let class = format!("variant.{}.{k}.{i}", self.prog.structs[sid].name);
+        let class = format!("variant.{}.{k}.{i}", self.type_names[sid]);
         self.tbaa(&class)
     }
 
     /// `%enum.Shape.Circle`
     fn variant_llty(&self, sid: StructId, k: usize) -> String {
         let s = &self.prog.structs[sid];
-        format!("%enum.{}.{}", s.name, s.variants()[k].name)
+        format!("%enum.{}.{}", self.type_names[sid], s.variants()[k].name)
     }
 
     /// Does enum `sid` live on the heap (some variant carries data)?
@@ -490,7 +501,7 @@ impl<'a> Codegen<'a> {
                     Place::Field { obj, sid, idx } => {
                         let o = self.operand(&Operand::Var(*obj));
                         let p = self.fresh();
-                        let sname = &self.prog.structs[*sid].name;
+                        let sname = self.type_names[*sid].clone();
                         self.emit(format!("{p} = getelementptr inbounds %struct.{sname}, ptr {o}, i32 0, i32 {}", idx + 1));
                         let md = self.field_tbaa(*sid, *idx);
                         (p, self.prog.structs[*sid].fields[*idx].ty.clone(), md)
@@ -709,7 +720,7 @@ impl<'a> Codegen<'a> {
         match t {
             Type::Struct(sid) => {
                 let s = &self.prog.structs[*sid];
-                let sname = s.name.clone();
+                let sname = self.type_names[*sid].clone();
                 let fields: Vec<(usize, Type)> =
                     s.fields.iter().enumerate().filter(|(_, f)| is_ref(&f.ty)).map(|(i, f)| (i, f.ty.clone())).collect();
                 let (mut trace, mut all, mut acyclic) = (String::new(), String::new(), String::new());
@@ -849,7 +860,7 @@ impl<'a> Codegen<'a> {
             match &t {
                 Type::Struct(sid) => {
                     let s = &self.prog.structs[*sid];
-                    let sname = s.name.clone();
+                    let sname = self.type_names[*sid].clone();
                     let fields: Vec<(usize, Type)> = s.fields.iter().enumerate().filter(|(_, f)| is_ref(&f.ty)).map(|(i, f)| (i, f.ty.clone())).collect();
                     let mut body = String::new();
                     for (k, (idx, fty)) in fields.iter().enumerate() {
@@ -1069,7 +1080,7 @@ impl<'a> Codegen<'a> {
             Rvalue::Field(obj, sid, idx) => {
                 let o = self.operand(&Operand::Var(*obj));
                 let s = &self.prog.structs[*sid];
-                let sname = s.name.clone();
+                let sname = self.type_names[*sid].clone();
                 let ft = llty(&s.fields[*idx].ty);
                 let p = self.fresh();
                 self.emit(format!("{p} = getelementptr inbounds %struct.{sname}, ptr {o}, i32 0, i32 {}", idx + 1));
@@ -1097,7 +1108,7 @@ impl<'a> Codegen<'a> {
                 let vals: Vec<(String, Type)> = args.iter().map(|a| (self.operand(a), self.f.operand_ty(a))).collect();
                 // LLVM type, its type in Isma, and the index of the first field.
                 let (lt, ty, first) = match *c {
-                    Ctor::Struct(sid) => (format!("%struct.{}", self.prog.structs[sid].name), Type::Struct(sid), 1),
+                    Ctor::Struct(sid) => (format!("%struct.{}", self.type_names[sid]), Type::Struct(sid), 1),
                     Ctor::Variant(sid, k) => (self.variant_llty(sid, k), Type::Enum(sid, true), 2),
                 };
                 let szp = self.fresh();
