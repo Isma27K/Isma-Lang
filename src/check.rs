@@ -10,7 +10,10 @@ use crate::project::{FileKind, Resolved, SourceFile, Target};
 use crate::span::Span;
 use crate::tast::*;
 use crate::types::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+mod generics;
+use generics::*;
 
 const BUILTINS: &[&str] = &["print", "input", "args", "panic", "assert", "sqrt", "exit"];
 const RESERVED_TYPES: &[&str] = &["Int", "Float", "Bool", "String", "List", "Unit"];
@@ -21,6 +24,15 @@ struct FuncSig {
     params: Vec<(String, Type)>,
     ret: Type,
     span: Span,
+    /// Of a generic declaration: all its type parameters (its owner's
+    /// first, then its own). Empty otherwise.
+    type_params: Vec<ParamId>,
+    /// The type parameters a call picks (from the arguments or `f[Int](...)`):
+    /// the function's own (`T` of `fn max[T]`).
+    tparams: Vec<ParamId>,
+    /// For generic code and its copies: the generic declaration, and the type
+    /// standing for each of its `type_params` (themselves, for the declaration).
+    instance: Option<(FuncId, Vec<Type>)>,
 }
 
 /// What an operator function defines: `fn +(self, other: T)` is `Add`, and
@@ -267,6 +279,39 @@ pub struct Checker {
     local_meta: Vec<LocalMeta>,
     field_spans: Vec<Vec<Span>>,
     pending_struct_hovers: Vec<(Span, StructId)>,
+    // generics (see `generics.rs`)
+    type_params: Vec<ParamInfo>,
+    /// Type parameter names in scope: bound to themselves (`Type::Param`)
+    /// while checking generic code, to concrete types while copying it.
+    type_env: Vec<(String, Type)>,
+    /// Per struct id: the generic type it's an instance of (itself if it
+    /// isn't one), its type arguments, and whether those contain a type parameter.
+    struct_origin: Vec<StructId>,
+    struct_args: Vec<Vec<Type>>,
+    struct_has_param: Vec<bool>,
+    /// Per struct id: the type parameters of a generic type's declaration.
+    struct_params: Vec<Vec<ParamId>>,
+    /// Per struct id: are its fields (or variants) known yet?
+    fields_ready: Vec<bool>,
+    /// Instances made before their generic type's fields were known.
+    pending_fields: Vec<StructId>,
+    struct_instances: HashMap<(StructId, Vec<Type>), StructId>,
+    fn_instances: HashMap<(FuncId, Vec<Type>), FuncId>,
+    /// What each generic declaration's code needs from its type parameters.
+    needs: HashMap<FuncId, Vec<NeedUse>>,
+    obligations: Vec<Obligation>,
+    /// The generic declaration whose body is being checked.
+    cur_generic: Option<FuncId>,
+    /// Copies of generic code still to be built, and every one ever queued.
+    queue: Vec<FuncId>,
+    queued: HashSet<FuncId>,
+    /// Symbols given to copies of generic functions.
+    symbols: HashSet<String>,
+    /// Generic types and functions already reported to grow without end.
+    endless: HashSet<StructId>,
+    endless_fns: HashSet<FuncId>,
+    /// Hovers on generic functions (declaration, span), which get what their type parameters must support.
+    generic_hovers: Vec<(FuncId, Span)>,
 }
 
 /// Type-check: `Ok((program, warnings))` or `Err(errors and warnings)`.
@@ -310,6 +355,25 @@ pub fn analyze(files: &[SourceFile]) -> Analysis {
         local_meta: Vec::new(),
         field_spans: Vec::new(),
         pending_struct_hovers: Vec::new(),
+        type_params: Vec::new(),
+        type_env: Vec::new(),
+        struct_origin: Vec::new(),
+        struct_args: Vec::new(),
+        struct_has_param: Vec::new(),
+        struct_params: Vec::new(),
+        fields_ready: Vec::new(),
+        pending_fields: Vec::new(),
+        struct_instances: HashMap::new(),
+        fn_instances: HashMap::new(),
+        needs: HashMap::new(),
+        obligations: Vec::new(),
+        cur_generic: None,
+        queue: Vec::new(),
+        queued: HashSet::new(),
+        symbols: HashSet::new(),
+        endless: HashSet::new(),
+        endless_fns: HashSet::new(),
+        generic_hovers: Vec::new(),
     };
     for (ns, f) in files.iter().enumerate().skip(1) {
         let doc = c.leading_comment(ns);
@@ -323,6 +387,14 @@ pub fn analyze(files: &[SourceFile]) -> Analysis {
     let has_errors = c.diags.iter().any(|d| d.is_error());
     let program = if has_errors { None } else { Some(TProgram { structs: c.structs, funcs }) };
     Analysis { program, diagnostics: c.diags, ide: c.ide }
+}
+
+/// Put the checked body of function `fid` in its place.
+fn put_func(out: &mut Vec<Option<TFunc>>, fid: FuncId, f: TFunc) {
+    if out.len() <= fid {
+        out.resize_with(fid + 1, || None);
+    }
+    out[fid] = Some(f);
 }
 
 fn fn_full_span(f: &FnDecl) -> Span {
@@ -421,7 +493,7 @@ impl Checker {
     }
 
     fn tn(&self, t: &Type) -> String {
-        t.display(&self.struct_names())
+        t.display(&self.struct_names(), &self.ide.params)
     }
 
     /// The `#` comment block directly above the line containing `offset`.
@@ -555,13 +627,16 @@ impl Checker {
         self.ide.hovers.push(HoverInfo { span, code, doc });
     }
 
-    fn signature(&self, name: &str, params: &[(String, Type)], ret: &Type, is_method: bool) -> String {
+    /// `fn max[T](a: T, b: T) -> T` (`tparams`: the function's own type parameters).
+    fn signature(&self, name: &str, tparams: &[ParamId], params: &[(String, Type)], ret: &Type, is_method: bool) -> String {
         let ps: Vec<String> = params
             .iter()
             .enumerate()
             .map(|(i, (n, t))| if is_method && i == 0 { "self".to_string() } else { format!("{n}: {}", self.tn(t)) })
             .collect();
-        let mut s = format!("fn {name}({})", ps.join(", "));
+        let tps: Vec<&str> = tparams.iter().map(|p| self.type_params[*p].name.as_str()).collect();
+        let tps = if tps.is_empty() { String::new() } else { format!("[{}]", tps.join(", ")) };
+        let mut s = format!("fn {name}{tps}({})", ps.join(", "));
         if *ret != Type::Unit {
             s.push_str(&format!(" -> {}", self.tn(ret)));
         }
@@ -570,23 +645,27 @@ impl Checker {
 
     fn struct_summary(&self, sid: StructId) -> String {
         let s = &self.ide.structs[sid];
+        // `Box[T]`, or `Box[Int]` for an instance (whose methods show its types).
+        let params = if s.instance { &s.type_args } else { &s.type_params };
+        let title = if params.is_empty() || s.instance { s.name.clone() } else { format!("{}[{}]", s.name, params.join(", ")) };
+        let method = |m: usize| replace_words(&self.ide.functions[m].signature, &s.type_params, if s.instance { &s.type_args } else { &s.type_params });
         if let Some(variants) = &s.variants {
-            let mut out = format!("enum {}:", s.name);
+            let mut out = format!("enum {title}:");
             for v in variants {
                 let short = v.signature.split_once('.').map(|(_, r)| r).unwrap_or(&v.signature);
                 out.push_str(&format!("\n    {short}"));
             }
             for &m in &s.methods {
-                out.push_str(&format!("\n    {}", self.ide.functions[m].signature));
+                out.push_str(&format!("\n    {}", method(m)));
             }
             return out;
         }
-        let mut out = format!("struct {}:", s.name);
+        let mut out = format!("struct {title}:");
         for f in &s.fields {
             out.push_str(&format!("\n    {} {}: {}", if f.mutable { "var" } else { "val" }, f.name, f.ty));
         }
         for &m in &s.methods {
-            out.push_str(&format!("\n    {}", self.ide.functions[m].signature));
+            out.push_str(&format!("\n    {}", method(m)));
         }
         if s.fields.is_empty() && s.methods.is_empty() {
             out.push_str("\n    pass");
@@ -595,6 +674,13 @@ impl Checker {
     }
 
     fn finish_ide(&mut self) {
+        // Instances of generic types have the methods of their type.
+        for sid in 0..self.ide.structs.len() {
+            let origin = self.struct_origin[sid];
+            if origin != sid {
+                self.ide.structs[sid].methods = self.ide.structs[origin].methods.clone();
+            }
+        }
         for (span, sid) in std::mem::take(&mut self.pending_struct_hovers) {
             let code = self.struct_summary(sid);
             self.hover(span, code, None);
@@ -661,14 +747,14 @@ impl Checker {
         for &(ns, program) in units {
             self.ns = ns;
             for item in &program.items {
-                let (name_id, end, enum_boxed) = match item {
+                let (name_id, end, enum_boxed, tparams) = match item {
                     Item::Struct(s) => {
                         let end = s.fields.iter().map(|f| f.ty.span.end).chain(s.methods.iter().map(|m| fn_full_span(m).end)).max();
-                        (&s.name, end, None)
+                        (&s.name, end, None, &s.type_params)
                     }
                     Item::Enum(e) => {
                         let end = e.variants.iter().map(|v| v.span.end).chain(e.methods.iter().map(|m| fn_full_span(m).end)).max();
-                        (&e.name, end, Some(e.variants.iter().any(|v| !v.fields.is_empty())))
+                        (&e.name, end, Some(e.variants.iter().any(|v| !v.fields.is_empty())), &e.type_params)
                     }
                     _ => continue,
                 };
@@ -689,7 +775,19 @@ impl Checker {
                 }
                 let id = self.structs.len();
                 let display = self.display_struct(ns, name);
-                self.structs.push(TStruct { name: display.clone(), fields: Vec::new(), variants: enum_boxed.map(|_| Vec::new()) });
+                let pids = self.declare_type_params(tparams, name, &[]);
+                let pnames: Vec<String> = pids.iter().map(|p| self.type_params[*p].name.clone()).collect();
+                let shown = if pids.is_empty() { display.clone() } else { format!("{display}[{}]", pnames.join(", ")) };
+                let args: Vec<Type> = pids.iter().map(|p| Type::Param(*p)).collect();
+                self.struct_origin.push(id);
+                self.struct_args.push(args.clone());
+                self.struct_has_param.push(!pids.is_empty());
+                self.struct_params.push(pids.clone());
+                self.fields_ready.push(false);
+                if !pids.is_empty() {
+                    self.struct_instances.insert((id, args), id);
+                }
+                self.structs.push(TStruct { name: shown, fields: Vec::new(), variants: enum_boxed.map(|_| Vec::new()), generic: !pids.is_empty() });
                 self.def_types.push(match enum_boxed {
                     Some(boxed) => Type::Enum(id, boxed),
                     None => Type::Struct(id),
@@ -707,6 +805,9 @@ impl Checker {
                     methods: Vec::new(),
                     ns,
                     doc,
+                    type_params: pnames,
+                    type_args: Vec::new(),
+                    instance: false,
                 });
                 self.field_spans.push(Vec::new());
                 self.pending_struct_hovers.push((name_id.span, id));
@@ -717,7 +818,7 @@ impl Checker {
         self.resolve_name_imports(&mut pending, false);
 
         // Pass 2: struct fields, function + method signatures.
-        let mut bodies: Vec<(&FnDecl, Option<StructId>, usize)> = Vec::new();
+        let mut bodies: Vec<(&FnDecl, Option<StructId>, usize, FuncId)> = Vec::new();
         for &(ns, program) in units {
             self.ns = ns;
             for item in &program.items {
@@ -728,6 +829,7 @@ impl Checker {
                         if self.struct_spans[sid] != s.name.span {
                             continue; // duplicate definition already reported
                         }
+                        self.type_env = self.struct_env(sid);
                         let mut seen: HashMap<&str, Span> = HashMap::new();
                         let mut fields = Vec::new();
                         for f in &s.fields {
@@ -754,6 +856,9 @@ impl Checker {
                             fields.push(TField { name: f.name.name.clone(), ty, mutable: f.mutable });
                         }
                         self.structs[sid].fields = fields;
+                        self.type_env.clear();
+                        self.fields_ready[sid] = true;
+                        self.unused_type_params(sid);
                         let fields: Vec<&str> = seen.keys().copied().collect();
                         self.declare_methods(sid, &s.methods, &fields, ns, &mut bodies);
                     }
@@ -769,6 +874,7 @@ impl Checker {
                             );
                         }
                         let ename = self.structs[sid].name.clone();
+                        self.type_env = self.struct_env(sid);
                         let mut seen: HashMap<&str, Span> = HashMap::new();
                         let mut variants = Vec::new();
                         for v in &e.variants {
@@ -806,6 +912,9 @@ impl Checker {
                             variants.push(tv);
                         }
                         self.structs[sid].variants = Some(variants);
+                        self.type_env.clear();
+                        self.fields_ready[sid] = true;
+                        self.unused_type_params(sid);
                         self.declare_methods(sid, &e.methods, &[], ns, &mut bodies);
                     }
                     Item::Fn(f) => {
@@ -840,10 +949,15 @@ impl Checker {
                         }
                         let fid = self.declare_fn(f, None);
                         self.func_index.insert((ns, name.clone()), fid);
-                        bodies.push((f, None, ns));
+                        bodies.push((f, None, ns, fid));
                     }
                 }
             }
+        }
+
+        // Instances of generic types used before the types' fields were known.
+        while let Some(id) = self.pending_fields.pop() {
+            self.fill_instance(id);
         }
 
         // `from m import function`, and names that don't exist.
@@ -860,11 +974,31 @@ impl Checker {
             }
         }
 
-        // Pass 3: bodies.
-        let mut out = Vec::new();
-        for (decl, owner, ns) in bodies {
+        // Pass 3: bodies. Generic code is checked once, with its type
+        // parameters as they are; what it needs from them is collected.
+        let mut out: Vec<Option<TFunc>> = Vec::new();
+        let mut templates: HashMap<FuncId, (&FnDecl, Option<StructId>, usize)> = HashMap::new();
+        for &(decl, owner, ns, fid) in &bodies {
             self.ns = ns;
-            out.push(self.fn_body(decl, owner, out.len()));
+            let generic = !self.funcs[fid].type_params.is_empty();
+            self.cur_generic = generic.then_some(fid);
+            let tf = self.fn_body(decl, owner, fid);
+            self.cur_generic = None;
+            self.record_calls(&tf.body, generic.then_some(fid));
+            if generic {
+                templates.insert(fid, (decl, owner, ns));
+            } else {
+                put_func(&mut out, fid, tf);
+            }
+        }
+        self.ns = 0;
+        // Then every use of generic code is checked against those needs, and
+        // the code is copied for each set of types it's used with.
+        self.close_needs();
+        self.check_obligations(0);
+        self.generic_docs();
+        if self.error_count() == 0 {
+            self.instantiate(&templates, &mut out);
         }
         self.ns = 0;
 
@@ -889,7 +1023,22 @@ impl Checker {
                     .with_help(if whole_line { "remove this line" } else { "remove it from the import" }),
             );
         }
-        out
+        // Generic code itself (and copies never needed) leaves a placeholder.
+        (0..self.funcs.len())
+            .map(|fid| {
+                out.get_mut(fid).and_then(Option::take).unwrap_or_else(|| TFunc {
+                    name: self.funcs[fid].name.clone(),
+                    symbol: self.funcs[fid].symbol.clone(),
+                    params: Vec::new(),
+                    ret: Type::Unit,
+                    locals: Vec::new(),
+                    body: Vec::new(),
+                    exported: false,
+                    track_caller: false,
+                    generic: true,
+                })
+            })
+            .collect()
     }
 
     /// Bind the names one `import` line brings into namespace `ns`.
@@ -1125,13 +1274,13 @@ impl Checker {
     }
 
     /// The methods of struct or enum `sid` (`fields`: names they may not reuse).
-    fn declare_methods<'p>(&mut self, sid: StructId, methods: &'p [FnDecl], fields: &[&str], ns: usize, bodies: &mut Vec<(&'p FnDecl, Option<StructId>, usize)>) {
+    fn declare_methods<'p>(&mut self, sid: StructId, methods: &'p [FnDecl], fields: &[&str], ns: usize, bodies: &mut Vec<(&'p FnDecl, Option<StructId>, usize, FuncId)>) {
         let tname = self.structs[sid].name.clone();
         for m in methods {
             if is_operator_name(&m.name.name) && m.self_param.is_some() {
                 if let Some(fid) = self.declare_operator(sid, m) {
                     self.ide.structs[sid].methods.push(fid);
-                    bodies.push((m, Some(sid), ns));
+                    bodies.push((m, Some(sid), ns, fid));
                 }
                 continue;
             }
@@ -1157,7 +1306,7 @@ impl Checker {
             let fid = self.declare_fn(m, Some(sid));
             self.methods.insert((sid, m.name.name.clone()), fid);
             self.ide.structs[sid].methods.push(fid);
-            bodies.push((m, Some(sid), ns));
+            bodies.push((m, Some(sid), ns, fid));
         }
     }
 
@@ -1264,8 +1413,8 @@ impl Checker {
 
     /// The overload of operator `kind` of `sid` that takes an argument of type
     /// `arg` (an exact match first). `Err` holds the overloads that exist.
-    fn find_operator(&self, sid: StructId, kind: OpKind, arg: Option<&Type>) -> Result<FuncId, Vec<FuncId>> {
-        let cands = self.operators.get(&(sid, kind)).cloned().unwrap_or_default();
+    fn find_operator(&mut self, sid: StructId, kind: OpKind, arg: Option<&Type>) -> Result<FuncId, Vec<FuncId>> {
+        let cands = self.ops(sid, kind);
         let Some(arg) = arg else { return cands.first().copied().ok_or(cands) };
         let param = |f: FuncId| self.funcs[f].params[1].1.clone();
         cands
@@ -1362,12 +1511,12 @@ impl Checker {
     }
 
     /// `fn to_string(self) -> String` of a struct or enum, which `print` and f-strings use.
-    fn to_string_method(&self, t: &Type) -> Option<FuncId> {
+    fn to_string_method(&mut self, t: &Type) -> Option<FuncId> {
         let sid = match t {
             Type::Struct(s) | Type::Enum(s, _) => *s,
             _ => return None,
         };
-        let fid = *self.methods.get(&(sid, "to_string".to_string()))?;
+        let fid = self.method(sid, "to_string")?;
         (self.funcs[fid].params.len() == 1 && self.funcs[fid].ret == Type::Str).then_some(fid)
     }
 
@@ -1382,6 +1531,11 @@ impl Checker {
     }
 
     fn declare_fn(&mut self, f: &FnDecl, owner: Option<StructId>) -> FuncId {
+        // Type parameters: the owner's (`struct Box[T]`), then the function's own.
+        let outer: Vec<ParamId> = owner.map(|s| self.struct_params[s].clone()).unwrap_or_default();
+        let own = self.declare_type_params(&f.type_params, &f.name.name, &outer);
+        let all: Vec<ParamId> = outer.iter().chain(&own).copied().collect();
+        self.type_env = all.iter().map(|p| (self.type_params[*p].name.clone(), Type::Param(*p))).collect();
         let mut params = Vec::new();
         if let Some(sid) = owner {
             params.push(("self".to_string(), self.def_types[sid].clone()));
@@ -1405,12 +1559,24 @@ impl Checker {
             Some(t) => self.resolve_type(t),
             None => Type::Unit,
         };
+        self.type_env.clear();
+        for &p in &own {
+            let valid = !RESERVED_TYPES.contains(&self.type_params[p].name.as_str());
+            if valid && !params.iter().any(|(_, t)| self.mentions(t, p)) && !self.mentions(&ret, p) {
+                let name = self.type_params[p].name.clone();
+                self.diags.push(
+                    Diagnostic::warning(format!("type parameter `{name}` is never used"), self.type_params[p].span)
+                        .with_primary(format!("no parameter or return type mentions `{name}`"))
+                        .with_help("remove it, or use it in the signature"),
+                );
+            }
+        }
         let module = &self.ns_names[self.ns];
         let msym = &self.ns_symbols[self.ns];
         let (name, symbol) = match owner {
             Some(sid) => {
                 let sname = &self.structs[sid].name;
-                let short = sname.rsplit('.').next().unwrap_or(sname);
+                let short = short_name(sname);
                 // Operator functions get a name, numbered because they can be overloaded.
                 let method = if is_operator_name(&f.name.name) { format!("op_{}{}", OpKind::mangled(&f.name.name), self.funcs.len()) } else { f.name.name.clone() };
                 let symbol = if self.ns == 0 { format!("isma_m_{short}_{method}") } else { format!("isma_m_{msym}__{short}_{method}") };
@@ -1420,7 +1586,7 @@ impl Checker {
             None if self.ns == 0 => (f.name.name.clone(), format!("isma_fn_{}", f.name.name)),
             None => (format!("{module}.{}", f.name.name), format!("isma_{msym}__{}", f.name.name)),
         };
-        let sig = self.signature(&f.name.name, &params, &ret, owner.is_some());
+        let sig = self.signature(&f.name.name, &own, &params, &ret, owner.is_some());
         let comment = self.doc_comment(f.sig_span.start);
         let hover_doc = match (owner, &comment) {
             (Some(sid), Some(c)) => Some(format!("method of `{}`\n\n{c}", self.structs[sid].name)),
@@ -1437,9 +1603,14 @@ impl Checker {
             owner,
             ns: self.ns,
             doc: comment,
+            instance: false,
         });
         let id = self.funcs.len();
-        self.funcs.push(FuncSig { name, symbol, params, ret, span: f.name.span });
+        if !own.is_empty() {
+            self.generic_hovers.push((id, f.name.span));
+        }
+        let instance = (!all.is_empty()).then(|| (id, all.iter().map(|p| Type::Param(*p)).collect()));
+        self.funcs.push(FuncSig { name, symbol, params, ret, span: f.name.span, type_params: all, tparams: own, instance });
         id
     }
 
@@ -1452,6 +1623,9 @@ impl Checker {
         let name = t.name.name.as_str();
         if let Some(m) = &t.module {
             return self.resolve_module_type(m, t);
+        }
+        if let Some(ty) = self.type_param_ref(t) {
+            return ty;
         }
         let expect_args = |c: &mut Checker, n: usize| -> bool {
             if t.args.len() != n {
@@ -1492,10 +1666,7 @@ impl Checker {
                 if let Some(sid) = self.visible_struct(name) {
                     self.ide.definitions.push((t.name.span, self.struct_spans[sid]));
                     self.pending_struct_hovers.push((t.name.span, sid));
-                    if !expect_args(self, 0) {
-                        return Type::Error;
-                    }
-                    return self.def_types[sid].clone();
+                    return self.apply_type_args(sid, t, name);
                 }
                 if self.import_failed(name) {
                     return Type::Error;
@@ -1545,11 +1716,7 @@ impl Checker {
             Some(&sid) if !is_private(name) || module_ns == self.ns => {
                 self.pending_struct_hovers.push((t.name.span, sid));
                 self.ide.definitions.push((t.name.span, self.struct_spans[sid]));
-                if !t.args.is_empty() {
-                    self.err(Diagnostic::error(format!("type `{}.{name}` does not take type arguments", m.name), t.span));
-                    return Type::Error;
-                }
-                self.def_types[sid].clone()
+                self.apply_type_args(sid, t, &format!("{}.{name}", m.name))
             }
             Some(_) => {
                 self.err(Diagnostic::error(format!("`{}.{name}` is private to the `{}` module", m.name, m.name), t.name.span));
@@ -1580,6 +1747,7 @@ impl Checker {
         self.nonnull.clear();
         self.scopes = vec![HashMap::new()];
         self.loop_depth = 0;
+        self.type_env = self.env_of(fid);
         let sig_params: Vec<(String, Type)> = self.funcs[fid].params.clone();
         self.ret_ty = self.funcs[fid].ret.clone();
         let mut params = Vec::new();
@@ -1604,6 +1772,8 @@ impl Checker {
             );
         }
         self.lint_locals();
+        self.type_env.clear();
+        let generic = self.funcs[fid].instance.is_some() && !self.is_concrete_instance(fid);
         let sig = &self.funcs[fid];
         TFunc {
             name: sig.name.clone(),
@@ -1614,6 +1784,7 @@ impl Checker {
             body,
             exported: sig.symbol == "isma_main",
             track_caller: self.ns_kinds[self.ns] == FileKind::Std,
+            generic,
         }
     }
 
@@ -2452,12 +2623,14 @@ impl Checker {
             [module, name] => self.imported_module(&module.name).and_then(|m| self.struct_index.get(&(m, name.name.clone())).copied()),
             _ => None,
         };
-        if found == Some(sid) {
+        // `Tree.Node` names the type of a `Tree[Int]` too.
+        let same = found.is_some_and(|f| self.struct_origin[f] == self.struct_origin[sid]);
+        if same {
             let name = path.last().unwrap();
             self.pending_struct_hovers.push((name.span, sid));
             self.ide.definitions.push((name.span, self.struct_spans[sid]));
         }
-        found == Some(sid)
+        same
     }
 
     /// The patterns for each field of a variant or struct: positional, then by
@@ -2527,7 +2700,12 @@ impl Checker {
     }
 
     /// `Shape` or `module.Shape`, when an expression names an enum (to build a variant).
-    fn enum_ref(&mut self, e: &Expr) -> Option<StructId> {
+    /// With the type arguments it's given, for a generic enum (`Tree[Int]`).
+    fn enum_ref<'e>(&mut self, e: &'e Expr) -> Option<(StructId, Option<&'e [TypeExpr]>)> {
+        if let ExprKind::TypeApply(inner, targs) = &e.kind {
+            let (sid, _) = self.enum_ref(inner)?;
+            return Some((sid, Some(targs)));
+        }
         let sid = match &e.kind {
             ExprKind::Name(n) if self.lookup(n).is_none() => self.visible_struct(n)?,
             ExprKind::Field(m, n) => {
@@ -2554,17 +2732,26 @@ impl Checker {
         };
         self.pending_struct_hovers.push((name_span, sid));
         self.ide.definitions.push((name_span, self.struct_spans[sid]));
-        Some(sid)
+        Some((sid, None))
     }
 
     /// `Shape.Circle(args)` (or `Shape.Empty` when `args` is `None`).
-    fn variant_value(&mut self, sid: StructId, name: &Ident, args: Option<&[Arg]>, span: Span) -> TExpr {
+    #[allow(clippy::too_many_arguments)]
+    fn variant_value(&mut self, sid: StructId, name: &Ident, args: Option<&[Arg]>, explicit: Option<&[TypeExpr]>, expected: Option<&Type>, span: Span) -> TExpr {
+        if explicit.is_some() && self.struct_params[sid].is_empty() {
+            let ename = self.structs[sid].name.clone();
+            let _ = self.infer_args(&format!("enum `{ename}`"), &[], &[], &Type::Unit, &[], explicit, None, span);
+            for a in args.unwrap_or(&[]) {
+                let _ = self.expr(&a.value, None);
+            }
+            return Self::error_expr(span);
+        }
         let ename = self.structs[sid].name.clone();
         let variants = self.structs[sid].variants().to_vec();
         let ty = self.def_types[sid].clone();
         let Some(k) = variants.iter().position(|v| v.name == name.name) else {
             let mut d = Diagnostic::error(format!("enum `{ename}` has no variant `{}`", name.name), name.span).with_primary("unknown variant");
-            if self.methods.contains_key(&(sid, name.name.clone())) {
+            if self.has_method(sid, &name.name) {
                 d = d.with_note(format!("`{}` is a method: call it on a `{ename}` value", name.name));
             } else if let Some(s) = suggest(&name.name, variants.iter().map(|v| v.name.as_str())) {
                 d = d.with_help(format!("did you mean `{s}`?"));
@@ -2580,7 +2767,25 @@ impl Checker {
         };
         self.variant_use(sid, k, name.span);
         let v = &variants[k];
-        let short = ename.rsplit('.').next().unwrap_or(&ename).to_string();
+        let short = short_name(&ename).to_string();
+        // A generic enum: the type arguments come from the fields' values, or the type expected here.
+        let tparams = self.struct_params[sid].clone();
+        if !tparams.is_empty() && (args.is_some() || v.fields.is_empty()) {
+            let params: Vec<(String, Type)> = v.fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect();
+            let what = format!("`{short}.{}`", v.name);
+            if args.is_some() && params.is_empty() {
+                // reported below
+            } else {
+                let expected = expected.map(Type::non_null).filter(|t| user_type(t).is_some_and(|e| self.struct_origin[e] == sid));
+                return match self.infer_args(&what, &tparams, &params, &ty, args.unwrap_or(&[]), explicit, expected, span) {
+                    Some((targs, bound)) => match self.struct_instance(sid, bound) {
+                        Some(i) => Self::mk(TExprKind::EnumNew(i, k, targs), self.def_types[i].clone(), span),
+                        None => Self::error_expr(span),
+                    },
+                    None => Self::error_expr(span),
+                };
+            }
+        }
         match args {
             None if v.fields.is_empty() => Self::mk(TExprKind::EnumNew(sid, k, Vec::new()), ty, span),
             None => {
@@ -2938,7 +3143,7 @@ impl Checker {
                         .with_note(format!("its `fn []=` takes {}", and_list(&shown)))
                 };
                 if cands.is_empty() && self.can_extend(sid) {
-                    if self.operators.contains_key(&(sid, OpKind::Get)) {
+                    if self.has_ops(sid, OpKind::Get) {
                         d = d.with_note(format!("`{short}` has `fn []`, so `x[i]` can be read but not assigned"));
                     }
                     d = d.with_help(format!("define `fn []=(self, i: {b}, value: T)` in `{short}`"));
@@ -3029,7 +3234,7 @@ impl Checker {
         let mut d = Diagnostic::error(format!("no field `{}` on type `{tn}`", field.name), field.span).with_primary("unknown field");
         if let Type::Enum(sid, _) = ty {
             let sid = *sid;
-            if self.methods.contains_key(&(sid, field.name.clone())) {
+            if self.has_method(sid, &field.name) {
                 d = d.with_help(format!("`{}` is a method; call it with `.{}()`", field.name, field.name));
             } else {
                 let example = self.structs[sid]
@@ -3046,7 +3251,7 @@ impl Checker {
         }
         if let Type::Struct(sid) = ty {
             let sid = *sid;
-            if self.methods.contains_key(&(sid, field.name.clone())) {
+            if self.has_method(sid, &field.name) {
                 d = d.with_help(format!("`{}` is a method; call it with `.{}()`", field.name, field.name));
             } else if let Some(s) = suggest(&field.name, self.structs[sid].fields.iter().map(|f| f.name.as_str())) {
                 d = d.with_help(format!("did you mean `{s}`?"));
@@ -3181,10 +3386,32 @@ impl Checker {
                 Self::error_expr(span)
             }
             ExprKind::Binary(op, l, r) => self.binary(*op, l, r, span),
+            ExprKind::TypeApply(inner, targs) => {
+                for t in targs {
+                    let _ = self.resolve_type(t);
+                }
+                let shown = self.snippet(span).unwrap_or_else(|| "this".into());
+                let d = match &inner.kind {
+                    ExprKind::Name(n) if self.lookup(n).is_none() && self.visible_func(n).is_some() => Diagnostic::error(format!("`{shown}` is a function, not a value"), span)
+                        .with_help(format!("call it: `{shown}(...)`"))
+                        .with_note("functions are not first-class values yet"),
+                    ExprKind::Name(n) if self.lookup(n).is_none() && self.visible_struct(n).is_some() => {
+                        Diagnostic::error(format!("`{shown}` is a type, not a value"), span).with_help(format!("construct one with `{shown}(...)`"))
+                    }
+                    _ => Diagnostic::error(format!("`{shown}` is not a value"), span),
+                };
+                self.err(d);
+                Self::error_expr(span)
+            }
             ExprKind::Unary(op, inner) => {
                 let t = self.expr(inner, None);
                 match op {
                     UnOp::Neg if user_type(&t.ty).is_some() => self.user_neg(t, span),
+                    UnOp::Neg if matches!(t.ty, Type::Param(_)) => {
+                        self.require(&t.ty, Need::Neg, span);
+                        let ty = t.ty.clone();
+                        Self::mk(TExprKind::Neg(Box::new(t)), ty, span)
+                    }
                     UnOp::Neg => {
                         if matches!(&t.ty, Type::Nullable(i) if i.is_numeric()) {
                             self.null_use_error(&t, NullUse::Value);
@@ -3211,8 +3438,8 @@ impl Checker {
             }
             ExprKind::Call { callee, args } => self.call(callee, args, span, expected),
             ExprKind::Field(obj, field) => {
-                if let Some(sid) = self.enum_ref(obj) {
-                    return self.variant_value(sid, field, None, span);
+                if let Some((sid, targs)) = self.enum_ref(obj) {
+                    return self.variant_value(sid, field, None, targs, expected, span);
                 }
                 let t = self.expr(obj, None);
                 self.field_access(t, field, span)
@@ -3237,7 +3464,8 @@ impl Checker {
                         self.add_facts(Self::nonnull_when_nonnull(&t));
                         Self::mk(TExprKind::NotNull(Box::new(t)), *ty, span)
                     }
-                    Type::Error => t,
+                    // A `T` is `null` when `T` is a nullable type.
+                    Type::Error | Type::Param(_) => t,
                     Type::Null => {
                         self.err(Diagnostic::error("`!!` on `null` always panics", span));
                         Self::error_expr(span)
@@ -3349,6 +3577,15 @@ impl Checker {
                 }
             }
             Type::Error => Self::error_expr(span),
+            Type::Param(p) => {
+                let (tn, owner) = (self.tn(&t.ty), self.type_params[*p].owner.clone());
+                self.err(
+                    Diagnostic::error(format!("no field `{}` on type `{tn}`", field.name), field.span)
+                        .with_primary("unknown field")
+                        .with_note(format!("`{tn}` is a type parameter of `{owner}`: it stands for whichever type the caller picks, so it has no fields")),
+                );
+                Self::error_expr(span)
+            }
             Type::Nullable(inner) if matches!(**inner, Type::Struct(_)) => {
                 if let Type::Struct(sid) = **inner
                     && let Some(idx) = self.structs[sid].fields.iter().position(|f| f.name == field.name)
@@ -3379,6 +3616,8 @@ impl Checker {
         let tl = self.expr(l, expected.map(|t| t.clone().nullable()).as_ref());
         let inner = match tl.ty.clone() {
             Type::Nullable(inner) => *inner,
+            // A `T` is `null` when `T` is a nullable type.
+            t @ Type::Param(_) => t,
             Type::Error => {
                 let _ = self.expr(r, None);
                 return Self::error_expr(span);
@@ -3431,6 +3670,10 @@ impl Checker {
 
     /// Convert a value to String for f-strings.
     fn stringify(&mut self, t: TExpr, span: Span) -> TExpr {
+        if matches!(t.ty.non_null(), Type::Param(_)) {
+            self.require(&t.ty, Need::Format, span);
+            return Self::mk(TExprKind::Builtin(Builtin::ToStr, vec![t]), Type::Str, span);
+        }
         if let Some(fid) = self.to_string_method(&t.ty) {
             return Self::mk(TExprKind::Call(fid, vec![t]), Type::Str, span);
         }
@@ -3488,11 +3731,15 @@ impl Checker {
         if tl.ty.is_error() || tr.ty.is_error() {
             return Self::mk(TExprKind::Binary(op, Box::new(tl), Box::new(tr)), result_on_error(op), span);
         }
+        // Generic code: what it does with a `T` is what `T` must support.
+        if matches!(tl.ty.non_null(), Type::Param(_)) || matches!(tr.ty.non_null(), Type::Param(_)) {
+            return self.param_binary(op, tl, tr, l.span, r.span, span);
+        }
         // Structs and enums: their operator functions (enums without data have `==` built in).
         if let Some(sid) = user_type(&tl.ty) {
             let builtin_eq = matches!(op, BinOp::Eq | BinOp::Ne)
                 && matches!(tl.ty.non_null(), Type::Enum(_, false))
-                && !self.operators.contains_key(&(sid, OpKind::Eq));
+                && !self.has_ops(sid, OpKind::Eq);
             if !builtin_eq {
                 return self.user_binary(op, sid, tl, tr, l.span, r.span, span);
             }
@@ -3584,7 +3831,7 @@ impl Checker {
         self.ide.expr_types.push((null.span, t.ty.clone().nullable()));
         if t.ty == Type::Unit {
             self.err(Diagnostic::error("this expression has no value to compare with `null`", other.span));
-        } else if !t.ty.is_nullable() && !t.ty.is_error() {
+        } else if !t.ty.is_nullable() && !t.ty.is_error() && !matches!(t.ty, Type::Param(_)) {
             let tn = self.tn(&t.ty);
             let what = self.snippet(other.span).map(|s| format!("`{s}`")).unwrap_or_else(|| "this value".into());
             let mut d = Diagnostic::warning(format!("{what} is never `null`, so this is always `{}`", op == BinOp::Ne), span)
@@ -3600,80 +3847,18 @@ impl Checker {
 
     /// Match positional/named arguments against parameters; returns args in parameter order.
     fn match_args(&mut self, what: &str, params: &[(String, Type)], args: &[Arg], span: Span) -> Option<Vec<TExpr>> {
-        let mut slots: Vec<Option<TExpr>> = (0..params.len()).map(|_| None).collect();
-        let mut ok = true;
-        let mut seen_named = false;
-        for (i, a) in args.iter().enumerate() {
-            let idx = match &a.name {
-                None => {
-                    if seen_named {
-                        self.err(Diagnostic::error("positional arguments must come before named arguments", a.value.span));
-                        ok = false;
-                        continue;
-                    }
-                    if i >= params.len() {
-                        let _ = self.expr(&a.value, None);
-                        ok = false;
-                        continue;
-                    }
-                    i
-                }
-                Some(n) => {
-                    seen_named = true;
-                    match params.iter().position(|(pn, _)| *pn == n.name) {
-                        Some(idx) => {
-                            if slots[idx].is_some() {
-                                self.err(Diagnostic::error(format!("argument `{}` is given more than once", n.name), n.span));
-                                ok = false;
-                                continue;
-                            }
-                            idx
-                        }
-                        None => {
-                            let mut d = Diagnostic::error(format!("{what} has no parameter named `{}`", n.name), n.span);
-                            if let Some(s) = suggest(&n.name, params.iter().map(|(p, _)| p.as_str())) {
-                                d = d.with_help(format!("did you mean `{s}`?"));
-                            }
-                            self.err(d);
-                            let _ = self.expr(&a.value, None);
-                            ok = false;
-                            continue;
-                        }
-                    }
-                }
-            };
-            let pty = params[idx].1.clone();
-            let t = self.expr(&a.value, Some(&pty));
-            let t = self.coerce(t, &pty, None);
-            slots[idx] = Some(t);
-        }
-        if args.len() > params.len() {
-            self.err(
-                Diagnostic::error(format!("{what} takes {} argument(s) but {} were given", params.len(), args.len()), span)
-                    .with_primary(format!("expected {} argument(s)", params.len())),
-            );
-            return None;
-        }
-        let missing: Vec<String> = params
-            .iter()
-            .zip(&slots)
-            .filter(|(_, s)| s.is_none())
-            .map(|((n, t), _)| format!("`{n}: {}`", self.tn(t)))
-            .collect();
-        if !missing.is_empty() && ok {
-            self.err(
-                Diagnostic::error(format!("{what} is missing argument(s): {}", missing.join(", ")), span)
-                    .with_primary(format!("expected {} argument(s), found {}", params.len(), args.len())),
-            );
-            return None;
-        }
-        if !ok || !missing.is_empty() {
-            return None;
-        }
-        Some(slots.into_iter().map(|s| s.unwrap()).collect())
+        self.infer_args(what, &[], params, &Type::Unit, args, None, None, span).map(|(a, _)| a)
     }
 
-    fn call(&mut self, callee: &Expr, args: &[Arg], span: Span, _expected: Option<&Type>) -> TExpr {
+    fn call(&mut self, callee: &Expr, args: &[Arg], span: Span, expected: Option<&Type>) -> TExpr {
+        // `max[Int](a, b)`: explicit type arguments.
+        if let ExprKind::TypeApply(inner, targs) = &callee.kind {
+            return self.call_with(inner, Some(targs), args, span, expected);
+        }
+        self.call_with(callee, None, args, span, expected)
+    }
+
+    fn call_with(&mut self, callee: &Expr, explicit: Option<&[TypeExpr]>, args: &[Arg], span: Span, expected: Option<&Type>) -> TExpr {
         match &callee.kind {
             ExprKind::Name(name) => {
                 if self.lookup(name).is_some() {
@@ -3692,16 +3877,15 @@ impl Checker {
                     });
                     self.hover(callee.span, code, doc);
                     self.ide.definitions.push((callee.span, self.funcs[fid].span));
-                    let params = self.funcs[fid].params.clone();
-                    let ret = self.funcs[fid].ret.clone();
                     let what = format!("function `{name}`");
-                    return match self.match_args(&what, &params, args, span) {
-                        Some(targs) => Self::mk(TExprKind::Call(fid, targs), ret, span),
-                        None => Self::mk(TExprKind::Int(0), if ret == Type::Unit { Type::Unit } else { Type::Error }, span),
-                    };
+                    return self.call_fn(fid, &what, None, args, explicit, expected, callee.span, span);
                 }
                 if let Some(sid) = self.visible_struct(name) {
-                    return self.construct(sid, name, callee.span, args, span);
+                    return self.construct(sid, name, callee.span, args, explicit, expected, span);
+                }
+                if explicit.is_some() && (BUILTINS.contains(&name.as_str()) || self.ns_kinds[self.ns] == FileKind::Std && crate::stdlib::INTRINSICS.iter().any(|(n, _, _)| n == name)) {
+                    let _ = self.infer_args(&format!("`{name}`"), &[], &[], &Type::Unit, args, explicit, None, span);
+                    return Self::error_expr(span);
                 }
                 if self.ns_kinds[self.ns] == FileKind::Std && crate::stdlib::INTRINSICS.iter().any(|(n, _, _)| n == name) {
                     return self.intrinsic_call(name, args, span);
@@ -3757,23 +3941,23 @@ impl Checker {
                 Self::error_expr(span)
             }
             ExprKind::Field(obj, method) => {
-                if let Some(sid) = self.enum_ref(obj) {
-                    return self.variant_value(sid, method, Some(args), span);
+                if let Some((sid, targs)) = self.enum_ref(obj) {
+                    return self.variant_value(sid, method, Some(args), targs.or(explicit), expected, span);
                 }
                 if let ExprKind::Name(m) = &obj.kind
                     && self.lookup(m).is_none()
                     && let Some(module_ns) = self.imported_module(m)
                 {
                     self.module_hover(module_ns, obj.span);
-                    return self.module_call(module_ns, m, method, args, span);
+                    return self.module_call(module_ns, m, method, args, explicit, expected, span);
                 }
                 let recv = self.expr(obj, None);
-                self.method_call(recv, method, args, span)
+                self.method_call(recv, method, args, explicit, expected, span)
             }
             ExprKind::SafeField(obj, method) => {
                 let recv = self.expr(obj, None);
                 let op = Span { start: obj.span.end, end: method.span.start };
-                self.safe_access(recv, op, span, |c, it| c.method_call(it, method, args, span))
+                self.safe_access(recv, op, span, |c, it| c.method_call(it, method, args, explicit, None, span))
             }
             _ => {
                 let _ = self.expr(callee, None);
@@ -3784,7 +3968,8 @@ impl Checker {
     }
 
     /// `Point(1, 2)` / `geometry.Point(1, 2)`: build struct `sid` (`name` as written).
-    fn construct(&mut self, sid: StructId, name: &str, name_span: Span, args: &[Arg], span: Span) -> TExpr {
+    #[allow(clippy::too_many_arguments)]
+    fn construct(&mut self, sid: StructId, name: &str, name_span: Span, args: &[Arg], explicit: Option<&[TypeExpr]>, expected: Option<&Type>, span: Span) -> TExpr {
         self.pending_struct_hovers.push((name_span, sid));
         self.ide.definitions.push((name_span, self.struct_spans[sid]));
         let sns = self.struct_ns[sid];
@@ -3827,9 +4012,19 @@ impl Checker {
         }
         let params: Vec<(String, Type)> = self.structs[sid].fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect();
         let what = format!("struct `{name}`");
-        match self.match_args(&what, &params, args, span) {
-            Some(targs) => Self::mk(TExprKind::StructNew(sid, targs), Type::Struct(sid), span),
-            None => Self::mk(TExprKind::Int(0), Type::Struct(sid), span),
+        // A generic struct: its type arguments come from the fields' values (`Box(5)` is a `Box[Int]`).
+        let tparams = self.struct_params[sid].clone();
+        let me = self.def_types[sid].clone();
+        match self.infer_args(&what, &tparams, &params, &me, args, explicit, expected, span) {
+            Some((targs, bound)) => {
+                let inst = if tparams.is_empty() { Some(sid) } else { self.struct_instance(sid, bound) };
+                match inst {
+                    Some(i) => Self::mk(TExprKind::StructNew(i, targs), self.def_types[i].clone(), span),
+                    None => Self::error_expr(span),
+                }
+            }
+            None if tparams.is_empty() => Self::mk(TExprKind::Int(0), Type::Struct(sid), span),
+            None => Self::error_expr(span),
         }
     }
 
@@ -3845,7 +4040,8 @@ impl Checker {
     }
 
     /// `time.now()`: a call to a function in an imported module.
-    fn module_call(&mut self, module_ns: usize, module: &str, func: &Ident, args: &[Arg], span: Span) -> TExpr {
+    #[allow(clippy::too_many_arguments)]
+    fn module_call(&mut self, module_ns: usize, module: &str, func: &Ident, args: &[Arg], explicit: Option<&[TypeExpr]>, expected: Option<&Type>, span: Span) -> TExpr {
         let key = (module_ns, func.name.clone());
         if let Some(&fid) = self.func_index.get(&key) {
             if is_private(&func.name) && module_ns != self.ns {
@@ -3863,13 +4059,8 @@ impl Checker {
             let doc = Some(format!("in module `{module}`{}", f.doc.as_ref().map(|d| format!("\n\n{d}")).unwrap_or_default()));
             self.hover(func.span, code, doc);
             self.ide.definitions.push((func.span, self.funcs[fid].span));
-            let params = self.funcs[fid].params.clone();
-            let ret = self.funcs[fid].ret.clone();
             let what = format!("function `{module}.{}`", func.name);
-            return match self.match_args(&what, &params, args, span) {
-                Some(targs) => Self::mk(TExprKind::Call(fid, targs), ret, span),
-                None => Self::mk(TExprKind::Int(0), if ret == Type::Unit { Type::Unit } else { Type::Error }, span),
-            };
+            return self.call_fn(fid, &what, None, args, explicit, expected, func.span, span);
         }
         if let Some(&sid) = self.struct_index.get(&key) {
             if is_private(&func.name) && module_ns != self.ns {
@@ -3879,7 +4070,7 @@ impl Checker {
                 }
                 return Self::error_expr(span);
             }
-            return self.construct(sid, &format!("{module}.{}", func.name), func.span, args, span);
+            return self.construct(sid, &format!("{module}.{}", func.name), func.span, args, explicit, expected, span);
         }
         let candidates: Vec<String> = self
             .func_index
@@ -3989,6 +4180,7 @@ impl Checker {
                 None if t.ty == Type::Null
                     || t.ty.is_nullable() && t.ty.non_null().is_primitive()
                     || matches!(t.ty, Type::Enum(_, false))
+                    || matches!(t.ty.non_null(), Type::Param(_))
                     || self.to_string_method(t.ty.non_null()).is_some() =>
                 {
                     t = self.stringify(t, a.value.span)
@@ -4020,9 +4212,14 @@ impl Checker {
         Self::mk(TExprKind::Builtin(b, targs), ret, span)
     }
 
-    fn method_call(&mut self, recv: TExpr, method: &Ident, args: &[Arg], span: Span) -> TExpr {
+    #[allow(clippy::too_many_arguments)]
+    fn method_call(&mut self, recv: TExpr, method: &Ident, args: &[Arg], explicit: Option<&[TypeExpr]>, expected: Option<&Type>, span: Span) -> TExpr {
         let m = method.name.as_str();
         let rty = recv.ty.clone();
+        if explicit.is_some() && !matches!(rty, Type::Struct(_) | Type::Enum(..)) {
+            let _ = self.infer_args(&format!("method `{m}`"), &[], &[], &Type::Unit, args, explicit, None, span);
+            return Self::error_expr(span);
+        }
         if !matches!(rty, Type::Struct(_) | Type::Error) {
             let tn = self.tn(&rty);
             if let Some(b) = builtin_methods(&rty, &tn, &|t| self.tn(t)).into_iter().find(|b| b.name == m) {
@@ -4045,6 +4242,26 @@ impl Checker {
             }
             (Type::Nullable(_), _) => {
                 self.null_use_error(&recv, NullUse::Member(m, Some(!args.is_empty())));
+                for a in args {
+                    let _ = self.expr(&a.value, None);
+                }
+                Self::error_expr(span)
+            }
+            (Type::Param(_), "to_string") => {
+                if !self.arity(args, 0, &what, span) {
+                    return Self::error_expr(span);
+                }
+                self.require(&rty, Need::ToStr, span);
+                Self::mk(TExprKind::Builtin(Builtin::ToStr, vec![recv]), Type::Str, span)
+            }
+            (Type::Param(p), _) => {
+                let (tn, owner) = (self.tn(&rty), self.type_params[*p].owner.clone());
+                self.err(
+                    Diagnostic::error(format!("no method `{m}` on type `{tn}`"), method.span)
+                        .with_primary("method not found")
+                        .with_note(format!("`{tn}` is a type parameter of `{owner}`: it stands for whichever type the caller picks, so the only method generic code can call on it is `to_string()`"))
+                        .with_help(format!("operators work too (`==`, `<`, `+`...): `{owner}` then needs a `{tn}` that supports them")),
+                );
                 for a in args {
                     let _ = self.expr(&a.value, None);
                 }
@@ -4088,7 +4305,7 @@ impl Checker {
                 let v = self.coerce(v, &elem, None);
                 Self::mk(TExprKind::Builtin(Builtin::ListPush, vec![recv, v]), Type::Unit, span)
             }
-            (Type::Enum(sid, false), "to_string") if !self.methods.contains_key(&(*sid, m.to_string())) => {
+            (Type::Enum(sid, false), "to_string") if !self.has_method(*sid, m) => {
                 if !self.arity(args, 0, &what, span) {
                     return Self::error_expr(span);
                 }
@@ -4096,9 +4313,8 @@ impl Checker {
             }
             (Type::Struct(sid) | Type::Enum(sid, _), _) => {
                 let sid = *sid;
-                match self.methods.get(&(sid, m.to_string())) {
-                    Some(&fid) if is_private(m) && self.struct_ns[sid] != self.ns => {
-                        let _ = fid;
+                match self.method(sid, m) {
+                    Some(_) if is_private(m) && self.struct_ns[sid] != self.ns => {
                         let sname = self.structs[sid].name.clone();
                         self.err(Diagnostic::error(format!("method `{m}` of `{sname}` is private"), method.span));
                         for a in args {
@@ -4106,22 +4322,15 @@ impl Checker {
                         }
                         Self::error_expr(span)
                     }
-                    Some(&fid) => {
+                    Some(fid) => {
                         let code = self.ide.functions[fid].signature.clone();
                         let comment = self.ide.functions[fid].doc.clone();
                         let doc = Some(format!("method of `{}`{}", self.structs[sid].name, comment.map(|c| format!("\n\n{c}")).unwrap_or_default()));
                         self.hover(method.span, code, doc);
                         self.ide.definitions.push((method.span, self.funcs[fid].span));
-                        let params = self.funcs[fid].params[1..].to_vec();
-                        let ret = self.funcs[fid].ret.clone();
-                        let what = format!("method `{}`", self.funcs[fid].name);
-                        match self.match_args(&what, &params, args, span) {
-                            Some(mut targs) => {
-                                targs.insert(0, recv);
-                                Self::mk(TExprKind::Call(fid, targs), ret, span)
-                            }
-                            None => Self::mk(TExprKind::Int(0), if ret == Type::Unit { Type::Unit } else { Type::Error }, span),
-                        }
+                        let decl = self.funcs[fid].instance.as_ref().map(|(d, _)| *d).unwrap_or(fid);
+                        let what = format!("method `{}`", self.funcs[decl].name);
+                        self.call_fn(fid, &what, Some(recv), args, explicit, expected, method.span, span)
                     }
                     None => {
                         let sname = self.structs[sid].name.clone();
@@ -4130,7 +4339,7 @@ impl Checker {
                         if self.structs[sid].fields.iter().any(|f| f.name == m) {
                             d = d.with_note(format!("`{m}` is a field, not a method; access it without parentheses: `.{m}`"));
                         } else {
-                            let names: Vec<String> = self.methods.keys().filter(|(s, _)| *s == sid).map(|(_, n)| n.clone()).collect();
+                            let names: Vec<String> = self.method_names(sid);
                             if let Some(s) = suggest(m, names.iter().map(|s| s.as_str())) {
                                 d = d.with_help(format!("did you mean `{s}`?"));
                             }

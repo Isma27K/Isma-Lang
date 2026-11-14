@@ -276,6 +276,8 @@ pub fn builtin_methods(t: &Type, tn: &str, type_name: &dyn Fn(&Type) -> String) 
                 method("pop", format!("fn pop() -> {e}"), "Remove and return the last element. Panics if the list is empty.", false),
             ]
         }
+        // A type parameter: generic code can only call `to_string()` on it.
+        Type::Param(_) => vec![method("to_string", "fn to_string() -> String".into(), "Convert to a `String` (the type used for it must support that).", false)],
         _ => {
             let _ = tn;
             Vec::new()

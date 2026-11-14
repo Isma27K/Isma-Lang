@@ -341,14 +341,14 @@ impl Server {
         }
         // `Shape.`, `geo.Shape.` -> the enum's variants
         let named = match receiver.split_once('.') {
-            None => doc.ide.structs.iter().position(|s| s.ns == 0 && s.name == receiver).or_else(|| {
+            None => doc.ide.structs.iter().position(|s| s.ns == 0 && !s.instance && s.name == receiver).or_else(|| {
                 doc.ide.imported.iter().find_map(|(b, k)| match k {
                     ImportedSymbol::Struct(sid) if b == receiver => Some(*sid),
                     _ => None,
                 })
             }),
             Some((module, name)) => doc.ide.imported_module(module).and_then(|ns| {
-                doc.ide.structs.iter().position(|s| s.ns == ns && s.name.rsplit('.').next() == Some(name))
+                doc.ide.structs.iter().position(|s| s.ns == ns && !s.instance && s.name.rsplit('.').next() == Some(name))
             }),
         };
         if let Some(e) = named.map(|sid| &doc.ide.structs[sid]).filter(|s| s.variants.is_some()) {
@@ -445,10 +445,10 @@ impl Server {
                 }
             }
         }
-        for f in doc.ide.functions.iter().filter(|f| f.owner.is_none() && f.ns == 0) {
+        for f in doc.ide.functions.iter().filter(|f| f.owner.is_none() && f.ns == 0 && !f.instance) {
             add(&f.name, lt::CompletionItemKind::FUNCTION, Some(f.signature.clone()), f.doc.clone(), "1");
         }
-        for s in doc.ide.structs.iter().filter(|s| s.ns == 0) {
+        for s in doc.ide.structs.iter().filter(|s| s.ns == 0 && !s.instance) {
             if let Some(variants) = &s.variants {
                 let names: Vec<&str> = variants.iter().map(|v| v.name.as_str()).collect();
                 add(&s.name, lt::CompletionItemKind::ENUM, Some(format!("enum {}: {}", s.name, names.join(" | "))), s.doc.clone(), "1");
@@ -593,7 +593,7 @@ impl Server {
             children,
         };
         let mut out: Vec<(u32, lt::DocumentSymbol)> = Vec::new();
-        for s in ide.structs.iter().filter(|s| s.ns == 0) {
+        for s in ide.structs.iter().filter(|s| s.ns == 0 && !s.instance) {
             let mut children: Vec<lt::DocumentSymbol> = s
                 .fields
                 .iter()
@@ -609,7 +609,7 @@ impl Server {
             let kind = if s.variants.is_some() { lt::SymbolKind::ENUM } else { lt::SymbolKind::STRUCT };
             out.push((s.name_span.start, sym(&s.name, None, kind, s.full, s.name_span, Some(children))));
         }
-        for f in ide.functions.iter().filter(|f| f.owner.is_none() && f.ns == 0) {
+        for f in ide.functions.iter().filter(|f| f.owner.is_none() && f.ns == 0 && !f.instance) {
             out.push((f.full.start, sym(&f.name, Some(f.signature.clone()), lt::SymbolKind::FUNCTION, f.full, f.name_span, None)));
         }
         out.sort_by_key(|(start, _)| *start);
@@ -785,7 +785,7 @@ fn receiver_start(text: &str, dot: usize) -> usize {
 /// inside a block that was already closed (judged by indentation).
 fn visible_locals(doc: &Document, off: usize) -> Vec<&LocalSymbol> {
     let ide = &doc.ide;
-    let mut starts: Vec<u32> = ide.functions.iter().filter(|f| f.ns == 0).map(|f| f.full.start).collect();
+    let mut starts: Vec<u32> = ide.functions.iter().filter(|f| f.ns == 0 && !f.instance).map(|f| f.full.start).collect();
     starts.sort();
     let Some(&fn_start) = starts.iter().rfind(|s| (**s as usize) <= off) else { return Vec::new() };
     let fn_end = starts.iter().find(|s| **s > fn_start).map(|s| *s as usize).unwrap_or(doc.text.len());
@@ -1047,6 +1047,33 @@ mod tests {
         let items = complete(&s, &uri, at(OPS_SRC, "    a.\n", 6));
         let labels: Vec<_> = items.iter().map(|i| i.label.as_str()).collect();
         assert_eq!(labels, ["x"]);
+    }
+
+    const GEN_SRC: &str = "fn max[T](a: T, b: T) -> T:\n    if a > b:\n        return a\n    return b\n\nstruct Box[T]:\n    value: T\n\n    fn get(self) -> T:\n        return self.value\n\nfn main():\n    val m = max(1, 2)\n    val b = Box(m)\n    b.\n";
+
+    #[test]
+    fn generics_hover_complete_and_outline() {
+        let (s, uri) = server_with(GEN_SRC);
+        let hover = |needle: &str, delta: usize| {
+            let h = s.hover(lt::HoverParams { text_document_position_params: tdp(&uri, at(GEN_SRC, needle, delta)), work_done_progress_params: Default::default() });
+            let lt::HoverContents::Markup(m) = h.unwrap().contents else { panic!() };
+            m.value
+        };
+        let shown = hover("max[T]", 0);
+        assert!(shown.contains("fn max[T](a: T, b: T) -> T") && shown.contains("`T` can be any type that supports `<` and `>`"), "{shown}");
+        let shown = hover("max(1, 2)", 0);
+        assert!(shown.contains("fn max[T](a: T, b: T) -> T") && shown.contains("here `T` is `Int`"), "{shown}");
+        let shown = hover("T, b: T", 0);
+        assert!(shown.contains("type parameter of `max`"), "{shown}");
+        // The members of a `Box[Int]` have its types.
+        let items = complete(&s, &uri, at(GEN_SRC, "    b.\n", 6));
+        let got: Vec<_> = items.iter().map(|i| (i.label.as_str(), i.detail.clone().unwrap_or_default())).collect();
+        assert!(got.iter().any(|(l, d)| *l == "get" && d.contains("-> Int")), "{got:?}");
+        assert!(got.iter().any(|(l, d)| *l == "value" && d.contains("Int")), "{got:?}");
+        // The outline lists what's declared, not the copies made for `Int`.
+        let a = crate::analyze(GEN_SRC);
+        assert_eq!(a.ide.structs.iter().filter(|s| !s.instance).count(), 1);
+        assert!(a.ide.structs.iter().any(|s| s.instance && s.name == "Box[Int]"));
     }
 
     #[test]

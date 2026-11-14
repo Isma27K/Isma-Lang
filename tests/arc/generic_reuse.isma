@@ -1,0 +1,29 @@
+# expect-max-allocs: 12
+# Copies of generic code for concrete types are ordinary functions to the
+# memory passes: `acc = acc + v` on a `Vec2[Float]` reuses `acc`'s memory,
+# and a generic `sum` over a list allocates nothing per element.
+struct Vec2[T]:
+    var x: T
+    var y: T
+
+    fn +(self, other: Vec2[T]) -> Vec2[T]:
+        return Vec2(self.x + other.x, self.y + other.y)
+
+fn sum[T](xs: List[T], zero: T) -> T:
+    var total = zero
+    for x in xs:
+        total = total + x
+    return total
+
+fn main():
+    var acc = Vec2(0.0, 0.0)
+    val v = Vec2(1.0, 2.0)
+    for _ in 0..500_000:
+        acc = acc + v
+    for _ in 0..500_000:
+        acc += v
+    print(acc.y)
+    val xs: List[Int] = []
+    for i in 0..100_000:
+        xs.push(i)
+    print(sum(xs, 0))

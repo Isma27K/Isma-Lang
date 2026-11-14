@@ -13,6 +13,7 @@
 //! those copies, so generic code is exactly as fast as hand-written code.
 
 use super::*;
+use std::collections::HashSet;
 
 /// The deepest a type argument may nest (`List[List[...]]`) before a generic
 /// function or type is considered to grow without end.
@@ -28,7 +29,7 @@ pub(super) struct ParamInfo {
 
 /// Something generic code does with values of a type parameter, which the
 /// types it's used with must support.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Need {
     /// `a == b` (and `!=`) on two `T`s.
     Eq,
@@ -209,7 +210,7 @@ impl Checker {
                 self.err(
                     Diagnostic::error(format!("type parameter `{name}` must start with an uppercase letter"), p.span)
                         .with_primary("type names are capitalized")
-                        .with_help(format!("e.g. `{}`, or the usual `T`", capitalize(name))),
+                        .with_help(if capitalize(name) == "T" { "e.g. `T`".to_string() } else { format!("e.g. `{}`, or the usual `T`", capitalize(name)) }),
                 );
             } else if RESERVED_TYPES.contains(&name.as_str()) {
                 self.err(Diagnostic::error(format!("`{name}` is a built-in type, so it can't name a type parameter"), p.span).with_help("pick another name, like `T`"));
@@ -239,6 +240,27 @@ impl Checker {
             out.push(id);
         }
         out
+    }
+
+    /// The type parameters of generic type `sid`, in scope for its fields.
+    pub(super) fn struct_env(&self, sid: StructId) -> Vec<(String, Type)> {
+        self.struct_params[sid].iter().map(|p| (self.type_params[*p].name.clone(), Type::Param(*p))).collect()
+    }
+
+    /// Warn about type parameters of `sid` that none of its fields uses.
+    pub(super) fn unused_type_params(&mut self, sid: StructId) {
+        let s = &self.structs[sid];
+        let tys: Vec<Type> = s.fields.iter().chain(s.variants().iter().flat_map(|v| &v.fields)).map(|f| f.ty.clone()).collect();
+        for p in self.struct_params[sid].clone() {
+            if !RESERVED_TYPES.contains(&self.type_params[p].name.as_str()) && !tys.iter().any(|t| self.mentions(t, p)) {
+                let name = self.type_params[p].name.clone();
+                self.diags.push(
+                    Diagnostic::warning(format!("type parameter `{name}` is never used"), self.type_params[p].span)
+                        .with_primary(format!("no field mentions `{name}`"))
+                        .with_help("remove it, or give the type a field that uses it"),
+                );
+            }
+        }
     }
 
     /// The type parameter names in scope: those of `fid` (and its owner), bound
@@ -358,7 +380,7 @@ impl Checker {
                     Diagnostic::error(format!("`{name}` contains itself with ever-bigger type arguments"), self.struct_spans[origin])
                         .with_primary("this type never stops growing")
                         .with_note(format!("a field like `next: {name}[List[T]]` makes `{name}[Int]` hold a `{name}[List[Int]]`, which holds a `{name}[List[List[Int]]]`, and so on"))
-                        .with_help("use the same type parameters inside the type: `next: Box[T]?`"),
+                        .with_help(format!("inside `{name}`, use it with its own type parameters: `next: {name}[{}]?`", self.ide.structs[origin].type_params.join(", "))),
                 );
             }
             return None;
@@ -634,6 +656,32 @@ impl Checker {
         }
     }
 
+    /// Does `e` take its type from where it's used: `null`, `[]`, or a variant
+    /// of a generic enum without fields to tell its type arguments (`Tree.Leaf`)?
+    fn needs_context(&mut self, e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Null => true,
+            ExprKind::List(es) => es.is_empty(),
+            ExprKind::Field(obj, _) => {
+                let sid = match &obj.kind {
+                    ExprKind::Name(n) if self.lookup(n).is_none() => self.struct_index.get(&(self.ns, n.clone())).copied().or_else(|| match self.names.get(&(self.ns, n.clone())) {
+                        Some(NameImport { target: Imported::Struct(s), .. }) => Some(*s),
+                        _ => None,
+                    }),
+                    ExprKind::Field(m, n) => match &m.kind {
+                        ExprKind::Name(mn) if self.lookup(mn).is_none() => {
+                            self.imports.get(&(self.ns, mn.clone())).and_then(|i| self.struct_index.get(&(i.module_ns, n.name.clone())).copied())
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                sid.is_some_and(|s| !self.struct_params[s].is_empty() && self.structs[s].variants.is_some())
+            }
+            _ => false,
+        }
+    }
+
     /// Check the arguments of a call to something generic over `tparams`
     /// (`params` and `ret` mention them): the type parameters come from
     /// `explicit` type arguments, or from the arguments, or else from the type
@@ -674,8 +722,8 @@ impl Checker {
             }
         }
         let (slots, ok) = self.arg_slots(what, params, args, span);
-        // `[]` and `null` need to know their type: they wait for the others.
-        let later = |a: &Arg| matches!(&a.value.kind, ExprKind::Null) || matches!(&a.value.kind, ExprKind::List(es) if es.is_empty());
+        // `[]`, `null` and `Tree.Leaf` need to know their type: they wait for the others.
+        let later: Vec<bool> = slots.iter().map(|(_, a)| self.needs_context(&a.value)).collect();
         let mut checked: Vec<Option<TExpr>> = (0..params.len()).map(|_| None).collect();
         for pass in 0..2 {
             if pass == 1
@@ -683,8 +731,8 @@ impl Checker {
             {
                 self.unify(ret, exp, tparams, &mut bound, true);
             }
-            for &(idx, a) in &slots {
-                if later(a) != (pass == 1) {
+            for (k, &(idx, a)) in slots.iter().enumerate() {
+                if later[k] != (pass == 1) {
                     continue;
                 }
                 let pat = params[idx].1.clone();
@@ -708,7 +756,7 @@ impl Checker {
             if args.iter().any(|a| matches!(a.value.kind, ExprKind::Null)) {
                 d = d.with_note(format!("`null` alone doesn't say which type `{name}` is"));
             }
-            d = d.with_help(format!("give it in brackets, e.g. `[Int]` after the name, or add a type annotation to the variable that receives the result"));
+            d = d.with_help("give it in brackets, e.g. `[Int]` after the name, or add a type annotation to the variable that receives the result");
             self.err(d);
             return None;
         }
@@ -759,6 +807,7 @@ impl Checker {
             let inst = self.fn_instance(decl, full);
             // Hover: the generic signature, and what the type parameters are here.
             let shown: Vec<String> = tparams.iter().zip(&bound).map(|(p, t)| format!("`{}` is `{}`", self.type_params[*p].name, self.tn(t))).collect();
+            self.generic_hovers.push((decl, name_span));
             let i = self.ide.hovers.iter().rposition(|h| h.span == name_span);
             if let Some(i) = i {
                 let h = &mut self.ide.hovers[i];
@@ -775,6 +824,60 @@ impl Checker {
         all.extend(targs);
         let ret = self.funcs[callee].ret.clone();
         Self::mk(TExprKind::Call(callee, all), ret, span)
+    }
+
+    /// Build the copies of generic code that concrete code uses (and the
+    /// ones those use, and so on), by checking each body again with the type
+    /// parameters bound to concrete types.
+    pub(super) fn instantiate(&mut self, templates: &HashMap<FuncId, (&FnDecl, Option<StructId>, usize)>, out: &mut Vec<Option<TFunc>>) {
+        let mut built = 0;
+        while let Some(fid) = self.queue.pop() {
+            let (decl, args) = self.funcs[fid].instance.clone().unwrap();
+            let Some(&(ast, owner, ns)) = templates.get(&decl) else { continue };
+            built += 1;
+            if built > 50_000 || args.iter().any(|a| self.type_depth(a) > MAX_TYPE_DEPTH) {
+                if self.endless_fns.insert(decl) {
+                    let name = self.fn_display(decl);
+                    self.err(
+                        Diagnostic::error(format!("`{name}` needs ever more copies of itself"), self.funcs[decl].span)
+                            .with_primary("each copy for some types calls one for bigger types")
+                            .with_note("generic code is compiled once for every set of types it's used with, so the types it calls itself with must not keep growing"),
+                    );
+                }
+                return;
+            }
+            self.ns = ns;
+            let marks = (
+                self.ide.hovers.len(),
+                self.ide.definitions.len(),
+                self.ide.expr_types.len(),
+                self.ide.inlay_hints.len(),
+                self.ide.locals.len(),
+                self.pending_struct_hovers.len(),
+            );
+            let (ndiags, nobl) = (self.diags.len(), self.obligations.len());
+            let tf = self.fn_body(ast, owner, fid);
+            self.ide.hovers.truncate(marks.0);
+            self.ide.definitions.truncate(marks.1);
+            self.ide.expr_types.truncate(marks.2);
+            self.ide.inlay_hints.truncate(marks.3);
+            self.ide.locals.truncate(marks.4);
+            self.pending_struct_hovers.truncate(marks.5);
+            // Warnings were reported on the generic code itself. Errors here
+            // mean the generic checks missed something: show where.
+            let tps = self.funcs[decl].type_params.clone();
+            let shown: Vec<String> = tps.iter().zip(&args).map(|(p, t)| format!("`{}` = `{}`", self.type_params[*p].name, self.tn(t))).collect();
+            let note = format!("while compiling `{}` for {}", self.fn_display(decl), and_list(&shown));
+            let errors: Vec<Diagnostic> = self.diags.drain(ndiags..).filter(|d| d.is_error()).map(|d| d.with_note(note.clone())).collect();
+            let failed = !errors.is_empty();
+            self.diags.extend(errors);
+            self.record_calls(&tf.body, None);
+            self.check_obligations(nobl);
+            put_func(out, fid, tf);
+            if failed || self.error_count() > 0 {
+                return;
+            }
+        }
     }
 
     // ---------- needs ----------
@@ -848,12 +951,18 @@ impl Checker {
                 && decl == g
                 && !args.iter().zip(&self.funcs[g].type_params).all(|(a, p)| *a == Type::Param(*p))
                 && args.iter().any(|a| a.has_param(&self.struct_has_param))
-                && self.endless.insert(usize::MAX - g)
+                && self.endless_fns.insert(g)
             {
                 let name = self.fn_display(g);
-                let shown: Vec<String> = args.iter().map(|a| self.tn(a)).collect();
+                let tps = self.funcs[g].type_params.clone();
+                let shown: Vec<String> = tps
+                    .iter()
+                    .zip(&args)
+                    .filter(|(p, a)| **a != Type::Param(**p))
+                    .map(|(p, a)| format!("`{}` = `{}`", self.type_params[*p].name, self.tn(a)))
+                    .collect();
                 self.err(
-                    Diagnostic::error(format!("`{name}` calls itself with other type arguments ({})", shown.join(", ")), span)
+                    Diagnostic::error(format!("`{name}` calls itself with {}", and_list(&shown)), span)
                         .with_primary("a call with bigger types")
                         .with_note(format!("every copy of `{name}` would need yet another one, without end"))
                         .with_help("call it with its own type parameters"),
@@ -1022,9 +1131,9 @@ impl Checker {
     fn need_help(&mut self, d: Diagnostic, t: &Type, need: Need) -> Diagnostic {
         let shown = self.tn(t);
         match t {
-            Type::Nullable(_) => d.with_note(format!("a `{shown}` might be `null`, and generic code can't use `null` that way")).with_help(format!(
-                "use a non-null type, or handle `null` before calling (e.g. with `?:`)"
-            )),
+            Type::Nullable(_) => d
+                .with_note(format!("a `{shown}` might be `null`, and generic code can't use `null` that way"))
+                .with_help("use a non-null type, or handle `null` before calling (e.g. with `?:`)"),
             Type::Struct(sid) | Type::Enum(sid, _) if self.can_extend(*sid) && need != Need::EqNullable => {
                 let sid = *sid;
                 let kw = if self.structs[sid].variants.is_some() { "enum" } else { "struct" };
@@ -1052,7 +1161,7 @@ impl Checker {
                 d.with_note(format!("`{shown}` has its own `==`, which needs two non-null values"))
             }
             Type::List(_) => d.with_note("lists can't be compared, added or printed directly"),
-            _ => d.with_note(format!("`{shown}` doesn't have {}", need.shown())),
+            _ => d,
         }
     }
 
