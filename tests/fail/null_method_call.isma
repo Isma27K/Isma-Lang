@@ -1,0 +1,7 @@
+# expect-error: `s` might be null
+fn pick() -> String?:
+    return null
+
+fn main():
+    val s = pick()
+    print(s.len())

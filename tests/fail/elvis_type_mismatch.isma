@@ -1,0 +1,4 @@
+# expect-error: the two sides of `?:` have different types
+fn main():
+    val n = "1".to_int_or_null() ?: "zero"
+    print(n)

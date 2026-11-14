@@ -515,7 +515,12 @@ impl Ownership {
 fn struct_alloc_size(structs: &[TStruct], sid: StructId) -> u64 {
     let mut off = 8u64; // reference count
     for f in &structs[sid].fields {
-        let (size, align) = if f.ty == Type::Bool { (1, 1) } else { (8, 8) };
+        let (size, align) = match &f.ty {
+            Type::Bool => (1, 1),
+            Type::Nullable(t) if **t == Type::Bool => (2, 1),
+            Type::Nullable(t) if matches!(**t, Type::Int | Type::Float) => (16, 8),
+            _ => (8, 8),
+        };
         off = off.div_ceil(align) * align + size;
     }
     let size = off.div_ceil(8) * 8; // struct alignment

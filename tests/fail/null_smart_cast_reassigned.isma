@@ -1,0 +1,6 @@
+# expect-error: `x` might be null
+fn main():
+    var x: Int? = 1
+    if x != null:
+        x = "a".to_int_or_null()
+        print(x + 1)

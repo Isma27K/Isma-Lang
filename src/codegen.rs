@@ -102,6 +102,8 @@ declare ptr @isma_args() #0
 declare i64 @isma_str_to_int(ptr, ptr, i32, i32) #0
 declare double @isma_str_to_float(ptr, ptr, i32, i32) #0
 declare ptr @isma_str_chars(ptr) #0
+declare i64 @isma_str_parse_int(ptr, ptr) #0
+declare i64 @isma_str_parse_float(ptr, ptr) #0
 declare ptr @isma_str_substring(ptr, i64, i64, ptr, i32, i32) #0
 declare i64 @isma_str_contains(ptr, ptr) #0
 declare i64 @isma_str_starts_with(ptr, ptr) #0
@@ -132,14 +134,29 @@ fn llty(t: &Type) -> &'static str {
         Type::Bool => "i1",
         Type::Str | Type::List(_) | Type::Struct(_) => "ptr",
         Type::Unit => "void",
-        Type::Error => unreachable!("error type reached codegen"),
+        // A nullable reference is a pointer that may be null; a nullable
+        // primitive is a (has-value flag, value) pair, kept in registers.
+        Type::Nullable(inner) => match **inner {
+            Type::Int => "{ i1, i64 }",
+            Type::Float => "{ i1, double }",
+            Type::Bool => "{ i1, i1 }",
+            _ => "ptr",
+        },
+        Type::Error | Type::Null => unreachable!("{t:?} reached codegen"),
     }
+}
+
+/// A nullable primitive (stored as a `{ i1, T }` pair)?
+fn is_pair(t: &Type) -> bool {
+    matches!(t, Type::Nullable(inner) if inner.is_primitive() && **inner != Type::Str)
 }
 
 /// Size in bytes of a list element of this type.
 fn elem_size(t: &Type) -> u64 {
     match t {
         Type::Bool => 1,
+        Type::Nullable(inner) if **inner == Type::Bool => 2,
+        t if is_pair(t) => 16,
         _ => 8,
     }
 }
@@ -160,6 +177,7 @@ fn mangle(t: &Type) -> String {
         Type::Int => "int".into(),
         Type::Float => "float".into(),
         Type::Bool => "bool".into(),
+        Type::Nullable(inner) => format!("opt.{}", mangle(inner)),
         _ => unreachable!("no runtime representation: {t:?}"),
     }
 }
@@ -265,11 +283,17 @@ impl<'a> Codegen<'a> {
     }
 
     fn elem_tbaa(&mut self, elem: &Type) -> String {
+        if is_pair(elem) {
+            return String::new(); // (TBAA tags describe scalar accesses)
+        }
         let class = format!("list.elem.{}", llty(elem));
         self.tbaa(&class)
     }
 
     fn field_tbaa(&mut self, sid: StructId, idx: usize) -> String {
+        if is_pair(&self.prog.structs[sid].fields[idx].ty) {
+            return String::new();
+        }
         let class = format!("field.{}.{idx}", self.prog.structs[sid].name);
         self.tbaa(&class)
     }
@@ -419,6 +443,16 @@ impl<'a> Codegen<'a> {
             Stmt::Dup(v) => {
                 let ty = self.f.vars[*v].ty.clone();
                 let p = self.operand(&Operand::Var(*v));
+                let skip = if ty.is_nullable() {
+                    let null = self.fresh();
+                    self.emit(format!("{null} = icmp eq ptr {p}, null"));
+                    let (inc, skip) = (self.new_label("dup"), self.new_label("dup.done"));
+                    self.emit_term(format!("br i1 {null}, label %{skip}, label %{inc}"));
+                    self.start_block(&inc);
+                    Some(skip)
+                } else {
+                    None
+                };
                 let md = self.tbaa("rc");
                 let c = self.fresh();
                 self.emit(format!("{c} = load i64, ptr {p}{md}"));
@@ -432,6 +466,9 @@ impl<'a> Codegen<'a> {
                     self.emit(format!("{n} = add i64 {c}, 1"));
                 }
                 self.emit(format!("store i64 {n}, ptr {p}{md}"));
+                if let Some(skip) = skip {
+                    self.start_block(&skip);
+                }
             }
             Stmt::Drop(v) => {
                 let ty = self.f.vars[*v].ty.clone();
@@ -484,6 +521,7 @@ impl<'a> Codegen<'a> {
             Operand::Float(v) => float_const(*v),
             Operand::Bool(v) => v.to_string(),
             Operand::Str(s) => self.string_literal(s),
+            Operand::Null(t) => if is_pair(t) { "zeroinitializer" } else { "null" }.to_string(),
         }
     }
 
@@ -611,7 +649,8 @@ impl<'a> Codegen<'a> {
                     );
                     let _ = writeln!(all, "{load}  call void {rel}(ptr %f{k})");
                     if self.is_cyclic(fty) {
-                        let _ = writeln!(trace, "{load}  call void %visit(ptr %f{k}, ptr @isma.ti.{})", mangle(fty));
+                        // (a null child is skipped by the collector's visitors)
+                        let _ = writeln!(trace, "{load}  call void %visit(ptr %f{k}, ptr @isma.ti.{})", mangle(fty.non_null()));
                     } else {
                         let _ = writeln!(acyclic, "{load}  call void {rel}(ptr %f{k})");
                     }
@@ -631,7 +670,7 @@ impl<'a> Codegen<'a> {
                 // A cyclic list's elements are themselves cyclic, so the collector
                 // accounts for all of them: freeing a garbage list frees only memory.
                 let rel = self.release_fn(e);
-                let em = mangle(e);
+                let em = mangle(e.non_null());
                 let each = |action: &str| {
                     format!(
                         "entry:\n  %lenp = getelementptr inbounds %IsmaList, ptr %p, i32 0, i32 1\n  %len = load i64, ptr %lenp\n  %dp = getelementptr inbounds %IsmaList, ptr %p, i32 0, i32 3\n  %data = load ptr, ptr %dp\n  br label %cond\ncond:\n  %i = phi i64 [ 0, %entry ], [ %i1, %body ]\n  %c = icmp slt i64 %i, %len\n  br i1 %c, label %body, label %done\nbody:\n  %ep = getelementptr inbounds ptr, ptr %data, i64 %i\n  %e = load ptr, ptr %ep\n  {action}\n  %i1 = add i64 %i, 1\n  br label %cond\ndone:\n"
@@ -661,6 +700,16 @@ impl<'a> Codegen<'a> {
         while i < self.rc_types.len() {
             let t = self.rc_types[i].clone();
             i += 1;
+            if let Type::Nullable(inner) = &t {
+                // Releasing a nullable reference: skip null, then release as usual.
+                let rel = self.release_fn(inner);
+                let _ = writeln!(
+                    out,
+                    "define internal void @isma.release.{}(ptr %p) #2 {{\n  %z = icmp eq ptr %p, null\n  br i1 %z, label %done, label %rel\nrel:\n  call void {rel}(ptr %p)\n  br label %done\ndone:\n  ret void\n}}\n",
+                    mangle(&t)
+                );
+                continue;
+            }
             if self.is_cyclic(&t) {
                 self.cyclic_functions(&t, &mut out);
                 continue;
@@ -1027,6 +1076,40 @@ impl<'a> Codegen<'a> {
                 self.emit(format!("{r} = load {}, ptr {slot}{md}", llty(&elem)));
             }
             Builtin::Inc => self.emit(format!("{r} = add nsw i64 {}, 1", vals[0])),
+            Builtin::IsNull => {
+                if is_pair(&tys[0]) {
+                    let has = self.fresh();
+                    self.emit(format!("{has} = extractvalue {} {}, 0", llty(&tys[0]), vals[0]));
+                    self.emit(format!("{r} = xor i1 {has}, true"));
+                } else {
+                    self.emit(format!("{r} = icmp eq ptr {}, null", vals[0]));
+                }
+            }
+            Builtin::Wrap => {
+                let pair = llty(&tys[0].clone().nullable());
+                let inner = llty(&tys[0]);
+                let zero = match tys[0] {
+                    Type::Float => "0.0",
+                    Type::Bool => "false",
+                    _ => "0",
+                };
+                self.emit(format!("{r} = insertvalue {pair} {{ i1 true, {inner} {zero} }}, {inner} {}, 1", vals[0]));
+            }
+            Builtin::Unwrap => self.emit(format!("{r} = extractvalue {} {}, 1", llty(&tys[0]), vals[0])),
+            Builtin::StrToIntOrNull | Builtin::StrToFloatOrNull => {
+                let (f, t) = if b == Builtin::StrToIntOrNull { ("isma_str_parse_int", "i64") } else { ("isma_str_parse_float", "double") };
+                let slot = format!("%parse{}", self.tmp);
+                let _ = writeln!(self.allocas, "  {slot} = alloca {t}");
+                let ok = self.fresh();
+                self.emit(format!("{ok} = call i64 @{f}(ptr {}, ptr {slot})", vals[0]));
+                let has = self.fresh();
+                self.emit(format!("{has} = icmp ne i64 {ok}, 0"));
+                let v = self.fresh();
+                self.emit(format!("{v} = load {t}, ptr {slot}"));
+                let half = self.fresh();
+                self.emit(format!("{half} = insertvalue {{ i1, {t} }} undef, i1 {has}, 0"));
+                self.emit(format!("{r} = insertvalue {{ i1, {t} }} {half}, {t} {v}, 1"));
+            }
         }
         r
     }

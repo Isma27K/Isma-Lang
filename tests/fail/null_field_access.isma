@@ -1,0 +1,10 @@
+# expect-error: `u` might be null
+struct User:
+    name: String
+
+fn find(_name: String) -> User?:
+    return null
+
+fn main():
+    val u = find("a")
+    print(u.name)

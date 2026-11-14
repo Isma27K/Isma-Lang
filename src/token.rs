@@ -37,6 +37,7 @@ pub enum Tok {
     And,
     Or,
     Not,
+    Null,
 
     // punctuation
     LParen,
@@ -49,6 +50,12 @@ pub enum Tok {
     DotDot,
     DotDotEq,
     Arrow,
+    /// `?` (nullable types; `?:` is the elvis operator)
+    Question,
+    /// `?.` (safe call)
+    QuestionDot,
+    /// `!!` (non-null assertion)
+    BangBang,
     Plus,
     Minus,
     Star,
@@ -97,6 +104,7 @@ impl Tok {
             "and" => Tok::And,
             "or" => Tok::Or,
             "not" => Tok::Not,
+            "null" => Tok::Null,
             _ => return None,
         })
     }
@@ -130,6 +138,10 @@ impl fmt::Display for Tok {
             Tok::And => "`and`",
             Tok::Or => "`or`",
             Tok::Not => "`not`",
+            Tok::Null => "`null`",
+            Tok::Question => "`?`",
+            Tok::QuestionDot => "`?.`",
+            Tok::BangBang => "`!!`",
             Tok::LParen => "`(`",
             Tok::RParen => "`)`",
             Tok::LBracket => "`[`",

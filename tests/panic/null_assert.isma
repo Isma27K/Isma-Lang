@@ -1,0 +1,4 @@
+# expect-panic: unwrapped a null value with `!!`
+fn main():
+    val n = "x".to_int_or_null()
+    print(n!! + 1)

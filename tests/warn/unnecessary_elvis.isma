@@ -1,0 +1,5 @@
+# expect-warning: unnecessary `?:`
+fn main():
+    val n: Int? = "3".to_int_or_null()
+    if n != null:
+        print(n ?: 0)

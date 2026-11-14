@@ -1,0 +1,4 @@
+# expect-warning: unnecessary `!!`
+fn main():
+    val n = 5
+    print(n!!)

@@ -59,6 +59,8 @@ pub struct TypeExpr {
     pub module: Option<Ident>,
     pub name: Ident,
     pub args: Vec<TypeExpr>,
+    /// `T?`
+    pub nullable: bool,
     pub span: Span,
 }
 
@@ -108,10 +110,26 @@ pub enum ExprKind {
     Unary(UnOp, Box<Expr>),
     Call { callee: Box<Expr>, args: Vec<Arg> },
     Field(Box<Expr>, Ident),
+    /// `obj?.field` (and, as a callee, `obj?.method(...)`).
+    SafeField(Box<Expr>, Ident),
     Index(Box<Expr>, Box<Expr>),
     List(Vec<Expr>),
+    Null,
+    /// `x!!`
+    NotNull(Box<Expr>),
+    /// `a ?: b`
+    Elvis(Box<Expr>, Box<Expr>),
+    /// `return`, `break` or `continue` on the right of `?:`.
+    Jump(Jump),
     /// Placeholder produced after a parse error.
     Error,
+}
+
+#[derive(Debug)]
+pub enum Jump {
+    Return(Option<Box<Expr>>),
+    Break,
+    Continue,
 }
 
 #[derive(Debug)]

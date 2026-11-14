@@ -352,9 +352,18 @@ impl Parser {
             }
             self.expect(Tok::RBracket)?;
         }
+        let nullable = self.eat(&Tok::Question);
+        if nullable && self.at(&Tok::Question) {
+            let span = self.span();
+            return self.error_diag(
+                Diagnostic::error("a type can only be made nullable once", span)
+                    .with_primary("remove this")
+                    .with_help("`T?` already allows `null`"),
+            );
+        }
         let start = module.as_ref().map(|m| m.span).unwrap_or(name.span);
         let span = start.merge(self.prev_span);
-        Ok(TypeExpr { module, name, args, span })
+        Ok(TypeExpr { module, name, args, nullable, span })
     }
 
     // ---------- statements ----------
@@ -590,10 +599,10 @@ impl Parser {
     }
 
     fn cmp_expr(&mut self) -> PResult<Expr> {
-        let l = self.add_expr()?;
+        let l = self.elvis_expr()?;
         if let Some(op) = self.cmp_op() {
             self.bump();
-            let r = self.add_expr()?;
+            let r = self.elvis_expr()?;
             let e = Self::binary(op, l, r);
             if self.cmp_op().is_some() {
                 let span = self.span();
@@ -606,6 +615,65 @@ impl Parser {
             return Ok(e);
         }
         Ok(l)
+    }
+
+    /// `?` immediately followed by `:`.
+    fn at_elvis(&self) -> bool {
+        self.at(&Tok::Question)
+            && matches!(self.peek_nth(1), Tok::Colon)
+            && self.tokens[self.pos].span.end == self.tokens[(self.pos + 1).min(self.tokens.len() - 1)].span.start
+    }
+
+    /// `a ?: b` binds tighter than comparisons and looser than `+`, and groups
+    /// to the right: `a ?: b ?: c` is `a ?: (b ?: c)`.
+    fn elvis_expr(&mut self) -> PResult<Expr> {
+        let l = self.add_expr()?;
+        if self.at_elvis() {
+            self.bump();
+            self.bump();
+            let r = self.elvis_rhs()?;
+            let span = l.span.merge(r.span);
+            return Ok(Expr { kind: ExprKind::Elvis(Box::new(l), Box::new(r)), span });
+        }
+        if self.at(&Tok::Question) {
+            let span = self.span();
+            return self.error_diag(
+                Diagnostic::error("unexpected `?`", span)
+                    .with_primary("not valid here")
+                    .with_note("`?` makes a type nullable (`Int?`); in expressions it is part of `?.` and `?:`")
+                    .with_help("Isma has no `c ? a : b` operator; use an `if` statement"),
+            );
+        }
+        Ok(l)
+    }
+
+    /// The right side of `?:`: a value, or `return`/`break`/`continue` to leave when the left side is null.
+    fn elvis_rhs(&mut self) -> PResult<Expr> {
+        let start = self.span();
+        let jump = match self.peek() {
+            Tok::Return => {
+                self.bump();
+                let value = if matches!(
+                    self.peek(),
+                    Tok::Newline | Tok::Eof | Tok::Dedent | Tok::RParen | Tok::RBracket | Tok::Comma | Tok::Colon
+                ) {
+                    None
+                } else {
+                    Some(Box::new(self.expr()?))
+                };
+                Jump::Return(value)
+            }
+            Tok::Break => {
+                self.bump();
+                Jump::Break
+            }
+            Tok::Continue => {
+                self.bump();
+                Jump::Continue
+            }
+            _ => return self.elvis_expr(),
+        };
+        Ok(Expr { kind: ExprKind::Jump(jump), span: start.merge(self.prev_span) })
     }
 
     fn add_expr(&mut self) -> PResult<Expr> {
@@ -693,6 +761,17 @@ impl Parser {
                     let span = e.span.merge(name.span);
                     e = Expr { kind: ExprKind::Field(Box::new(e), name), span };
                 }
+                Tok::QuestionDot => {
+                    self.bump();
+                    let name = self.expect_ident("field or method name after `?.`")?;
+                    let span = e.span.merge(name.span);
+                    e = Expr { kind: ExprKind::SafeField(Box::new(e), name), span };
+                }
+                Tok::BangBang => {
+                    let end = self.bump().span;
+                    let span = e.span.merge(end);
+                    e = Expr { kind: ExprKind::NotNull(Box::new(e)), span };
+                }
                 Tok::LBracket => {
                     self.bump();
                     let idx = self.expr()?;
@@ -731,6 +810,10 @@ impl Parser {
             Tok::False => {
                 self.bump();
                 ExprKind::Bool(false)
+            }
+            Tok::Null => {
+                self.bump();
+                ExprKind::Null
             }
             Tok::FStr(parts) => {
                 self.bump();
@@ -793,7 +876,7 @@ impl Parser {
 }
 
 fn is_postfix_start(t: &Tok) -> bool {
-    matches!(t, Tok::Dot | Tok::LParen | Tok::LBracket)
+    matches!(t, Tok::Dot | Tok::LParen | Tok::LBracket | Tok::QuestionDot | Tok::BangBang)
 }
 
 #[cfg(test)]
@@ -825,6 +908,9 @@ mod tests {
                 format!("{}({})", show(callee), a.join(", "))
             }
             ExprKind::Field(e, f) => format!("{}.{}", show(e), f.name),
+            ExprKind::SafeField(e, f) => format!("{}?.{}", show(e), f.name),
+            ExprKind::NotNull(e) => format!("{}!!", show(e)),
+            ExprKind::Elvis(a, b) => format!("({} ?: {})", show(a), show(b)),
             ExprKind::Index(e, i) => format!("{}[{}]", show(e), show(i)),
             other => format!("{other:?}"),
         }
@@ -886,6 +972,41 @@ mod tests {
     fn recovers_from_multiple_errors() {
         let (_, d) = parse("fn main():\n    val = 3\n    print(1 +)\n    val ok = 1\n");
         assert_eq!(d.len(), 2, "{d:#?}");
+    }
+
+    #[test]
+    fn null_safety_syntax() {
+        assert_eq!(expr_of("a ?: b ?: c"), "(a ?: (b ?: c))");
+        assert_eq!(expr_of("a?.b?.c(d)!!.e"), "a?.b?.c(d)!!.e");
+        let p = parse_ok("fn f(x: Int?) -> List[String?]?:\n    val y = x?.foo?.bar(1)!! ?: return null\n    return a ?: b + 1 > 2\n");
+        let f = first_fn(&p);
+        assert!(f.params[0].ty.nullable);
+        let ret = f.ret.as_ref().unwrap();
+        assert!(ret.nullable && ret.args[0].nullable);
+        match &f.body[0].kind {
+            StmtKind::Let { value, .. } => match &value.kind {
+                ExprKind::Elvis(l, r) => {
+                    assert!(matches!(l.kind, ExprKind::NotNull(_)));
+                    assert!(matches!(r.kind, ExprKind::Jump(Jump::Return(Some(_)))));
+                }
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
+        }
+        // `?:` binds tighter than `>` and looser than `+`.
+        match &f.body[1].kind {
+            StmtKind::Return(Some(e)) => match &e.kind {
+                ExprKind::Binary(BinOp::Gt, l, _) => assert!(matches!(&l.kind, ExprKind::Elvis(_, r) if matches!(r.kind, ExprKind::Binary(BinOp::Add, ..)))),
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn ternary_is_rejected() {
+        let (_, d) = parse("fn main():\n    val x = c ? 1 : 2\n");
+        assert!(d.iter().any(|d| d.message.contains("unexpected `?`")), "{d:#?}");
     }
 
     #[test]

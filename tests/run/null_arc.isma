@@ -1,0 +1,128 @@
+# Reference counting through nullable values: nullable links that form
+# cycles, lists of nullable structs and strings, and values that move in and
+# out of `T?` slots. Run leak-checked and under the sanitizers by the tests.
+
+struct Tree:
+    name: String
+    var parent: Tree?
+    var children: List[Tree]
+    var label: String?
+
+    fn add(self, name: String) -> Tree:
+        val child = Tree(name, self, [], null)
+        self.children.push(child)
+        return child
+
+    fn path(self) -> String:
+        val up = self.parent?.path()
+        if up == null:
+            return self.name
+        return up + "/" + self.name
+
+struct Link:
+    value: Int
+    var prev: Link?
+    var next: Link?
+
+struct Deque:
+    var head: Link?
+    var tail: Link?
+    var size: Int
+
+    fn push_back(self, v: Int):
+        val l = Link(v, self.tail, null)
+        val t = self.tail
+        if t == null:
+            self.head = l
+        else:
+            t.next = l
+        self.tail = l
+        self.size += 1
+
+    fn pop_front(self) -> Int?:
+        val h = self.head ?: return null
+        self.head = h.next
+        val n = self.head
+        if n == null:
+            self.tail = null
+        else:
+            n.prev = null
+        self.size -= 1
+        return h.value
+
+fn build(depth: Int, parent: Tree) -> Int:
+    if depth == 0:
+        return 1
+    var count = 1
+    for i in 0..3:
+        val c = parent.add(f"{parent.name}.{i}")
+        if i == 1:
+            c.label = f"middle of {parent.name}"
+        count += build(depth - 1, c)
+    return count
+
+fn longest_label(t: Tree, best: String?) -> String?:
+    var b = best
+    val l = t.label
+    if l != null and (b == null or l.len() > b.len()):
+        b = l
+    for c in t.children:
+        b = longest_label(c, b)
+    return b
+
+fn main():
+    # A tree whose children point back at their parent: every node is in a cycle.
+    for round in 0..50:
+        val root = Tree("r", null, [], null)
+        val n = build(4, root)
+        if round == 0:
+            print(n)
+            print(root.children[2].children[1].path())
+            print(longest_label(root, null) ?: "none")
+
+    # A doubly linked list (prev/next cycles), drained and refilled.
+    val d = Deque(null, null, 0)
+    for i in 0..1000:
+        d.push_back(i)
+    var sum = 0
+    while true:
+        val v = d.pop_front() ?: break
+        sum += v
+    print(sum)
+    print(d.size)
+    for i in 0..10:
+        d.push_back(i * i)
+    print(d.head?.next?.value)
+    print(d.tail?.prev?.value)
+
+    # Nullable strings and structs moving through lists and fields.
+    val names: List[String?] = []
+    for i in 0..100:
+        if i % 3 == 0:
+            names.push(null)
+        else:
+            names.push(f"n{i}")
+    var joined = ""
+    var nulls = 0
+    for x in names:
+        if x == null:
+            nulls += 1
+        else:
+            joined += x
+    print(nulls)
+    print(joined.len())
+    names[0] = "first"
+    names[1] = null
+    print(names[0] ?: "-")
+    print(names[1] ?: "-")
+    val last = names.pop()
+    print(last)
+
+    val maybe_trees: List[Tree?] = [null, Tree("solo", null, [], "x"), null]
+    var labels = 0
+    for t in maybe_trees:
+        labels += t?.label?.len() ?: 0
+    print(labels)
+    var keep: Tree? = maybe_trees[1]
+    keep = null
+    print(keep == null)

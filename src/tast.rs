@@ -102,6 +102,13 @@ pub enum Builtin {
     Inc,
     /// Internal: `a + b` on strings, consuming `a` (appends in place when unique).
     StrAppendOwned,
+    /// `s.to_int_or_null()` / `s.to_float_or_null()`
+    StrToIntOrNull,
+    StrToFloatOrNull,
+    /// Internal (nullable primitives): is it `null`? / `T` -> `T?` / `T?` -> `T` (unchecked).
+    IsNull,
+    Wrap,
+    Unwrap,
 }
 
 #[derive(Debug)]
@@ -125,4 +132,28 @@ pub enum TExprKind {
     ListLit(Vec<TExpr>),
     /// Concatenation of String-typed parts.
     FString(Vec<TExpr>),
+    /// `null`, of the (nullable) type of the expression.
+    Null,
+    /// `e == null` (`e` may also be of a non-null type: then it's just `false`).
+    IsNull(Box<TExpr>),
+    /// A `T` used where a `T?` is expected.
+    Wrap(Box<TExpr>),
+    /// A `T?` known to be non-null here (a smart cast).
+    Unwrap(Box<TExpr>),
+    /// `e!!`: panics if `e` is null.
+    NotNull(Box<TExpr>),
+    /// `recv?.member`: if `recv` is null the result is null; otherwise `binder`
+    /// is set to the (non-null) receiver and `body` is evaluated.
+    SafeCall { recv: Box<TExpr>, binder: LocalId, body: Box<TExpr> },
+    /// `a ?: b`: `b` is evaluated only when `a` is null.
+    Elvis(Box<TExpr>, Box<TExpr>),
+    /// `return`/`break`/`continue` on the right of `?:`.
+    Jump(Box<TStmt>),
+}
+
+impl TExpr {
+    /// Does evaluating this expression never finish normally (`panic`, `exit`, a jump)?
+    pub fn diverges(&self) -> bool {
+        matches!(self.kind, TExprKind::Jump(_) | TExprKind::Builtin(Builtin::Panic | Builtin::Exit, _))
+    }
 }

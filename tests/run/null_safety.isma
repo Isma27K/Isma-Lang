@@ -1,0 +1,199 @@
+# Nullable types, `?.`, `?:`, `!!` and smart casts.
+
+struct Address:
+    city: String
+    zip: Int?
+
+struct User:
+    name: String
+    address: Address?
+    var nickname: String?
+    var age: Int?
+
+    fn label(self) -> String:
+        return self.nickname ?: self.name
+
+struct Node:
+    value: Int
+    var next: Node?
+
+fn pick_int(i: Int) -> Int?:
+    if i > 0:
+        return i
+    return null
+
+fn pick_str(i: Int) -> String?:
+    if i > 0:
+        return f"s{i}"
+    return null
+
+fn flag(i: Int) -> Bool?:
+    if i == 0:
+        return null
+    return i > 0
+
+fn find(users: List[User], name: String) -> User?:
+    for u in users:
+        if u.name == name:
+            return u
+    return null
+
+fn parse_all(words: List[String]) -> List[Int?]:
+    val out: List[Int?] = []
+    for w in words:
+        out.push(w.to_int_or_null())
+    return out
+
+fn total(xs: List[Int?]) -> Int:
+    var sum = 0
+    for x in xs:
+        sum += x ?: 0
+    return sum
+
+fn first_even(xs: List[Int]) -> Int?:
+    for x in xs:
+        if x % 2 == 0:
+            return x
+    return null
+
+fn length(head: Node?) -> Int:
+    var n = 0
+    var cur = head
+    while cur != null:
+        n += 1
+        cur = cur.next
+    return n
+
+fn describe(u: User?) -> String:
+    if u == null:
+        return "nobody"
+    # `u` is smart-cast to `User` from here on
+    val city = u.address?.city ?: "nowhere"
+    return f"{u.name} from {city}"
+
+fn zip_or_zero(u: User?) -> Int:
+    val z = u?.address?.zip ?: return 0
+    return z
+
+fn sum_until_null(xs: List[Int?]) -> Int:
+    var s = 0
+    for x in xs:
+        val v = x ?: break
+        s += v
+    return s
+
+fn skip_nulls(xs: List[String?]) -> String:
+    var out = ""
+    for x in xs:
+        val s = x ?: continue
+        out += s
+    return out
+
+fn maybe_log(on: Bool) -> List[String]?:
+    if on:
+        return []
+    return null
+
+fn main():
+    # Printing, f-strings and `!!`
+    val a = pick_int(41)
+    val z = pick_int(0)
+    print(a)
+    print(z)
+    print(a!! + 1)
+    val half = "2.5".to_float_or_null()
+    print(f"{a} {z} {pick_str(2)} {pick_str(0)} {flag(1)} {flag(0)} {half}")
+    print(flag(-1) == false)
+    print(flag(0) == false)
+    print(z == null)
+    print(z != null)
+
+    # Equality on nullable primitives
+    print(pick_int(5) == 5)
+    print(z == 5)
+    print(pick_int(3) != z)
+    print(pick_int(0) == z)
+    print(pick_str(0) == "x")
+    print(pick_str(7) == "s7")
+
+    # Structs with nullable fields
+    val alice = User("alice", Address("Paris", 75001), null, 30)
+    val bob = User("bob", null, "bobby", null)
+    val carol = User("carol", Address("Oslo", null), null, null)
+    val users = [alice, bob, carol]
+    print(alice.label())
+    print(bob.label())
+    print(describe(find(users, "alice")))
+    print(describe(find(users, "bob")))
+    print(describe(find(users, "dave")))
+    print(zip_or_zero(alice))
+    print(zip_or_zero(carol))
+    print(zip_or_zero(null))
+    print(find(users, "carol")?.address?.city ?: "?")
+    print(find(users, "zed")?.name?.len() ?: -1)
+
+    # Smart casts
+    val maybe = find(users, "bob")
+    if maybe != null and maybe.nickname != null:
+        print("has a nickname")
+    if maybe == null or maybe.age == null:
+        print("no age")
+    var age = bob.age
+    if age == null:
+        age = 18
+    age += 1
+    print(age)
+    val c = carol.address
+    assert(c != null)
+    print(c.city)
+    var name: String? = null
+    name = "dyn"
+    name += "amic"
+    print(name.len())
+    val y = pick_int(9)
+    y!!
+    print(y * 2)
+    val w = pick_str(3) ?: return
+    print(w)
+
+    # Mutable nullable fields
+    bob.nickname = null
+    print(bob.label())
+    bob.age = 22
+    print(bob.age ?: 0)
+    bob.nickname = "b"
+    print(bob.nickname?.len())
+
+    # Lists of nullables
+    val parsed = parse_all(["1", "x", "30", ""])
+    print(total(parsed))
+    print(parsed.len())
+    print(parsed[1] == null)
+    val mixed = [1, null, 3]
+    print(total(mixed))
+    print(sum_until_null([1, 2, null, 4]))
+    print(skip_nulls(["a", null, "b", null, "c"]))
+    print(first_even([1, 3, 4, 5]) ?: -1)
+    print(first_even([1, 3]) ?: -1)
+    print("12".to_float_or_null() ?: 0.0)
+    print("nope".to_float_or_null())
+    print(" 7 ".to_int_or_null())
+
+    # A linked list (nullable links), and a cycle for the collector
+    var head: Node? = null
+    for i in 0..5:
+        head = Node(i, head)
+    print(length(head))
+    print(head?.next?.next?.value)
+    val ring = Node(1, null)
+    ring.next = Node(2, ring)
+    print(ring.next?.next?.value)
+
+    # A safe call on a unit method runs only when there's a receiver
+    val off = maybe_log(false)
+    off?.push("lost")
+    val on = maybe_log(true)
+    on?.push("kept")
+    on?.push("again")
+    print(on?.len())
+    print(off?.len())

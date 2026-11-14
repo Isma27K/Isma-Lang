@@ -209,10 +209,14 @@ impl Server {
         Some(lt::CompletionResponse::Array(items))
     }
 
-    /// Completion after `receiver.`: figure out the receiver's type by
-    /// analyzing a patched copy of the file in which the dangling `.` is gone.
+    /// Completion after `receiver.` (or `receiver?.`): figure out the receiver's
+    /// type by analyzing a patched copy of the file in which the dangling `.` is gone.
     fn member_completion(&self, doc: &Document, dot: usize, off: usize) -> Option<Vec<lt::CompletionItem>> {
         let text = &doc.text;
+        let safe = dot > 0 && text.as_bytes()[dot - 1] == b'?';
+        // From here on `dot` is where the receiver ends (before `?.` or `.`).
+        let op_end = dot + 1;
+        let dot = if safe { dot - 1 } else { dot };
         // `time.` -> the module's functions and types
         let recv_start = receiver_start(text, dot);
         let receiver = &text[recv_start..dot];
@@ -255,7 +259,16 @@ impl Server {
             }
         }
         let (ty, ide) = found?;
-        Some(ide.members(&ty).into_iter().map(member_item).collect())
+        let mut items: Vec<lt::CompletionItem> = ide.members(&ty).into_iter().map(member_item).collect();
+        if ty.is_nullable() && !safe {
+            // `name.` on a value that might be null: completing turns the `.` into `?.`.
+            let range = doc.lines.range(Span { start: dot as u32, end: op_end as u32 });
+            for item in &mut items {
+                item.additional_text_edits = Some(vec![lt::TextEdit { range, new_text: "?.".into() }]);
+                item.detail = item.detail.take().map(|d| format!("{d}  (via ?.)"));
+            }
+        }
+        Some(items)
     }
 
     fn scope_completion(&self, doc: &Document, off: usize) -> Vec<lt::CompletionItem> {
@@ -454,6 +467,14 @@ fn receiver_start(text: &str, dot: usize) -> usize {
         }
         if i > 0 && b[i - 1] == b'.' {
             i -= 1;
+            // `a?.b`, `a!!.b`
+            if i > 0 && b[i - 1] == b'?' {
+                i -= 1;
+            } else {
+                while i > 0 && b[i - 1] == b'!' {
+                    i -= 1;
+                }
+            }
             continue;
         }
         return i;

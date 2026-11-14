@@ -107,6 +107,8 @@ pub enum Operand {
     Float(f64),
     Bool(bool),
     Str(String),
+    /// `null` of the given (nullable) type.
+    Null(Type),
 }
 
 #[derive(Debug, Clone)]
@@ -143,6 +145,7 @@ impl Func {
             Operand::Float(_) => Type::Float,
             Operand::Bool(_) => Type::Bool,
             Operand::Str(_) => Type::Str,
+            Operand::Null(t) => t.clone(),
         }
     }
 
@@ -158,8 +161,9 @@ impl Func {
 }
 
 /// Does a value of this type live on the heap (and so need reference counting)?
+/// A nullable reference is a possibly-null pointer, so it counts too.
 pub fn is_ref(t: &Type) -> bool {
-    matches!(t, Type::Str | Type::List(_) | Type::Struct(_))
+    matches!(t.non_null(), Type::Str | Type::List(_) | Type::Struct(_))
 }
 
 impl Operand {
@@ -274,6 +278,7 @@ fn print_func(out: &mut String, f: &Func, p: &Program, names: &[String]) {
         Operand::Float(x) => format!("{x:?}"),
         Operand::Bool(b) => b.to_string(),
         Operand::Str(s) => format!("{s:?}"),
+        Operand::Null(_) => "null".to_string(),
     };
     let ops = |os: &[Operand]| os.iter().map(op).collect::<Vec<_>>().join(", ");
     let rv = |r: &Rvalue| match r {

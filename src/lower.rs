@@ -341,13 +341,75 @@ impl<'a> Lower<'a> {
 
     fn operand(&mut self, e: &TExpr) -> Operand {
         match self.rvalue(e) {
-            Rvalue::Use(o) => o,
+            Rvalue::Use(o) => self.retype(o, &e.ty),
             r => {
                 let t = self.temp(e.ty.clone());
                 self.push(Stmt::Assign(t, r));
                 Operand::Var(t)
             }
         }
+    }
+
+    /// `o` as a value of type `ty`. Nullable and non-null references are the
+    /// same pointer, but each MIR variable has one type, so a variable of
+    /// the other type gets an alias (a borrowed copy: no counting).
+    fn retype(&mut self, o: Operand, ty: &Type) -> Operand {
+        match o {
+            Operand::Var(v) if self.vars[v].ty != *ty => {
+                let t = self.temp(ty.clone());
+                self.push(Stmt::Assign(t, Rvalue::Use(Operand::Var(v))));
+                Operand::Var(t)
+            }
+            other => other,
+        }
+    }
+
+    /// Is a value of type `ty` (a `T?`) null? Always false for non-null types.
+    fn is_null(&mut self, o: Operand, ty: &Type) -> Operand {
+        if !ty.is_nullable() {
+            return Operand::Bool(false);
+        }
+        let t = self.temp(Type::Bool);
+        self.push(Stmt::Assign(t, Rvalue::Builtin(Builtin::IsNull, vec![o], Default::default())));
+        Operand::Var(t)
+    }
+
+    /// The `T` inside a non-null `T?` (`ty` is the type of `o`).
+    fn unwrap(&mut self, o: Operand, ty: &Type) -> Rvalue {
+        if !ty.is_nullable() || is_ref(ty) {
+            Rvalue::Use(o)
+        } else {
+            Rvalue::Builtin(Builtin::Unwrap, vec![o], Default::default())
+        }
+    }
+
+    fn unwrap_operand(&mut self, o: Operand, ty: &Type) -> Operand {
+        match self.unwrap(o, ty) {
+            Rvalue::Use(o) => o,
+            r => {
+                let t = self.temp(ty.non_null().clone());
+                self.push(Stmt::Assign(t, r));
+                Operand::Var(t)
+            }
+        }
+    }
+
+    /// A `T` as a `T?` (`ty` is the type of `o`; a `T?` stays as it is).
+    fn wrap(&mut self, o: Operand, ty: &Type) -> Rvalue {
+        if ty.is_nullable() || is_ref(ty) {
+            Rvalue::Use(o)
+        } else {
+            Rvalue::Builtin(Builtin::Wrap, vec![o], Default::default())
+        }
+    }
+
+    /// Branch on whether `o` (of nullable type `ty`) is null: returns (null block, non-null block).
+    fn branch_null(&mut self, o: Operand, ty: &Type) -> (BlockId, BlockId) {
+        let c = self.is_null(o, ty);
+        let none = self.new_block();
+        let some = self.new_block();
+        self.term(Term::Branch(c, none, some));
+        (none, some)
     }
 
     fn operands(&mut self, es: &[TExpr]) -> Vec<Operand> {
@@ -370,6 +432,32 @@ impl<'a> Lower<'a> {
             TExprKind::Builtin(b, args) => {
                 let a = self.operands(args);
                 Rvalue::Builtin(*b, a, e.span)
+            }
+            TExprKind::Binary(op, l, r) if l.ty.is_nullable() => {
+                // `==` / `!=` on nullable primitives: equal when both are null,
+                // or neither is and the values are equal.
+                let a = self.operand(l);
+                let b = self.operand(r);
+                let res = self.temp(Type::Bool);
+                let b_null = self.is_null(b.clone(), &r.ty);
+                let (a_none, a_some) = self.branch_null(a.clone(), &l.ty);
+                let end = self.new_block();
+                self.cur = a_none;
+                let same = if *op == BinOp::Eq { Rvalue::Use(b_null.clone()) } else { Rvalue::Not(b_null.clone()) };
+                self.push(Stmt::Assign(res, same));
+                self.goto(end);
+                self.cur = a_some;
+                let (b_none, both) = (self.new_block(), self.new_block());
+                self.term(Term::Branch(b_null, b_none, both));
+                self.cur = b_none;
+                self.push(Stmt::Assign(res, Rvalue::Use(Operand::Bool(*op == BinOp::Ne))));
+                self.goto(end);
+                self.cur = both;
+                let x = self.unwrap_operand(a, &l.ty);
+                let y = self.unwrap_operand(b, &r.ty);
+                self.push(Stmt::Assign(res, Rvalue::Binary(*op, l.ty.non_null().clone(), x, y, e.span)));
+                self.start(end);
+                Rvalue::Use(Operand::Var(res))
             }
             TExprKind::Binary(op, l, r) => {
                 let a = self.operand(l);
@@ -436,6 +524,93 @@ impl<'a> Lower<'a> {
                     });
                 }
                 Rvalue::Use(acc.unwrap_or(Operand::Str(String::new())))
+            }
+            TExprKind::Null => Rvalue::Use(Operand::Null(e.ty.clone())),
+            // For references `T` and `T?` are the same pointer: a computed value
+            // (a call, a new struct, a field) is simply stored under the new type.
+            TExprKind::Wrap(inner) | TExprKind::Unwrap(inner) if is_ref(&inner.ty) => match self.rvalue(inner) {
+                Rvalue::Use(o) => Rvalue::Use(o),
+                r => r,
+            },
+            TExprKind::Wrap(inner) => {
+                let o = self.operand(inner);
+                self.wrap(o, &inner.ty)
+            }
+            TExprKind::Unwrap(inner) => {
+                let o = self.operand(inner);
+                self.unwrap(o, &inner.ty)
+            }
+            TExprKind::IsNull(inner) => {
+                let o = self.operand(inner);
+                Rvalue::Use(self.is_null(o, &inner.ty))
+            }
+            TExprKind::NotNull(inner) => {
+                let o = self.operand(inner);
+                let (none, some) = self.branch_null(o.clone(), &inner.ty);
+                self.cur = none;
+                let msg = Operand::Str("unwrapped a null value with `!!`".into());
+                self.push(Stmt::Eval(Rvalue::Builtin(Builtin::Panic, vec![msg], e.span)));
+                self.term(Term::Unreachable);
+                self.cur = some;
+                self.unwrap(o, &inner.ty)
+            }
+            TExprKind::SafeCall { recv, binder, body } => {
+                let r = self.operand(recv);
+                let res = (e.ty != Type::Unit).then(|| self.temp(e.ty.clone()));
+                let (none, some) = self.branch_null(r.clone(), &recv.ty);
+                let end = self.new_block();
+                self.cur = none;
+                if let Some(res) = res {
+                    self.push(Stmt::Assign(res, Rvalue::Use(Operand::Null(e.ty.clone()))));
+                }
+                self.goto(end);
+                self.cur = some;
+                let it = self.unwrap(r, &recv.ty);
+                self.push(Stmt::Assign(*binder, it));
+                match res {
+                    Some(res) => {
+                        let v = self.operand(body);
+                        let w = self.wrap(v, &body.ty);
+                        self.push(Stmt::Assign(res, w));
+                    }
+                    None => self.effect(body),
+                }
+                self.start(end);
+                match res {
+                    Some(res) => Rvalue::Use(Operand::Var(res)),
+                    None => Rvalue::Use(Operand::Bool(false)), // (a unit value; never used)
+                }
+            }
+            TExprKind::Elvis(l, r) => {
+                let a = self.operand(l);
+                let (none, some) = self.branch_null(a.clone(), &l.ty);
+                if r.diverges() {
+                    self.cur = none;
+                    match &r.kind {
+                        TExprKind::Jump(s) => self.stmt(s),
+                        _ => self.effect(r),
+                    }
+                    if !self.terminated() {
+                        self.term(Term::Unreachable);
+                    }
+                    self.cur = some;
+                    return self.unwrap(a, &l.ty);
+                }
+                let res = self.temp(e.ty.clone());
+                let end = self.new_block();
+                self.cur = none;
+                let v = self.operand(r);
+                self.push(Stmt::Assign(res, Rvalue::Use(v)));
+                self.goto(end);
+                self.cur = some;
+                let u = if e.ty.is_nullable() { Rvalue::Use(a) } else { self.unwrap(a, &l.ty) };
+                self.push(Stmt::Assign(res, u));
+                self.start(end);
+                Rvalue::Use(Operand::Var(res))
+            }
+            TExprKind::Jump(s) => {
+                self.stmt(s);
+                Rvalue::Use(Operand::Bool(false))
             }
         }
     }

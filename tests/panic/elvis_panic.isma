@@ -1,0 +1,4 @@
+# expect-panic: no port given
+fn main():
+    val port = "".to_int_or_null() ?: panic("no port given")
+    print(port)

@@ -81,7 +81,7 @@ Indentation instead of braces. `for x in list`, `and` / `or` / `not`, f-strings.
 
 ### 🛡️ Checks like Kotlin
 
-`val` vs `var`. No `null`, no implicit conversions, no "truthy" values, and every path must `return`. Mistakes are caught before the program runs, with messages that tell you the fix.
+`val` vs `var`. Null safety: only a `T?` can be `null`, and smart casts know when it isn't. No implicit conversions, no "truthy" values, and every path must `return`. Mistakes are caught before the program runs, with messages that tell you the fix.
 
 </td>
 <td width="33%" valign="top">
@@ -155,6 +155,12 @@ fn clamp(x: Int, low: Int, high: Int) -> Int:
         return high
     return x
 
+fn first_long(words: List[String]) -> String?:  # `String?`: a String or null
+    for w in words:
+        if w.len() > 3:
+            return w
+    return null
+
 fn main():
     val p = Point(x=3.0, y=4.0)              # `val` can't be reassigned...
     var count = 0                            # ...`var` can
@@ -165,10 +171,14 @@ fn main():
     for i in 0..3:                           # ...or a range
         print(f"{i}: {xs[i]}")               # f-strings
     print(f"|p| = {p.length()}, sum = {count}")
+    val word = first_long(["a", "tiny", "list"])
+    print(word?.len() ?: 0)                  # safe call `?.` and elvis `?:`
+    if word != null:
+        print(word.len())                    # smart cast: `word` is a String here
     print(time.now().to_iso())
 ```
 
-The [**language guide**](docs/language.md) covers everything: types, strictness rules, lints, structs, lists, strings, modules, built-ins and panics.
+The [**language guide**](docs/language.md) covers everything: types, strictness rules, lints, structs, lists, strings, null safety, modules, built-ins and panics.
 
 <a id="time"></a>
 ## 🕰️ Batteries included: `time`
@@ -200,9 +210,9 @@ Every function, format code and helper is listed in the [`time` reference](docs/
 The VS Code extension (in the companion `isma-vscode` project) gets all its smarts from **`isma lsp`**, a language server built into the compiler. So the editor always agrees with `isma build`. It provides:
 
 - **Live type checking and lints** as you type. Unused and unreachable code is faded out.
-- **Hover** shows the type of any variable or expression, including inferred types, plus `#` doc comments.
+- **Hover** shows the type of any variable or expression, including inferred types and smart casts, plus `#` doc comments.
 - **Inlay type hints**: `val total = price * qty` shows as `val total: Float = …`.
-- **Completion** for members after `.`, module functions after `time.`, modules after `import `, and variables in scope.
+- **Completion** for members after `.` and `?.`, module functions after `time.`, modules after `import `, and variables in scope. Completing after `.` on a value that might be null turns it into `?.`.
 - **Go to definition**, an **outline view**, syntax highlighting, snippets and a **▶ Run** button.
 - **Automatic restarts**: when you reinstall `isma`, the extension notices and restarts the language server by itself.
 
@@ -237,12 +247,13 @@ These are the best of 3 runs on an AMD Ryzen 5 5500. Reproduce them with `./benc
 - **One front end, two uses.** The same lexer, parser and type checker compile your programs and power the editor through `isma lsp`.
 - **The standard library is Isma code** ([`stdlib/time.isma`](stdlib/time.isma)), compiled together with your program, so it's as fast as your own functions. A panic inside it reports *your* calling line, like Rust's `#[track_caller]`.
 - **Memory management happens on a mid-level IR.** The typed program is lowered to a control-flow graph in which every intermediate value has a name ([`src/mir.rs`](src/mir.rs)). [`src/arc.rs`](src/arc.rs) then adds reference counting in the style of Perceus (Koka, Lean 4). It drops each value right after its last use. Parameters are borrowed unless consumed, and projections stay borrowed while interprocedural write-effect summaries prove their slot can't change. A unique struct's memory is reused for the next one, and unique strings are appended to in place. Types that can form cycles ([`src/cycles.rs`](src/cycles.rs)) get a trial-deletion cycle collector.
-- **Codegen writes LLVM IR as text** and hands it to `clang -O3`, together with a ~750-line C runtime: the allocator, the cycle collector, strings, lists, printing and clocks.
+- **Codegen writes LLVM IR as text** and hands it to `clang -O3`, together with a ~780-line C runtime: the allocator, the cycle collector, strings, lists, printing and clocks.
+- **Null safety is checked by flow typing.** The checker tracks which locals and `val` field chains are known to be non-null at each point (through `if`, `and`/`or`, loops, early `return`s and `?:`), which is what makes smart casts work. At run time it costs nothing: `User?` is a nullable pointer, and `Int?` is a flag-plus-value pair that stays in registers.
 - **Safety stays cheap.**
   - Integer `+ - *` use LLVM's overflow-checking intrinsics.
   - Panic paths are marked cold.
   - List indexing is bounds-checked inline.
-- **About 8,800 lines of Rust.** The only dependencies are `ariadne` (error rendering) and `lsp-server` / `lsp-types` (the language server).
+- **About 9,900 lines of Rust.** The only dependencies are `ariadne` (error rendering) and `lsp-server` / `lsp-types` (the language server).
 
 <a id="roadmap"></a>
 ## 🗺️ Roadmap
@@ -251,7 +262,7 @@ These are the best of 3 runs on an AMD Ryzen 5 5500. Reproduce them with `./benc
 - [x] Native compilation through LLVM, with overflow and bounds checks
 - [x] Lints, error hints and a VS Code extension with a language server
 - [x] `import` and a standard library written in Isma (`time`)
-- [ ] Null safety: `Int?`, `?.`, the elvis operator `?:`, smart casts
+- [x] Null safety: `Int?`, `?.`, the elvis operator `?:`, `!!`, smart casts
 - [x] Memory management through automatic reference counting, with a cycle collector
 - [ ] `enum` + `match` with exhaustiveness checking
 - [ ] Generics for user code: `fn max[T](a: T, b: T) -> T`

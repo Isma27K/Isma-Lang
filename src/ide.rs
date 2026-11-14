@@ -134,6 +134,8 @@ impl IdeInfo {
                 }
                 out
             }
+            // (offered after `?.`, or after `.` with an edit that turns it into `?.`)
+            Type::Nullable(inner) => self.members(inner),
             _ => builtin_methods(t, &self.type_name(t), &|t| self.type_name(t)),
         }
     }
@@ -219,6 +221,8 @@ pub fn builtin_methods(t: &Type, tn: &str, type_name: &dyn Fn(&Type) -> String) 
             method("ends_with", "fn ends_with(suffix: String) -> Bool".into(), "Does the string end with `suffix`?", true),
             method("to_int", "fn to_int() -> Int".into(), "Parse as an `Int`. Panics if the string is not a valid integer.", false),
             method("to_float", "fn to_float() -> Float".into(), "Parse as a `Float`. Panics if the string is not a valid number.", false),
+            method("to_int_or_null", "fn to_int_or_null() -> Int?".into(), "Parse as an `Int`, or `null` if the string is not a valid integer.", false),
+            method("to_float_or_null", "fn to_float_or_null() -> Float?".into(), "Parse as a `Float`, or `null` if the string is not a valid number.", false),
             to_string,
         ],
         Type::List(elem) => {
@@ -239,7 +243,7 @@ pub fn builtin_methods(t: &Type, tn: &str, type_name: &dyn Fn(&Type) -> String) 
 /// Signature + documentation of the built-in functions.
 pub fn builtin_function(name: &str) -> Option<(&'static str, &'static str)> {
     Some(match name {
-        "print" => ("fn print(value: Int | Float | Bool | String)", "Print a value followed by a newline."),
+        "print" => ("fn print(value: Int | Float | Bool | String)", "Print a value followed by a newline. A nullable value prints as `null` when it is null."),
         "input" => ("fn input() -> String", "Read one line from stdin, without the trailing newline. Returns `\"\"` at end of input."),
         "args" => ("fn args() -> List[String]", "The command-line arguments passed to the program (not including the program name)."),
         "panic" => ("fn panic(message: String)", "Stop the program with an error message and exit code 101."),
@@ -254,7 +258,7 @@ pub const BUILTIN_FUNCTIONS: &[&str] = &["print", "input", "args", "panic", "ass
 
 pub const KEYWORDS: &[&str] = &[
     "fn", "val", "var", "if", "elif", "else", "while", "for", "in", "break", "continue", "return", "pass", "struct", "import",
-    "true", "false", "and", "or", "not",
+    "true", "false", "and", "or", "not", "null",
 ];
 
 pub const BUILTIN_TYPES: &[(&str, &str)] = &[

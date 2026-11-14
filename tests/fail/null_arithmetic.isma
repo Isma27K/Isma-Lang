@@ -1,0 +1,4 @@
+# expect-error: `n` might be null
+fn main():
+    val n = "4".to_int_or_null()
+    print(n + 1)

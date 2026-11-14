@@ -1,0 +1,5 @@
+# expect-warning: is never `null`, so this is always `false`
+fn main():
+    val n = 5
+    if n == null:
+        print("never")

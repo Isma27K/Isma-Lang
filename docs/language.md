@@ -14,6 +14,7 @@ Isma reads like Python, checks like Kotlin and compiles to native code. This gui
 - [Structs and methods](#structs-and-methods)
 - [Lists](#lists)
 - [Strings and f-strings](#strings-and-f-strings)
+- [Null safety](#null-safety)
 - [Memory](#memory)
 - [Modules: `import`](#modules-import)
 - [Built-in functions](#built-in-functions)
@@ -63,7 +64,7 @@ count += 1
 name = "other"           # error: cannot assign twice to immutable variable `name`
 ```
 
-- Every variable must be initialized. There is no `null`.
+- Every variable must be initialized. A variable can only hold `null` if its type says so (`Int?`), see [Null safety](#null-safety).
 - Declaring a name twice in the same block is an error, but an inner block may shadow an outer name.
 - `_` is a throwaway name: `val _ = compute()` and `for _ in 0..3:` are fine, and `_` can be declared any number of times.
 
@@ -77,6 +78,7 @@ name = "other"           # error: cannot assign twice to immutable variable `nam
 | `String` | Immutable UTF-8. `+` concatenates. |
 | `List[T]` | Growable and bounds-checked. A reference type. |
 | structs | User-defined. A reference type, like Python and Kotlin objects. |
+| `T?` | A `T` or `null`, e.g. `Int?`, `String?`, `User?`. See [Null safety](#null-safety). |
 
 Lists and structs are references: `val b = a` makes `b` point at the same list as `a`. Memory is managed for you, see [Memory](#memory).
 
@@ -94,7 +96,7 @@ print("n = " + 5)            # error. Write f"n = {5}" or "n = " + 5.to_string()
 
 On top of that:
 - every path through a function with a return type must `return`;
-- `==` only works on `Int`, `Float`, `Bool` and `String`;
+- `==` only works on `Int`, `Float`, `Bool` and `String`, and on their nullable versions (where `null == null`);
 - comparisons don't chain (`a < b < c` is an error);
 - an expression used as a statement must be a call, so a stray `x == 2` on its own line is caught.
 
@@ -110,6 +112,8 @@ Warnings never stop a program from compiling. They point at code that is probabl
 | `` `x` is declared `var` but never reassigned `` | Use `val`. (`val` still lets you change a list's contents or a struct's `var` fields.) |
 | `unreachable code` | Code after `return`, `break`, `continue` or `panic` never runs |
 | `` unused import `time` `` | Remove the `import` line |
+| ``unnecessary `?.` `` / `` `?:` `` / `` `!!` `` | The value is never `null` here, often because of a [smart cast](#smart-casts): use `.`, or drop the `?:` or `!!` |
+| `` `n` is never `null`, so this is always `false` `` | Remove the check |
 
 ## Functions
 
@@ -205,8 +209,80 @@ for c in "héllo".chars():
 | `substring(start, end) -> String` | Bytes `start..end`. Panics if out of range or splitting a character |
 | `contains(s)`, `starts_with(s)`, `ends_with(s)` | `-> Bool` |
 | `to_int()`, `to_float()`, `to_string()` | Conversions. Parsing panics on bad input |
+| `to_int_or_null()`, `to_float_or_null()` | `-> Int?` / `-> Float?`: `null` instead of a panic on bad input |
 
 `Int`, `Float` and `Bool` have `.to_string()`; `Int` has `.to_float()`; `Float` has `.to_int()`, which truncates.
+
+## Null safety
+
+A value can only be `null` if its type says so. `T?` means "a `T` or `null`", and a plain `T` is never null:
+
+```python
+val a: Int = null                        # error: `Int` can't be `null`
+val b: Int? = null                       # ok
+val port = "8080".to_int_or_null()       # Int?: null if the text isn't a number
+```
+
+You can't use a `T?` where a `T` is needed until you've dealt with the `null`. The error says how:
+
+```
+Error: `user` might be null
+   ╭─[ app.isma:9:11 ]
+   │
+ 9 │     print(user.name)
+   │           ──┬─
+   │             ╰─── this is `User?`
+   │
+   │ Help: use `user?.name` to get `null` instead, or check `if user != null:` first
+   │
+   │ Note: if it can never be null here, assert that with `user!!.name` (it panics if it is)
+───╯
+```
+
+The tools, as in Kotlin:
+
+| | |
+|---|---|
+| `x?.field`, `x?.method(...)` | **Safe call.** `null` if `x` is null (and then the arguments aren't evaluated), otherwise the member. `user?.name` is a `String?`. Chain them: `order?.customer?.address`. |
+| `x ?: default` | **Elvis.** `x` if it isn't null, otherwise `default`, which is only evaluated when needed. `user?.name ?: "anonymous"` is a `String`. |
+| `x ?: return` | Or `?: return value`, `?: break`, `?: continue`, `?: panic("...")`: leave instead. The result is then never null. |
+| `x!!` | "I know this isn't null": the value as a `T`, or a panic if it is null. |
+| `x == null`, `x != null` | Checks, which smart-cast `x` (below). |
+
+`print` and f-strings show a null value as `null`. `==` works between `Int?` values (`null == null` is true, and `null` equals nothing else). A list literal with a `null` in it is a list of nullables: `[1, null, 3]` is a `List[Int?]`. Lists don't convert, though: a `List[Int]` is not a `List[Int?]`, because then you could push a `null` into it.
+
+### Smart casts
+
+Once the compiler has seen that a value isn't null, it treats it as non-null for as long as that's certain. You don't have to write `!!` or repeat the check:
+
+```python
+fn greet(user: User?) -> String:
+    if user == null:
+        return "hello, stranger"
+    return f"hello, {user.name}"             # `user` is a `User` from here on
+
+fn length(head: Node?) -> Int:
+    var n = 0
+    var cur = head
+    while cur != null:
+        n += 1
+        cur = cur.next                       # `cur` is a `Node` inside the loop
+    return n
+```
+
+A value is smart-cast:
+- inside `if x != null:`, and in the `else` of `if x == null:`;
+- after a check that leaves: `if x == null: return` (or `break`, `continue`, `panic`), `val v = x ?: return`, `x!!` and `assert(x != null)`;
+- on the right of `and` / `or`: `if x != null and x.ready:`;
+- inside `while x != null:`, and after a loop `while x == null:` without a `break`;
+- after `x == 5` is true, and after `x?.field != null` is true, `x` too;
+- after it's assigned a non-null value: `var best: Int? = null`, then `best = 3`, and `best + 1` works.
+
+The `if` branches join: after `if x == null: x = 0`, `x` is non-null either way.
+
+Smart casts apply to local variables, parameters, and chains of `val` fields (`order.customer.address`). They don't apply to `var` fields, which might change between the check and the use. The error says so, and suggests copying the field into a `val` first. A `var` local that is reassigned inside a loop also isn't smart-cast from a check made before the loop. Hover over a smart-cast name in the editor to see its narrowed type.
+
+Null safety costs nothing at run time. A `String?`, `List[T]?` or `User?` is a pointer that may be null. An `Int?`, `Float?` or `Bool?` is the value plus a flag, which stays in registers, so nothing is ever allocated ("boxed") for it.
 
 ## Memory
 
@@ -261,7 +337,7 @@ Available modules: [`time`](time.md).
 
 | Function | |
 |---|---|
-| `print(x)` | Print an `Int`, `Float`, `Bool` or `String`, followed by a newline |
+| `print(x)` | Print an `Int`, `Float`, `Bool` or `String`, followed by a newline. A nullable one prints `null` when it is null |
 | `input() -> String` | Read one line from stdin, without the newline |
 | `args() -> List[String]` | Command-line arguments passed to the program |
 | `sqrt(x: Float) -> Float` | Square root |
@@ -280,7 +356,8 @@ panic at crash.isma:5:15: index 3 out of bounds for list of length 3
 Panics cover:
 - integer overflow and division by zero;
 - out-of-bounds indexing and `pop()` on an empty list;
-- a failed `assert`, a failed parse (`"abc".to_int()`), and `panic(...)`.
+- a failed `assert`, a failed parse (`"abc".to_int()`), and `panic(...)`;
+- `x!!` when `x` is null.
 
 ## Known limitations
 

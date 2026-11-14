@@ -1,0 +1,8 @@
+# expect-error: compare explicitly
+fn flag() -> Bool?:
+    return null
+
+fn main():
+    val f = flag()
+    if f:
+        print("yes")

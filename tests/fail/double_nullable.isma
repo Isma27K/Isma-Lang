@@ -1,0 +1,3 @@
+# expect-error: a type can only be made nullable once
+fn main():
+    val x: Int?? = null

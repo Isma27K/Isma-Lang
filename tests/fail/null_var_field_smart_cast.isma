@@ -1,0 +1,9 @@
+# expect-error: `next` is a `var` field
+struct Node:
+    value: Int
+    var next: Node?
+
+fn main():
+    val n = Node(1, null)
+    if n.next != null:
+        print(n.next.value)

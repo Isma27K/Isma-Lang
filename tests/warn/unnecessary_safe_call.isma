@@ -1,0 +1,4 @@
+# expect-warning: unnecessary `?.`
+fn main():
+    val s = "hello"
+    print(s?.len())

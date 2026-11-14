@@ -434,6 +434,9 @@ impl<'a> Lexer<'a> {
             (b'.', b'.') => (Tok::DotDot, 2),
             (b'=', b'=') => (Tok::EqEq, 2),
             (b'!', b'=') => (Tok::NotEq, 2),
+            (b'!', b'!') => (Tok::BangBang, 2),
+            (b'?', b'.') => (Tok::QuestionDot, 2),
+            (b'?', _) => (Tok::Question, 1),
             (b'<', b'=') => (Tok::Le, 2),
             (b'>', b'=') => (Tok::Ge, 2),
             (b'+', b'=') => (Tok::PlusEq, 2),
@@ -483,7 +486,7 @@ impl<'a> Lexer<'a> {
                 let msg = match ch {
                     '&' if self.peek() == b'&' => "unexpected `&&`; Isma uses `and`".to_string(),
                     '|' if self.peek() == b'|' => "unexpected `||`; Isma uses `or`".to_string(),
-                    '!' => "unexpected `!`; Isma uses `not`".to_string(),
+                    '!' => "unexpected `!`; Isma uses `not` (and `!!` to assert a value isn't null)".to_string(),
                     '\'' => "single quotes are not strings in Isma; use double quotes".to_string(),
                     _ => format!("unexpected character `{ch}`"),
                 };

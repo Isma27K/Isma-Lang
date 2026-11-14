@@ -1,0 +1,7 @@
+# expect-error: write `c.hits = (c.hits ?: 0) + 1`
+struct Counter:
+    var hits: Int?
+
+fn main():
+    val c = Counter(null)
+    c.hits += 1

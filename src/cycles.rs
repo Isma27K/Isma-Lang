@@ -13,14 +13,15 @@ use crate::types::Type;
 /// The reference-counted types directly inside a value of type `t`.
 fn children(t: &Type, structs: &[TStruct]) -> Vec<Type> {
     match t {
-        Type::Struct(sid) => structs[*sid].fields.iter().map(|f| f.ty.clone()).filter(|t| is_ref(t) && *t != Type::Str).collect(),
-        Type::List(e) if is_ref(e) && **e != Type::Str => vec![(**e).clone()],
+        Type::Struct(sid) => structs[*sid].fields.iter().map(|f| f.ty.non_null().clone()).filter(|t| is_ref(t) && *t != Type::Str).collect(),
+        Type::List(e) if is_ref(e) && *e.non_null() != Type::Str => vec![e.non_null().clone()],
         _ => Vec::new(),
     }
 }
 
 /// Can a value of type `t` (transitively) contain another value of type `t`?
 pub fn is_cyclic(t: &Type, structs: &[TStruct]) -> bool {
+    let t = t.non_null();
     let mut seen: Vec<Type> = Vec::new();
     let mut stack = children(t, structs);
     while let Some(u) = stack.pop() {
@@ -66,5 +67,12 @@ mod tests {
         assert!(is_cyclic(&list(Type::Struct(0)), &structs));
         assert!(!is_cyclic(&list(Type::Struct(4)), &structs));
         assert!(!is_cyclic(&list(list(Type::Int)), &structs));
+    }
+
+    #[test]
+    fn nullable_links_make_cycles() {
+        let structs = vec![st("Node", &[Type::Int, Type::Struct(0).nullable()]), st("Opt", &[Type::Int.nullable(), Type::Str.nullable()])];
+        assert_eq!(cyclic_structs(&structs), vec![true, false]);
+        assert!(is_cyclic(&Type::Struct(0).nullable(), &structs));
     }
 }

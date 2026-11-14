@@ -45,6 +45,29 @@ struct LocalBinding {
     span: Span,
 }
 
+/// A value that smart casts can track: a local, or a chain of fields of one
+/// (`node.next.value`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NullPath {
+    root: LocalId,
+    fields: Vec<(StructId, usize)>,
+}
+
+impl NullPath {
+    fn local(root: LocalId) -> Self {
+        NullPath { root, fields: Vec::new() }
+    }
+}
+
+/// How a possibly-null value was used where a non-null one is needed (for the error's help text).
+enum NullUse<'a> {
+    /// A field (`None`) or a method call (`Some(takes arguments)`).
+    Member(&'a str, Option<bool>),
+    Index,
+    Value,
+    Condition,
+}
+
 /// Per-local facts for lints (indexed by `LocalId`).
 struct LocalMeta {
     name: String,
@@ -84,6 +107,8 @@ pub struct Checker {
     scopes: Vec<HashMap<String, LocalBinding>>,
     loop_depth: usize,
     ret_ty: Type,
+    /// Smart casts: values known not to be `null` at this point of the function.
+    nonnull: Vec<NullPath>,
     // editor support + lints
     ide: IdeInfo,
     local_meta: Vec<LocalMeta>,
@@ -120,6 +145,7 @@ pub fn analyze(program: &Program, source: &str, modules: &[ModuleInput]) -> Anal
         scopes: Vec::new(),
         loop_depth: 0,
         ret_ty: Type::Unit,
+        nonnull: Vec::new(),
         ide: IdeInfo::default(),
         local_meta: Vec::new(),
         field_spans: Vec::new(),
@@ -346,11 +372,21 @@ impl Checker {
         }
     }
 
-    /// Hover + go-to-definition for a use of local `id` at `span`.
-    fn local_use(&mut self, id: LocalId, decl: Span, span: Span) {
+    /// Hover + go-to-definition for a use of local `id` at `span` (`smart`:
+    /// it is smart-cast to its non-null type here).
+    fn local_use(&mut self, id: LocalId, decl: Span, span: Span, smart: bool) {
         let m = &self.local_meta[id];
-        let code = local_code(&m.name, &self.tn(&self.locals[id].ty), m.kind);
-        let doc = local_doc(m.kind);
+        let declared = &self.locals[id].ty;
+        let shown = if smart { declared.non_null() } else { declared };
+        let code = local_code(&m.name, &self.tn(shown), m.kind);
+        let mut doc = local_doc(m.kind);
+        if smart {
+            let note = format!("smart cast from `{}`: it was checked, so it can't be `null` here", self.tn(declared));
+            doc = Some(match doc {
+                Some(d) => format!("{d}\n\n{note}"),
+                None => note,
+            });
+        }
         self.hover(span, code, doc);
         self.ide.definitions.push((span, decl));
     }
@@ -637,6 +673,11 @@ impl Checker {
     }
 
     fn resolve_type(&mut self, t: &TypeExpr) -> Type {
+        let ty = self.resolve_type_inner(t);
+        if t.nullable { ty.nullable() } else { ty }
+    }
+
+    fn resolve_type_inner(&mut self, t: &TypeExpr) -> Type {
         let name = t.name.name.as_str();
         if let Some(m) = &t.module {
             return self.resolve_module_type(m, t);
@@ -758,6 +799,7 @@ impl Checker {
     fn fn_body(&mut self, f: &FnDecl, owner: Option<StructId>, fid: FuncId) -> TFunc {
         self.locals.clear();
         self.local_meta.clear();
+        self.nonnull.clear();
         self.scopes = vec![HashMap::new()];
         self.loop_depth = 0;
         let sig_params: Vec<(String, Type)> = self.funcs[fid].params.clone();
@@ -866,6 +908,223 @@ impl Checker {
         self.scopes.iter().rev().find_map(|s| s.get(name))
     }
 
+    /// A compiler-introduced local (the receiver inside `x?.member`).
+    fn hidden_local(&mut self, ty: Type) -> LocalId {
+        self.local_meta.push(LocalMeta { name: "_it".into(), span: Span::default(), kind: LocalKind::Val, used: true, reassigned: false });
+        self.locals.push(TLocal { name: "_it".into(), ty });
+        self.locals.len() - 1
+    }
+
+    // ---------- null safety ----------
+
+    /// The source text of a short, single-line span (for messages like "`user.name` might be null").
+    fn snippet(&self, span: Span) -> Option<String> {
+        let (base, src) = self.ns_sources.iter().rev().find(|(b, _)| *b <= span.start)?;
+        let s = src.get((span.start - base) as usize..(span.end - base) as usize)?;
+        (!s.is_empty() && s.len() <= 40 && !s.contains('\n')).then(|| s.to_string())
+    }
+
+    /// The trackable value an expression denotes, if any.
+    fn path_of(e: &TExpr) -> Option<NullPath> {
+        match &e.kind {
+            TExprKind::Local(id) => Some(NullPath::local(*id)),
+            TExprKind::Unwrap(inner) => Self::path_of(inner),
+            TExprKind::Field(obj, sid, idx) => {
+                let mut p = Self::path_of(obj)?;
+                p.fields.push((*sid, *idx));
+                Some(p)
+            }
+            _ => None,
+        }
+    }
+
+    /// A path can only be smart-cast if nothing can change it behind our
+    /// back: every field on it must be a `val` (locals are tracked exactly).
+    fn first_var_field(&self, p: &NullPath) -> Option<String> {
+        p.fields.iter().find(|(sid, idx)| self.structs[*sid].fields[*idx].mutable).map(|(sid, idx)| self.structs[*sid].fields[*idx].name.clone())
+    }
+
+    fn is_smart_cast(&self, p: &NullPath) -> bool {
+        self.nonnull.contains(p) && self.first_var_field(p).is_none()
+    }
+
+    fn add_facts(&mut self, facts: Vec<NullPath>) {
+        for p in facts {
+            if !self.nonnull.contains(&p) {
+                self.nonnull.push(p);
+            }
+        }
+    }
+
+    /// Paths that are non-null when `e` (a nullable value) turns out non-null:
+    /// `e` itself, and for `a?.b` also `a`.
+    fn nonnull_when_nonnull(e: &TExpr) -> Vec<NullPath> {
+        let mut out: Vec<NullPath> = Self::path_of(e).into_iter().collect();
+        if let TExprKind::SafeCall { recv, .. } = &e.kind {
+            out.extend(Self::nonnull_when_nonnull(recv));
+        }
+        out
+    }
+
+    /// What a condition tells us about nullness: (paths non-null when it's
+    /// true, paths non-null when it's false).
+    fn cond_facts(e: &TExpr) -> (Vec<NullPath>, Vec<NullPath>) {
+        let union = |mut a: Vec<NullPath>, b: Vec<NullPath>| {
+            for p in b {
+                if !a.contains(&p) {
+                    a.push(p);
+                }
+            }
+            a
+        };
+        let inter = |a: Vec<NullPath>, b: &[NullPath]| a.into_iter().filter(|p| b.contains(p)).collect::<Vec<_>>();
+        match &e.kind {
+            TExprKind::IsNull(inner) => (Vec::new(), Self::nonnull_when_nonnull(inner)),
+            TExprKind::Not(inner) => {
+                let (t, f) = Self::cond_facts(inner);
+                (f, t)
+            }
+            // `x == 5` (x: Int?) is only true when x isn't null.
+            TExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne), a, b) => {
+                let mut facts = Vec::new();
+                for (x, y) in [(a, b), (b, a)] {
+                    if x.ty.is_nullable() && matches!(y.kind, TExprKind::Wrap(_)) {
+                        facts.extend(Self::nonnull_when_nonnull(x));
+                    }
+                }
+                if *op == BinOp::Eq { (facts, Vec::new()) } else { (Vec::new(), facts) }
+            }
+            TExprKind::And(a, b) => {
+                let ((at, af), (bt, bf)) = (Self::cond_facts(a), Self::cond_facts(b));
+                let false_b = union(at.clone(), bf);
+                (union(at, bt), inter(af, &false_b))
+            }
+            TExprKind::Or(a, b) => {
+                let ((at, af), (bt, bf)) = (Self::cond_facts(a), Self::cond_facts(b));
+                let true_b = union(af.clone(), bt);
+                (inter(at, &true_b), union(af, bf))
+            }
+            _ => (Vec::new(), Vec::new()),
+        }
+    }
+
+    /// Smart cast: a nullable expression already known to be non-null here.
+    fn narrow(&self, e: TExpr) -> TExpr {
+        match (&e.ty, Self::path_of(&e)) {
+            (Type::Nullable(inner), Some(p)) if self.is_smart_cast(&p) => {
+                let (ty, span) = ((**inner).clone(), e.span);
+                Self::mk(TExprKind::Unwrap(Box::new(e)), ty, span)
+            }
+            _ => e,
+        }
+    }
+
+    /// Forget smart casts of locals that a loop body assigns: they may not hold on the next iteration.
+    fn forget_assigned_in(&mut self, body: &[Stmt]) {
+        fn names(stmts: &[Stmt], out: &mut Vec<String>) {
+            for s in stmts {
+                match &s.kind {
+                    StmtKind::Assign { target: Expr { kind: ExprKind::Name(n), .. }, .. } => out.push(n.clone()),
+                    StmtKind::If { branches, else_block } => {
+                        for (_, b) in branches {
+                            names(b, out);
+                        }
+                        if let Some(b) = else_block {
+                            names(b, out);
+                        }
+                    }
+                    StmtKind::While { body, .. } | StmtKind::For { body, .. } => names(body, out),
+                    _ => {}
+                }
+            }
+        }
+        let mut assigned = Vec::new();
+        names(body, &mut assigned);
+        let ids: Vec<LocalId> = assigned.iter().filter_map(|n| self.lookup(n).map(|b| b.id)).collect();
+        self.nonnull.retain(|p| !ids.contains(&p.root));
+    }
+
+    /// Why a checked value still can't be smart-cast, if that's the case.
+    fn unstable_note(&self, e: &TExpr) -> Option<String> {
+        let p = Self::path_of(e)?;
+        if !self.nonnull.contains(&p) {
+            return None;
+        }
+        let field = self.first_var_field(&p)?;
+        let copy = self.snippet(e.span).map(|s| format!(": `val {} = {s}`", field)).unwrap_or_default();
+        Some(format!(
+            "it was checked for `null`, but `{field}` is a `var` field, which could have changed since then; copy it into a `val` first{copy}"
+        ))
+    }
+
+    /// "`x` might be null", with advice that fits how it was used.
+    fn null_use_error(&mut self, e: &TExpr, how: NullUse) {
+        let tn = self.tn(&e.ty);
+        let snip = self.snippet(e.span);
+        let name = snip.as_ref().map(|s| format!("`{s}`")).unwrap_or_else(|| "this value".into());
+        let s = snip.unwrap_or_else(|| "value".into());
+        let default = match e.ty.non_null() {
+            Type::Int => "0",
+            Type::Float => "0.0",
+            Type::Bool => "false",
+            Type::Str => "\"\"",
+            Type::List(_) => "[]",
+            _ => "<default>",
+        };
+        let (help, assert) = match how {
+            NullUse::Member(m, Some(has_args)) => {
+                let args = if has_args { "(...)" } else { "()" };
+                (format!("call it only when it isn't null with `{s}?.{m}{args}`, or check `if {s} != null:` first"), format!("{s}!!.{m}{args}"))
+            }
+            NullUse::Member(f, None) => (format!("use `{s}?.{f}` to get `null` instead, or check `if {s} != null:` first"), format!("{s}!!.{f}")),
+            NullUse::Index => (format!("check `if {s} != null:` first"), format!("{s}!![i]")),
+            NullUse::Value => (format!("give a default with `{s} ?: {default}`, or check `if {s} != null:` first"), format!("{s}!!")),
+            NullUse::Condition => (format!("compare explicitly: `{s} == true`"), format!("{s}!!")),
+        };
+        let mut d = Diagnostic::error(format!("{name} might be null"), e.span)
+            .with_primary(format!("this is `{tn}`"))
+            .with_help(help)
+            .with_note(format!("if it can never be null here, assert that with `{assert}` (it panics if it is)"));
+        if let Some(n) = self.unstable_note(e) {
+            d = d.with_note(n);
+        }
+        self.err(d);
+    }
+
+    /// `a?.member`, where `access` builds the member access on the (non-null) receiver.
+    fn safe_access(&mut self, recv: TExpr, op_span: Span, span: Span, access: impl FnOnce(&mut Checker, TExpr) -> TExpr) -> TExpr {
+        match recv.ty.clone() {
+            Type::Nullable(inner) => {
+                let binder = self.hidden_local((*inner).clone());
+                let it = Self::mk(TExprKind::Local(binder), *inner, recv.span);
+                // Inside the access (e.g. in arguments), the receiver isn't null.
+                let saved = self.nonnull.clone();
+                self.add_facts(Self::nonnull_when_nonnull(&recv));
+                let body = access(self, it);
+                self.nonnull = saved;
+                let ty = if body.ty == Type::Unit { Type::Unit } else { body.ty.clone().nullable() };
+                Self::mk(TExprKind::SafeCall { recv: Box::new(recv), binder, body: Box::new(body) }, ty, span)
+            }
+            Type::Error => {
+                let _ = access(self, recv);
+                Self::error_expr(span)
+            }
+            Type::Null => {
+                self.err(Diagnostic::error("`null` has no fields or methods", recv.span).with_primary("this is always `null`"));
+                Self::error_expr(span)
+            }
+            ty => {
+                let tn = self.tn(&ty);
+                self.diags.push(
+                    Diagnostic::warning("unnecessary `?.`: this value is never `null`", op_span)
+                        .with_label(recv.span, format!("this is `{tn}`"))
+                        .with_help("use `.` instead"),
+                );
+                access(self, recv)
+            }
+        }
+    }
+
     fn block(&mut self, stmts: &[Stmt], new_scope: bool) -> Vec<TStmt> {
         if new_scope {
             self.scopes.push(HashMap::new());
@@ -897,7 +1156,9 @@ impl Checker {
 
     fn expect_bool(&mut self, e: &Expr, what: &str) -> TExpr {
         let t = self.expr(e, Some(&Type::Bool));
-        if !t.ty.compatible(&Type::Bool) {
+        if t.ty == Type::Bool.nullable() {
+            self.null_use_error(&t, NullUse::Condition);
+        } else if !t.ty.compatible(&Type::Bool) {
             let found = self.tn(&t.ty);
             let mut d = Diagnostic::error(format!("{what} must be a `Bool`, found `{found}`"), e.span)
                 .with_primary(format!("this is `{found}`"))
@@ -917,17 +1178,26 @@ impl Checker {
         Some(match &s.kind {
             StmtKind::Let { mutable, name, ty, value } => {
                 let declared = ty.as_ref().map(|t| self.resolve_type(t));
-                let v = self.expr(value, declared.as_ref());
+                let mut v = self.expr(value, declared.as_ref());
                 if v.ty == Type::Unit {
                     self.err(
                         Diagnostic::error("cannot bind a value of type `Unit`", value.span)
                             .with_primary("this expression produces no value"),
                     );
                 }
+                let known_nonnull = !v.ty.is_nullable();
                 let ty = match declared.clone() {
                     Some(d) => {
-                        self.expect_type(&v, &d, ty.as_ref().map(|t| t.span));
+                        v = self.coerce(v, &d, ty.as_ref().map(|t| t.span));
                         d
+                    }
+                    None if v.ty == Type::Null => {
+                        self.err(
+                            Diagnostic::error("cannot infer a type for `null`", value.span)
+                                .with_primary("`null` of what?")
+                                .with_help(format!("add a nullable type annotation, e.g. `{} {}: Int? = null`", if *mutable { "var" } else { "val" }, name.name)),
+                        );
+                        Type::Error
                     }
                     None => v.ty.clone(),
                 };
@@ -936,13 +1206,19 @@ impl Checker {
                     self.ide.inlay_hints.push((name.span.end, hint));
                 }
                 let kind = if *mutable { LocalKind::Var } else { LocalKind::Val };
+                let nullable = ty.is_nullable();
                 let id = self.declare_local(name, ty, kind);
+                if nullable && known_nonnull {
+                    self.add_facts(vec![NullPath::local(id)]);
+                }
                 TStmt::Let(id, v)
             }
             StmtKind::Assign { target, op, value } => self.assign(target, *op, value, s.span)?,
             StmtKind::Expr(e) => {
                 let t = self.expr(e, None);
-                if !matches!(e.kind, ExprKind::Call { .. } | ExprKind::Error) && !t.ty.is_error() {
+                // `x!!` and `x ?: return` are fine on their own: they check, and smart-cast `x`.
+                let checks = matches!(&t.kind, TExprKind::NotNull(_)) || matches!(&t.kind, TExprKind::Elvis(_, r) if r.diverges());
+                if !matches!(e.kind, ExprKind::Call { .. } | ExprKind::Error) && !t.ty.is_error() && !checks {
                     let mut d = Diagnostic::error("expression result is unused", e.span)
                         .with_primary("this value is computed and thrown away");
                     if matches!(&e.kind, ExprKind::Binary(BinOp::Eq, _, _)) {
@@ -955,20 +1231,51 @@ impl Checker {
                 TStmt::Expr(t)
             }
             StmtKind::If { branches, else_block } => {
+                // Smart casts after the `if` are the ones that hold at the end of
+                // every branch that doesn't jump away (`return`, `break`, ...).
                 let mut tb = Vec::new();
+                let mut ends: Vec<Vec<NullPath>> = Vec::new();
                 for (cond, body) in branches {
                     let c = self.expect_bool(cond, "`if` condition");
+                    let after_cond = self.nonnull.clone();
+                    let (when_true, when_false) = Self::cond_facts(&c);
+                    self.add_facts(when_true);
                     let b = self.block(body, true);
+                    if !b.iter().any(ends_flow) {
+                        ends.push(std::mem::take(&mut self.nonnull));
+                    }
+                    self.nonnull = after_cond;
+                    self.add_facts(when_false);
                     tb.push((c, b));
                 }
                 let eb = else_block.as_ref().map(|b| self.block(b, true));
+                if eb.as_ref().is_none_or(|b| !b.iter().any(ends_flow)) {
+                    ends.push(self.nonnull.clone());
+                }
+                if let Some((first, rest)) = ends.split_first() {
+                    let mut join = first.clone();
+                    join.retain(|p| rest.iter().all(|e| e.contains(p)));
+                    self.nonnull = join;
+                }
                 TStmt::If { branches: tb, else_block: eb }
             }
             StmtKind::While { cond, body } => {
+                self.forget_assigned_in(body);
+                let before = self.nonnull.clone();
                 let c = self.expect_bool(cond, "`while` condition");
+                let after_cond = self.nonnull.clone();
+                let (when_true, when_false) = Self::cond_facts(&c);
+                self.add_facts(when_true);
                 self.loop_depth += 1;
                 let b = self.block(body, true);
                 self.loop_depth -= 1;
+                // Without a `break`, the loop only ends when the condition is false.
+                if contains_break(&b) {
+                    self.nonnull = before;
+                } else {
+                    self.nonnull = after_cond;
+                    self.add_facts(when_false);
+                }
                 TStmt::While { cond: c, body: b }
             }
             StmtKind::For { var, iter, body } => match iter {
@@ -976,7 +1283,9 @@ impl Checker {
                     let ts = self.expr(start, Some(&Type::Int));
                     let te = self.expr(end, Some(&Type::Int));
                     for t in [&ts, &te] {
-                        if !t.ty.compatible(&Type::Int) {
+                        if t.ty == Type::Int.nullable() {
+                            self.null_use_error(t, NullUse::Value);
+                        } else if !t.ty.compatible(&Type::Int) {
                             let found = self.tn(&t.ty);
                             self.err(
                                 Diagnostic::error(format!("range bounds must be `Int`, found `{found}`"), t.span)
@@ -984,12 +1293,15 @@ impl Checker {
                             );
                         }
                     }
+                    self.forget_assigned_in(body);
+                    let before = self.nonnull.clone();
                     self.scopes.push(HashMap::new());
                     let v = self.declare_local(var, Type::Int, LocalKind::LoopVar);
                     self.loop_depth += 1;
                     let b = self.block(body, true);
                     self.loop_depth -= 1;
                     self.scopes.pop();
+                    self.nonnull = before;
                     TStmt::ForRange { var: v, start: ts, end: te, inclusive: *inclusive, body: b }
                 }
                 ForIter::Expr(e) => {
@@ -997,6 +1309,10 @@ impl Checker {
                     let elem = match &tl.ty {
                         Type::List(t) => (**t).clone(),
                         Type::Error => Type::Error,
+                        Type::Nullable(inner) if matches!(**inner, Type::List(_)) => {
+                            self.null_use_error(&tl, NullUse::Value);
+                            Type::Error
+                        }
                         other => {
                             let found = self.tn(other);
                             let mut d = Diagnostic::error(format!("cannot iterate over a value of type `{found}`"), e.span)
@@ -1015,50 +1331,56 @@ impl Checker {
                         let hint = format!(": {}", self.tn(&elem));
                         self.ide.inlay_hints.push((var.span.end, hint));
                     }
+                    self.forget_assigned_in(body);
+                    let before = self.nonnull.clone();
                     let v = self.declare_local(var, elem, LocalKind::LoopVar);
                     self.loop_depth += 1;
                     let b = self.block(body, true);
                     self.loop_depth -= 1;
                     self.scopes.pop();
+                    self.nonnull = before;
                     TStmt::ForList { var: v, list: tl, body: b }
                 }
             },
-            StmtKind::Break | StmtKind::Continue => {
-                let is_break = matches!(s.kind, StmtKind::Break);
-                if self.loop_depth == 0 {
-                    let kw = if is_break { "break" } else { "continue" };
-                    self.err(Diagnostic::error(format!("`{kw}` outside of a loop"), s.span).with_primary("not inside `while` or `for`"));
-                }
-                if is_break { TStmt::Break } else { TStmt::Continue }
-            }
-            StmtKind::Return(value) => {
-                let ret = self.ret_ty.clone();
-                match value {
-                    None => {
-                        if ret != Type::Unit && !ret.is_error() {
-                            let rt = self.tn(&ret);
-                            self.err(Diagnostic::error(format!("`return` without a value in a function returning `{rt}`"), s.span));
-                        }
-                        TStmt::Return(None)
-                    }
-                    Some(v) => {
-                        if ret == Type::Unit {
-                            let t = self.expr(v, None);
-                            self.err(
-                                Diagnostic::error("this function does not return a value", v.span)
-                                    .with_help("declare a return type, e.g. `fn name() -> Int:`"),
-                            );
-                            TStmt::Return(Some(t))
-                        } else {
-                            let t = self.expr(v, Some(&ret));
-                            self.expect_type(&t, &ret, None);
-                            TStmt::Return(Some(t))
-                        }
-                    }
-                }
-            }
+            StmtKind::Break | StmtKind::Continue => self.loop_jump(matches!(s.kind, StmtKind::Break), s.span),
+            StmtKind::Return(value) => self.return_stmt(value.as_ref(), s.span),
             StmtKind::Pass => return None,
         })
+    }
+
+    fn loop_jump(&mut self, is_break: bool, span: Span) -> TStmt {
+        if self.loop_depth == 0 {
+            let kw = if is_break { "break" } else { "continue" };
+            self.err(Diagnostic::error(format!("`{kw}` outside of a loop"), span).with_primary("not inside `while` or `for`"));
+        }
+        if is_break { TStmt::Break } else { TStmt::Continue }
+    }
+
+    fn return_stmt(&mut self, value: Option<&Expr>, span: Span) -> TStmt {
+        let ret = self.ret_ty.clone();
+        match value {
+            None => {
+                if ret != Type::Unit && !ret.is_error() {
+                    let rt = self.tn(&ret);
+                    self.err(Diagnostic::error(format!("`return` without a value in a function returning `{rt}`"), span));
+                }
+                TStmt::Return(None)
+            }
+            Some(v) => {
+                if ret == Type::Unit {
+                    let t = self.expr(v, None);
+                    self.err(
+                        Diagnostic::error("this function does not return a value", v.span)
+                            .with_help("declare a return type, e.g. `fn name() -> Int:`"),
+                    );
+                    TStmt::Return(Some(t))
+                } else {
+                    let t = self.expr(v, Some(&ret));
+                    let t = self.coerce(t, &ret, None);
+                    TStmt::Return(Some(t))
+                }
+            }
+        }
     }
 
     fn assign(&mut self, target: &Expr, op: Option<BinOp>, value: &Expr, span: Span) -> Option<TStmt> {
@@ -1070,7 +1392,7 @@ impl Checker {
                     return None;
                 };
                 let (id, mutable, decl_span) = (b.id, b.mutable, b.span);
-                self.local_use(id, decl_span, target.span);
+                self.local_use(id, decl_span, target.span, false);
                 self.local_meta[id].reassigned = true;
                 if op.is_some() {
                     self.local_meta[id].used = true;
@@ -1134,9 +1456,58 @@ impl Checker {
                 return None;
             }
         };
-        let v = self.expr(value, Some(&place_ty));
+        let mut v = self.expr(value, Some(&place_ty));
+        let local = match &place {
+            Place::Local(id) => Some(*id),
+            _ => None,
+        };
+        // `x += 1` on a smart-cast `x: Int?` is `x = x + 1` on its non-null value.
+        if let (Some(op), Some(id), Type::Nullable(inner)) = (op, local, &place_ty)
+            && self.nonnull.contains(&NullPath::local(id))
+            && v.ty.compatible(inner)
+        {
+            let inner = (**inner).clone();
+            let cur = Self::mk(TExprKind::Unwrap(Box::new(Self::mk(TExprKind::Local(id), place_ty.clone(), target.span))), inner.clone(), target.span);
+            let ok = match op {
+                BinOp::Add => matches!(inner, Type::Int | Type::Float | Type::Str),
+                _ => inner.is_numeric(),
+            };
+            if ok {
+                let sum = Self::mk(TExprKind::Binary(op, Box::new(cur), Box::new(v)), inner, span);
+                let value = self.coerce(sum, &place_ty, None);
+                return Some(TStmt::Assign { place, op: None, value, span });
+            }
+            let a = self.tn(&inner);
+            self.err(Diagnostic::error(format!("cannot apply `{}=` to `{a}`", op.symbol()), span).with_label(target.span, format!("this is `{a}`")));
+            return None;
+        }
+        let known_nonnull = !v.ty.is_nullable();
+        if let Some(id) = local {
+            // Reassigning a local ends what we knew about it, unless the new value is non-null.
+            self.nonnull.retain(|p| p.root != id);
+            if place_ty.is_nullable() && known_nonnull {
+                self.add_facts(vec![NullPath::local(id)]);
+            }
+        }
         match op {
-            None => self.expect_type(&v, &place_ty, None),
+            None => v = self.coerce(v, &place_ty, None),
+            Some(op) if place_ty.is_nullable() && !place_ty.is_error() && v.ty.compatible(place_ty.non_null()) => {
+                let tn = self.tn(&place_ty);
+                let t = self.snippet(target.span).unwrap_or_else(|| "x".into());
+                let rhs = self.snippet(value.span).unwrap_or_else(|| "...".into());
+                let default = match place_ty.non_null() {
+                    Type::Float => "0.0",
+                    Type::Str => "\"\"",
+                    _ => "0",
+                };
+                let mut d = Diagnostic::error(format!("`{t}` might be null"), target.span).with_primary(format!("this is `{tn}`"));
+                d = if local.is_some() {
+                    d.with_help(format!("check `if {t} != null:` first, or write `{t} = ({t} ?: {default}) {} {rhs}`", op.symbol()))
+                } else {
+                    d.with_help(format!("write `{t} = ({t} ?: {default}) {} {rhs}`", op.symbol()))
+                };
+                self.err(d);
+            }
             Some(op) => {
                 if !place_ty.is_error() && !v.ty.is_error() {
                     let ok = place_ty == v.ty
@@ -1158,6 +1529,25 @@ impl Checker {
         Some(TStmt::Assign { place, op, value: v, span })
     }
 
+    /// Check that `e` fits where a value of type `expected` is needed, turning
+    /// a `T` into a `T?` (and typing `null`) when the expected type is nullable.
+    fn coerce(&mut self, e: TExpr, expected: &Type, annotation: Option<Span>) -> TExpr {
+        if e.ty.compatible(expected) || e.ty == Type::Unit && *expected == Type::Unit {
+            return e;
+        }
+        if let Type::Nullable(inner) = expected {
+            if e.ty == Type::Null {
+                return Self::mk(TExprKind::Null, expected.clone(), e.span);
+            }
+            if e.ty.compatible(inner) && e.ty != Type::Unit {
+                let span = e.span;
+                return Self::mk(TExprKind::Wrap(Box::new(e)), expected.clone(), span);
+            }
+        }
+        self.expect_type(&e, expected, annotation);
+        e
+    }
+
     fn expect_type(&mut self, e: &TExpr, expected: &Type, annotation: Option<Span>) {
         if e.ty.compatible(expected) || e.ty == Type::Unit && *expected == Type::Unit {
             return;
@@ -1168,7 +1558,20 @@ impl Checker {
         if let Some(a) = annotation {
             d = d.with_label(a, "expected because of this annotation");
         }
+        let snip = self.snippet(e.span).unwrap_or_else(|| "value".into());
         d = match (expected, &e.ty) {
+            (_, Type::Null) => d
+                .with_primary(format!("`{exp}` can't be `null`"))
+                .with_help(format!("if it may be absent, make the type nullable: `{exp}?`")),
+            (exp_ty, Type::Nullable(inner)) if exp_ty.compatible(inner) => {
+                d = d.with_primary("this might be `null`").with_help(format!(
+                    "give a default with `{snip} ?: ...`, check `if {snip} != null:` first, or assert it isn't with `{snip}!!`"
+                ));
+                match self.unstable_note(e) {
+                    Some(n) => d.with_note(n),
+                    None => d,
+                }
+            }
             (Type::Float, Type::Int) => d.with_help("Isma never converts implicitly; use `.to_float()`, or write a float literal like `1.0`"),
             (Type::Int, Type::Float) => d.with_help("Isma never converts implicitly; use `.to_int()` to truncate"),
             (Type::Str, Type::Int | Type::Float | Type::Bool) => d.with_help("use `.to_string()` or an f-string like f\"{x}\""),
@@ -1197,13 +1600,19 @@ impl Checker {
     }
 
     fn index_elem_type(&mut self, list: &TExpr, index: &TExpr, span: Span) -> Type {
-        if !index.ty.compatible(&Type::Int) {
+        if index.ty == Type::Int.nullable() {
+            self.null_use_error(index, NullUse::Value);
+        } else if !index.ty.compatible(&Type::Int) {
             let found = self.tn(&index.ty);
             self.err(Diagnostic::error(format!("list index must be `Int`, found `{found}`"), index.span));
         }
         match &list.ty {
             Type::List(t) => (**t).clone(),
             Type::Error => Type::Error,
+            Type::Nullable(inner) if matches!(**inner, Type::List(_)) => {
+                self.null_use_error(list, NullUse::Index);
+                Type::Error
+            }
             Type::Str => {
                 self.err(Diagnostic::error("strings cannot be indexed yet", span));
                 Type::Error
@@ -1256,9 +1665,11 @@ impl Checker {
             ExprKind::Name(name) => {
                 if let Some(b) = self.lookup(name) {
                     let (id, decl) = (b.id, b.span);
-                    self.local_use(id, decl, span);
+                    let ty = self.locals[id].ty.clone();
+                    let smart = ty.is_nullable() && self.is_smart_cast(&NullPath::local(id));
+                    self.local_use(id, decl, span, smart);
                     self.local_meta[id].used = true;
-                    return Self::mk(TExprKind::Local(id), self.locals[id].ty.clone(), span);
+                    return self.narrow(Self::mk(TExprKind::Local(id), ty, span));
                 }
                 if let Some(module_ns) = self.imported_module(name) {
                     self.module_hover(module_ns, span);
@@ -1285,10 +1696,7 @@ impl Checker {
                             d = d.with_help(format!("`{name}` is a standard-library module: add `import {name}` at the top of the file"));
                             None
                         }
-                        "None" | "null" | "nil" => {
-                            d = d.with_note("Isma has no null; every value is always initialized");
-                            None
-                        }
+                        "None" | "nil" | "NULL" | "nullptr" => Some("null".to_string()),
                         _ => suggest(name, candidates.iter().map(|s| s.as_str())),
                     };
                     if let Some(h) = hint {
@@ -1304,6 +1712,10 @@ impl Checker {
                 let t = self.expr(inner, None);
                 match op {
                     UnOp::Neg => {
+                        if matches!(&t.ty, Type::Nullable(i) if i.is_numeric()) {
+                            self.null_use_error(&t, NullUse::Value);
+                            return Self::error_expr(span);
+                        }
                         if !t.ty.is_numeric() && !t.ty.is_error() {
                             let found = self.tn(&t.ty);
                             self.err(Diagnostic::error(format!("cannot negate a value of type `{found}`"), span));
@@ -1313,7 +1725,9 @@ impl Checker {
                         Self::mk(TExprKind::Neg(Box::new(t)), ty, span)
                     }
                     UnOp::Not => {
-                        if !t.ty.compatible(&Type::Bool) {
+                        if t.ty == Type::Bool.nullable() {
+                            self.null_use_error(&t, NullUse::Value);
+                        } else if !t.ty.compatible(&Type::Bool) {
                             let found = self.tn(&t.ty);
                             self.err(Diagnostic::error(format!("`not` requires a `Bool`, found `{found}`"), inner.span));
                         }
@@ -1324,37 +1738,52 @@ impl Checker {
             ExprKind::Call { callee, args } => self.call(callee, args, span, expected),
             ExprKind::Field(obj, field) => {
                 let t = self.expr(obj, None);
-                match &t.ty {
-                    Type::Struct(sid) => {
-                        let sid = *sid;
-                        match self.structs[sid].fields.iter().position(|f| f.name == field.name) {
-                            Some(idx) => {
-                                let ty = self.structs[sid].fields[idx].ty.clone();
-                                self.field_use(sid, idx, field.span);
-                                Self::mk(TExprKind::Field(Box::new(t), sid, idx), ty, span)
-                            }
-                            None => {
-                                self.no_field(&Type::Struct(sid), field);
-                                Self::error_expr(span)
-                            }
-                        }
+                self.field_access(t, field, span)
+            }
+            ExprKind::SafeField(obj, field) => {
+                let t = self.expr(obj, None);
+                let op = Span { start: obj.span.end, end: field.span.start };
+                self.safe_access(t, op, span, |c, it| c.field_access(it, field, span))
+            }
+            ExprKind::Null => {
+                // Typed by what it's used as (see `coerce`).
+                match expected {
+                    Some(t @ Type::Nullable(_)) => Self::mk(TExprKind::Null, t.clone(), span),
+                    _ => Self::mk(TExprKind::Null, Type::Null, span),
+                }
+            }
+            ExprKind::NotNull(inner) => {
+                let t = self.expr(inner, expected.map(|t| t.clone().nullable()).as_ref());
+                match t.ty.clone() {
+                    Type::Nullable(ty) => {
+                        // Past this point it isn't null (or the program stopped).
+                        self.add_facts(Self::nonnull_when_nonnull(&t));
+                        Self::mk(TExprKind::NotNull(Box::new(t)), *ty, span)
                     }
-                    Type::Error => Self::error_expr(span),
-                    other => {
-                        let other = other.clone();
-                        let mut d_ty = other.clone();
-                        if matches!(other, Type::List(_) | Type::Str) && field.name == "len" {
-                            d_ty = Type::Error;
-                            self.err(
-                                Diagnostic::error("`len` is a method", field.span).with_help("call it with `.len()`"),
-                            );
-                        }
-                        if !d_ty.is_error() {
-                            self.no_field(&other, field);
-                        }
+                    Type::Error => t,
+                    Type::Null => {
+                        self.err(Diagnostic::error("`!!` on `null` always panics", span));
                         Self::error_expr(span)
                     }
+                    ty => {
+                        let tn = self.tn(&ty);
+                        self.diags.push(
+                            Diagnostic::warning("unnecessary `!!`: this value is never `null`", Span { start: inner.span.end, end: span.end })
+                                .with_label(inner.span, format!("this is `{tn}`"))
+                                .with_help("remove the `!!`"),
+                        );
+                        t
+                    }
                 }
+            }
+            ExprKind::Elvis(l, r) => self.elvis(l, r, span, expected),
+            ExprKind::Jump(j) => {
+                let stmt = match j {
+                    Jump::Break => self.loop_jump(true, span),
+                    Jump::Continue => self.loop_jump(false, span),
+                    Jump::Return(v) => self.return_stmt(v.as_deref(), span),
+                };
+                Self::mk(TExprKind::Jump(Box::new(stmt)), Type::Unit, span)
             }
             ExprKind::Index(list, index) => {
                 let tl = self.expr(list, None);
@@ -1363,7 +1792,7 @@ impl Checker {
                 Self::mk(TExprKind::Index(Box::new(tl), Box::new(ti)), elem, span)
             }
             ExprKind::List(elems) => {
-                let expected_elem = match expected {
+                let expected_elem = match expected.map(Type::non_null) {
                     Some(Type::List(t)) => Some((**t).clone()),
                     _ => None,
                 };
@@ -1390,8 +1819,12 @@ impl Checker {
                             }
                             elem_ty = Some(t.ty.clone());
                         }
+                        // `[1, null]` is a `List[Int?]`.
+                        Some(et) if expected_elem.is_none() && !t.ty.assignable(et) && join_types(et, &t.ty).is_some() => {
+                            elem_ty = join_types(et, &t.ty);
+                        }
                         Some(et) => {
-                            if !t.ty.compatible(et) {
+                            if !t.ty.assignable(et) {
                                 let (a, b) = (self.tn(et), self.tn(&t.ty));
                                 let mut d = Diagnostic::error(format!("list elements must all have the same type: expected `{a}`, found `{b}`"), el.span)
                                     .with_primary(format!("this is `{b}`"));
@@ -1405,9 +1838,115 @@ impl Checker {
                     out.push(t);
                 }
                 let et = elem_ty.unwrap();
+                if et == Type::Null {
+                    self.err(
+                        Diagnostic::error("cannot infer the element type of a list of `null`s", span)
+                            .with_help("add a type annotation, e.g. `val xs: List[Int?] = [null]`"),
+                    );
+                    return Self::error_expr(span);
+                }
+                let out = out.into_iter().map(|t| if t.ty.assignable(&et) { self.coerce(t, &et, None) } else { t }).collect();
                 Self::mk(TExprKind::ListLit(out), Type::List(Box::new(et)), span)
             }
         }
+    }
+
+    /// `t.field` (`t` already checked).
+    fn field_access(&mut self, t: TExpr, field: &Ident, span: Span) -> TExpr {
+        match &t.ty {
+            Type::Struct(sid) => {
+                let sid = *sid;
+                match self.structs[sid].fields.iter().position(|f| f.name == field.name) {
+                    Some(idx) => {
+                        let ty = self.structs[sid].fields[idx].ty.clone();
+                        self.field_use(sid, idx, field.span);
+                        self.narrow(Self::mk(TExprKind::Field(Box::new(t), sid, idx), ty, span))
+                    }
+                    None => {
+                        self.no_field(&Type::Struct(sid), field);
+                        Self::error_expr(span)
+                    }
+                }
+            }
+            Type::Error => Self::error_expr(span),
+            Type::Nullable(inner) if matches!(**inner, Type::Struct(_)) => {
+                if let Type::Struct(sid) = **inner
+                    && let Some(idx) = self.structs[sid].fields.iter().position(|f| f.name == field.name)
+                {
+                    self.field_use(sid, idx, field.span);
+                }
+                self.null_use_error(&t, NullUse::Member(&field.name, None));
+                Self::error_expr(span)
+            }
+            other => {
+                let other = other.clone();
+                let mut d_ty = other.clone();
+                if matches!(other, Type::List(_) | Type::Str) && field.name == "len" {
+                    d_ty = Type::Error;
+                    self.err(Diagnostic::error("`len` is a method", field.span).with_help("call it with `.len()`"));
+                }
+                if !d_ty.is_error() {
+                    self.no_field(&other, field);
+                }
+                Self::error_expr(span)
+            }
+        }
+    }
+
+    /// `l ?: r`: `l` if it isn't null, otherwise `r` (which may also leave with
+    /// `return`/`break`/`continue`/`panic`, and then the result is never null).
+    fn elvis(&mut self, l: &Expr, r: &Expr, span: Span, expected: Option<&Type>) -> TExpr {
+        let tl = self.expr(l, expected.map(|t| t.clone().nullable()).as_ref());
+        let inner = match tl.ty.clone() {
+            Type::Nullable(inner) => *inner,
+            Type::Error => {
+                let _ = self.expr(r, None);
+                return Self::error_expr(span);
+            }
+            Type::Null => {
+                self.err(Diagnostic::error("the left side of `?:` is always `null`", l.span).with_help("use the right side directly"));
+                let _ = self.expr(r, None);
+                return Self::error_expr(span);
+            }
+            ty => {
+                let tn = self.tn(&ty);
+                self.diags.push(
+                    Diagnostic::warning("unnecessary `?:`: the left side is never `null`", r.span)
+                        .with_primary("this is never used")
+                        .with_label(l.span, format!("this is `{tn}`"))
+                        .with_help("remove the `?:` and its right side"),
+                );
+                let saved = self.nonnull.clone();
+                let _ = self.expr(r, Some(&ty));
+                self.nonnull = saved;
+                return tl;
+            }
+        };
+        // `r` only runs when `l` is null: smart casts it causes don't last.
+        let saved = self.nonnull.clone();
+        let tr = self.expr(r, Some(&inner));
+        self.nonnull = saved;
+        if tr.diverges() {
+            // After `x ?: return`, `x` isn't null.
+            self.add_facts(Self::nonnull_when_nonnull(&tl));
+            return Self::mk(TExprKind::Elvis(Box::new(tl), Box::new(tr)), inner, span);
+        }
+        let ty = if tr.ty.assignable(&inner) {
+            inner
+        } else if tr.ty.assignable(&inner.clone().nullable()) {
+            inner.nullable()
+        } else {
+            let (a, b) = (self.tn(&tl.ty), self.tn(&tr.ty));
+            self.err(
+                Diagnostic::error(format!("the two sides of `?:` have different types: `{a}` and `{b}`"), span)
+                    .with_label(l.span, format!("this is `{a}`"))
+                    .with_label(r.span, format!("this is `{b}`"))
+                    .with_note("the right side is the value to use when the left side is `null`, so it must have the same type"),
+            );
+            Type::Error
+        };
+        let tr = if ty.is_error() { tr } else { self.coerce(tr, &ty, None) };
+        Self::mk(TExprKind::Elvis(Box::new(tl), Box::new(tr)), ty, span)
     }
 
     /// Convert a value to String for f-strings.
@@ -1416,11 +1955,22 @@ impl Checker {
             Type::Str => t,
             Type::Int | Type::Float | Type::Bool => Self::mk(TExprKind::Builtin(Builtin::ToStr, vec![t]), Type::Str, span),
             Type::Error => t,
+            Type::Null => Self::mk(TExprKind::Str("null".into()), Type::Str, span),
+            // `x?.to_string() ?: "null"`
+            Type::Nullable(inner) if inner.is_primitive() => {
+                let inner = (**inner).clone();
+                let binder = self.hidden_local(inner.clone());
+                let it = Self::mk(TExprKind::Local(binder), inner, span);
+                let body = self.stringify(it, span);
+                let safe = Self::mk(TExprKind::SafeCall { recv: Box::new(t), binder, body: Box::new(body) }, Type::Str.nullable(), span);
+                let null = Self::mk(TExprKind::Str("null".into()), Type::Str, span);
+                Self::mk(TExprKind::Elvis(Box::new(safe), Box::new(null)), Type::Str, span)
+            }
             other => {
                 let found = self.tn(other);
                 self.err(
                     Diagnostic::error(format!("cannot format a value of type `{found}` in an f-string"), span)
-                        .with_note("only `Int`, `Float`, `Bool` and `String` can be formatted"),
+                        .with_note("only `Int`, `Float`, `Bool` and `String` (and their nullable versions) can be formatted"),
                 );
                 Self::error_expr(span)
             }
@@ -1430,7 +1980,12 @@ impl Checker {
     fn binary(&mut self, op: BinOp, l: &Expr, r: &Expr, span: Span) -> TExpr {
         if matches!(op, BinOp::And | BinOp::Or) {
             let tl = self.expect_bool(l, &format!("left operand of `{}`", op.symbol()));
+            // `x != null and x.ok()`: the right side only runs when the left allows it.
+            let (when_true, when_false) = Self::cond_facts(&tl);
+            let saved = self.nonnull.clone();
+            self.add_facts(if op == BinOp::And { when_true } else { when_false });
             let tr = self.expect_bool(r, &format!("right operand of `{}`", op.symbol()));
+            self.nonnull = saved;
             let kind = if op == BinOp::And {
                 TExprKind::And(Box::new(tl), Box::new(tr))
             } else {
@@ -1438,11 +1993,37 @@ impl Checker {
             };
             return Self::mk(kind, Type::Bool, span);
         }
+        if matches!(op, BinOp::Eq | BinOp::Ne) && (matches!(l.kind, ExprKind::Null) || matches!(r.kind, ExprKind::Null)) {
+            return self.null_comparison(op, l, r, span);
+        }
         let tl = self.expr(l, None);
         let tr = self.expr(r, Some(&tl.ty));
         if tl.ty.is_error() || tr.ty.is_error() {
             let ty = if op.is_comparison() { Type::Bool } else { Type::Error };
             return Self::mk(TExprKind::Binary(op, Box::new(tl), Box::new(tr)), ty, span);
+        }
+        if tl.ty.is_nullable() || tr.ty.is_nullable() {
+            let base = tl.ty.non_null().clone();
+            if base == *tr.ty.non_null() {
+                // `x == 5` and `a == b` work on nullable primitives (null equals only null).
+                if matches!(op, BinOp::Eq | BinOp::Ne) && base.is_primitive() {
+                    let nt = base.nullable();
+                    let (a, b) = (self.coerce(tl, &nt, None), self.coerce(tr, &nt, None));
+                    return Self::mk(TExprKind::Binary(op, Box::new(a), Box::new(b)), Type::Bool, span);
+                }
+                let works = match op {
+                    BinOp::Add => matches!(base, Type::Int | Type::Float | Type::Str),
+                    BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => matches!(base, Type::Int | Type::Float | Type::Str),
+                    BinOp::Eq | BinOp::Ne => false,
+                    _ => base.is_numeric(),
+                };
+                if works {
+                    let culprit = if tl.ty.is_nullable() { &tl } else { &tr };
+                    self.null_use_error(culprit, NullUse::Value);
+                    let ty = if op.is_comparison() { Type::Bool } else { Type::Error };
+                    return Self::mk(TExprKind::Binary(op, Box::new(tl), Box::new(tr)), ty, span);
+                }
+            }
         }
         let same = tl.ty == tr.ty;
         let ok = same
@@ -1493,6 +2074,31 @@ impl Checker {
         Self::mk(TExprKind::Binary(op, Box::new(tl), Box::new(tr)), ty, span)
     }
 
+    /// `x == null` / `x != null`.
+    fn null_comparison(&mut self, op: BinOp, l: &Expr, r: &Expr, span: Span) -> TExpr {
+        let (other, null) = if matches!(l.kind, ExprKind::Null) { (r, l) } else { (l, r) };
+        if matches!(other.kind, ExprKind::Null) {
+            self.diags.push(Diagnostic::warning("comparing `null` with `null`", span).with_primary(format!("this is always `{}`", op == BinOp::Eq)));
+            return Self::mk(TExprKind::Bool(op == BinOp::Eq), Type::Bool, span);
+        }
+        let t = self.expr(other, None);
+        self.ide.expr_types.push((null.span, t.ty.clone().nullable()));
+        if t.ty == Type::Unit {
+            self.err(Diagnostic::error("this expression has no value to compare with `null`", other.span));
+        } else if !t.ty.is_nullable() && !t.ty.is_error() {
+            let tn = self.tn(&t.ty);
+            let what = self.snippet(other.span).map(|s| format!("`{s}`")).unwrap_or_else(|| "this value".into());
+            let mut d = Diagnostic::warning(format!("{what} is never `null`, so this is always `{}`", op == BinOp::Ne), span)
+                .with_label(other.span, format!("this is `{tn}`"));
+            if matches!(t.kind, TExprKind::Unwrap(_)) {
+                d = d.with_note("it was already checked for `null` above");
+            }
+            self.diags.push(d);
+        }
+        let is_null = Self::mk(TExprKind::IsNull(Box::new(t)), Type::Bool, span);
+        if op == BinOp::Eq { is_null } else { Self::mk(TExprKind::Not(Box::new(is_null)), Type::Bool, span) }
+    }
+
     /// Match positional/named arguments against parameters; returns args in parameter order.
     fn match_args(&mut self, what: &str, params: &[(String, Type)], args: &[Arg], span: Span) -> Option<Vec<TExpr>> {
         let mut slots: Vec<Option<TExpr>> = (0..params.len()).map(|_| None).collect();
@@ -1539,7 +2145,7 @@ impl Checker {
             };
             let pty = params[idx].1.clone();
             let t = self.expr(&a.value, Some(&pty));
-            self.expect_type(&t, &pty, None);
+            let t = self.coerce(t, &pty, None);
             slots[idx] = Some(t);
         }
         if args.len() > params.len() {
@@ -1658,6 +2264,11 @@ impl Checker {
                 let recv = self.expr(obj, None);
                 self.method_call(recv, method, args, span)
             }
+            ExprKind::SafeField(obj, method) => {
+                let recv = self.expr(obj, None);
+                let op = Span { start: obj.span.end, end: method.span.start };
+                self.safe_access(recv, op, span, |c, it| c.method_call(it, method, args, span))
+            }
             _ => {
                 let _ = self.expr(callee, None);
                 self.err(Diagnostic::error("this expression is not callable", callee.span));
@@ -1754,7 +2365,7 @@ impl Checker {
         for (a, p) in args.iter().zip(params.iter()) {
             let pt = ty_of(p);
             let t = self.expr(&a.value, Some(&pt));
-            self.expect_type(&t, &pt, None);
+            let t = self.coerce(t, &pt, None);
             targs.push(t);
         }
         let b = match name {
@@ -1775,7 +2386,7 @@ impl Checker {
         let mut targs = vec![recv];
         for (a, p) in args.iter().zip(params) {
             let t = self.expr(&a.value, Some(p));
-            self.expect_type(&t, p, None);
+            let t = self.coerce(t, p, None);
             targs.push(t);
         }
         Self::mk(TExprKind::Builtin(b, targs), ret, span)
@@ -1822,20 +2433,26 @@ impl Checker {
         }
         let mut targs = Vec::new();
         for a in args {
-            let t = self.expr(&a.value, param.as_ref());
+            let mut t = self.expr(&a.value, param.as_ref());
             match &param {
-                Some(p) => self.expect_type(&t, p, None),
+                Some(p) => t = self.coerce(t, p, None),
+                // print accepts any primitive, and prints `null` for a null one
+                None if t.ty == Type::Null || t.ty.is_nullable() && t.ty.non_null().is_primitive() => t = self.stringify(t, a.value.span),
                 None => {
-                    // print accepts any primitive
                     if !t.ty.is_primitive() && !t.ty.is_error() {
                         let found = self.tn(&t.ty);
                         self.err(
                             Diagnostic::error(format!("`print` cannot print a value of type `{found}`"), a.value.span)
-                                .with_note("`print` accepts `Int`, `Float`, `Bool` and `String`")
+                                .with_note("`print` accepts `Int`, `Float`, `Bool` and `String` (and their nullable versions)")
                                 .with_help("print individual fields, or use an f-string"),
                         );
                     }
                 }
+            }
+            if b == Builtin::Assert {
+                // After `assert(x != null)`, `x` isn't null.
+                let (when_true, _) = Self::cond_facts(&t);
+                self.add_facts(when_true);
             }
             targs.push(t);
         }
@@ -1865,6 +2482,13 @@ impl Checker {
                 }
                 Self::error_expr(span)
             }
+            (Type::Nullable(_), _) => {
+                self.null_use_error(&recv, NullUse::Member(m, Some(!args.is_empty())));
+                for a in args {
+                    let _ = self.expr(&a.value, None);
+                }
+                Self::error_expr(span)
+            }
             (Type::Int | Type::Float | Type::Bool, "to_string") | (Type::Str, "to_string") => {
                 if !self.arity(args, 0, &what, span) {
                     return Self::error_expr(span);
@@ -1887,6 +2511,8 @@ impl Checker {
             (Type::Str, "starts_with") => self.builtin_method(recv, Builtin::StrStartsWith, &[Type::Str], Type::Bool, method, args, span),
             (Type::Str, "ends_with") => self.builtin_method(recv, Builtin::StrEndsWith, &[Type::Str], Type::Bool, method, args, span),
             (Type::Str, "to_float") => simple(self, recv, Builtin::StrToFloat, Type::Float, args),
+            (Type::Str, "to_int_or_null") => simple(self, recv, Builtin::StrToIntOrNull, Type::Int.nullable(), args),
+            (Type::Str, "to_float_or_null") => simple(self, recv, Builtin::StrToFloatOrNull, Type::Float.nullable(), args),
             (Type::List(_), "len") => simple(self, recv, Builtin::ListLen, Type::Int, args),
             (Type::List(elem), "pop") => {
                 let elem = (**elem).clone();
@@ -1898,7 +2524,7 @@ impl Checker {
                     return Self::mk(TExprKind::Int(0), Type::Unit, span);
                 }
                 let v = self.expr(&args[0].value, Some(&elem));
-                self.expect_type(&v, &elem, None);
+                let v = self.coerce(v, &elem, None);
                 Self::mk(TExprKind::Builtin(Builtin::ListPush, vec![recv, v]), Type::Unit, span)
             }
             (Type::Struct(sid), _) => {
@@ -1955,7 +2581,7 @@ impl Checker {
                     Type::Int => "`to_string()`, `to_float()`",
                     Type::Float => "`to_string()`, `to_int()`",
                     Type::Bool => "`to_string()`",
-                    Type::Str => "`len()`, `chars()`, `substring(start, end)`, `contains(s)`, `starts_with(s)`, `ends_with(s)`, `to_int()`, `to_float()`, `to_string()`",
+                    Type::Str => "`len()`, `chars()`, `substring(start, end)`, `contains(s)`, `starts_with(s)`, `ends_with(s)`, `to_int()`, `to_float()`, `to_int_or_null()`, `to_float_or_null()`, `to_string()`",
                     Type::List(_) => "`len()`, `push(x)`, `pop()`",
                     _ => "none",
                 };
@@ -1969,6 +2595,20 @@ impl Checker {
                 }
                 Self::error_expr(span)
             }
+        }
+    }
+}
+
+/// The type of a list literal holding both an `a` and a `b`, e.g. `Int` and `null` make `Int?`.
+fn join_types(a: &Type, b: &Type) -> Option<Type> {
+    if a.assignable(b) {
+        Some(b.clone())
+    } else if b.assignable(a) {
+        Some(a.clone())
+    } else {
+        match (a, b) {
+            (Type::Null, t) | (t, Type::Null) if *t != Type::Unit => Some(t.clone().nullable()),
+            _ => None,
         }
     }
 }
@@ -2003,13 +2643,43 @@ fn ends_flow(s: &TStmt) -> bool {
 }
 
 /// Does this loop body contain a `break` that targets the enclosing loop?
+/// (Also inside expressions: `val v = x ?: break`.)
 fn contains_break(stmts: &[TStmt]) -> bool {
     stmts.iter().any(|s| match s {
         TStmt::Break => true,
-        TStmt::If { branches, else_block } => {
-            branches.iter().any(|(_, b)| contains_break(b)) || else_block.as_ref().is_some_and(|b| contains_break(b))
+        TStmt::Let(_, e) | TStmt::Expr(e) | TStmt::Return(Some(e)) => expr_breaks(e),
+        TStmt::Assign { place, value, .. } => {
+            expr_breaks(value)
+                || match place {
+                    Place::Local(_) => false,
+                    Place::Field { obj, .. } => expr_breaks(obj),
+                    Place::Index { list, index, .. } => expr_breaks(list) || expr_breaks(index),
+                }
         }
-        // breaks inside nested loops target those loops
-        _ => false,
+        TStmt::If { branches, else_block } => {
+            branches.iter().any(|(c, b)| expr_breaks(c) || contains_break(b)) || else_block.as_ref().is_some_and(|b| contains_break(b))
+        }
+        // A nested loop's header is evaluated outside of it, but breaks in its body target it.
+        TStmt::While { cond, .. } => expr_breaks(cond),
+        TStmt::ForRange { start, end, .. } => expr_breaks(start) || expr_breaks(end),
+        TStmt::ForList { list, .. } => expr_breaks(list),
+        TStmt::Continue | TStmt::Return(None) => false,
     })
+}
+
+/// Does evaluating `e` possibly `break` out of the enclosing loop (`x ?: break`)?
+fn expr_breaks(e: &TExpr) -> bool {
+    let any = |es: &[TExpr]| es.iter().any(expr_breaks);
+    match &e.kind {
+        TExprKind::Jump(s) => contains_break(std::slice::from_ref(&**s)),
+        TExprKind::Int(_) | TExprKind::Float(_) | TExprKind::Bool(_) | TExprKind::Str(_) | TExprKind::Local(_) | TExprKind::Null => false,
+        TExprKind::Call(_, args) | TExprKind::Builtin(_, args) | TExprKind::StructNew(_, args) | TExprKind::ListLit(args) | TExprKind::FString(args) => any(args),
+        TExprKind::Binary(_, a, b) | TExprKind::And(a, b) | TExprKind::Or(a, b) | TExprKind::Index(a, b) | TExprKind::Elvis(a, b) => {
+            expr_breaks(a) || expr_breaks(b)
+        }
+        TExprKind::SafeCall { recv, body, .. } => expr_breaks(recv) || expr_breaks(body),
+        TExprKind::Neg(x) | TExprKind::Not(x) | TExprKind::Field(x, ..) | TExprKind::IsNull(x) | TExprKind::Wrap(x) | TExprKind::Unwrap(x) | TExprKind::NotNull(x) => {
+            expr_breaks(x)
+        }
+    }
 }

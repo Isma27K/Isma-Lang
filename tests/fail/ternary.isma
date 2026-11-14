@@ -1,0 +1,4 @@
+# expect-error: Isma has no `c ? a : b` operator
+fn main():
+    val x = 1
+    val y = x > 0 ? 1 : 2

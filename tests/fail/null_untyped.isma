@@ -1,0 +1,3 @@
+# expect-error: cannot infer a type for `null`
+fn main():
+    val _x = null

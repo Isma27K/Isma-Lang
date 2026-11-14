@@ -295,26 +295,40 @@ fn underscore_silences_lints_and_can_repeat() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Talk to `isma lsp` over stdio exactly like an editor would.
-#[test]
-fn language_server_protocol_roundtrip() {
-    use std::io::{BufRead, BufReader, Read, Write};
-    use std::process::Stdio;
+/// A language-server session over stdio, exactly like an editor's.
+struct Lsp {
+    child: std::process::Child,
+    stdin: std::process::ChildStdin,
+    stdout: std::io::BufReader<std::process::ChildStdout>,
+    next_id: i64,
+}
 
-    let mut child = Command::new(ISMA).arg("lsp").stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
-    let mut stdin = child.stdin.take().unwrap();
-    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+impl Lsp {
+    fn start() -> Lsp {
+        use std::process::Stdio;
+        let mut child = Command::new(ISMA).arg("lsp").stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let stdout = std::io::BufReader::new(child.stdout.take().unwrap());
+        let mut lsp = Lsp { child, stdin, stdout, next_id: 100 };
+        let init = lsp.request("initialize", serde_json::json!({"capabilities": {}}));
+        assert!(init["result"]["capabilities"]["hoverProvider"].as_bool().unwrap());
+        lsp.send(serde_json::json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}));
+        lsp
+    }
 
-    let mut send = |msg: serde_json::Value| {
+    fn send(&mut self, msg: serde_json::Value) {
+        use std::io::Write;
         let body = msg.to_string();
-        write!(stdin, "Content-Length: {}\r\n\r\n{body}", body.len()).unwrap();
-        stdin.flush().unwrap();
-    };
-    let mut recv = || -> serde_json::Value {
+        write!(self.stdin, "Content-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+        self.stdin.flush().unwrap();
+    }
+
+    fn recv(&mut self) -> serde_json::Value {
+        use std::io::{BufRead, Read};
         let mut len = 0;
         loop {
             let mut line = String::new();
-            stdout.read_line(&mut line).unwrap();
+            self.stdout.read_line(&mut line).unwrap();
             let line = line.trim();
             if line.is_empty() {
                 break;
@@ -324,20 +338,50 @@ fn language_server_protocol_roundtrip() {
             }
         }
         let mut buf = vec![0; len];
-        stdout.read_exact(&mut buf).unwrap();
+        self.stdout.read_exact(&mut buf).unwrap();
         serde_json::from_slice(&buf).unwrap()
-    };
+    }
 
+    /// Send a request and return its response (skipping notifications).
+    fn request(&mut self, method: &str, params: serde_json::Value) -> serde_json::Value {
+        self.next_id += 1;
+        let id = self.next_id;
+        self.send(serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}));
+        loop {
+            let msg = self.recv();
+            if msg["id"] == id {
+                return msg;
+            }
+        }
+    }
+
+    /// Open a document and return its published diagnostics.
+    fn open(&mut self, uri: &str, text: &str) -> serde_json::Value {
+        self.send(serde_json::json!({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": {"uri": uri, "languageId": "isma", "version": 1, "text": text}}}));
+        let diags = self.recv();
+        assert_eq!(diags["method"], "textDocument/publishDiagnostics");
+        diags
+    }
+
+    fn at(&mut self, method: &str, uri: &str, line: u32, character: u32) -> serde_json::Value {
+        self.request(method, serde_json::json!({"textDocument": {"uri": uri}, "position": {"line": line, "character": character}}))
+    }
+
+    fn stop(mut self) {
+        assert!(self.request("shutdown", serde_json::Value::Null)["error"].is_null());
+        self.send(serde_json::json!({"jsonrpc": "2.0", "method": "exit", "params": null}));
+        assert!(self.child.wait().unwrap().success());
+    }
+}
+
+/// Talk to `isma lsp` over stdio exactly like an editor would.
+#[test]
+fn language_server_protocol_roundtrip() {
+    let mut lsp = Lsp::start();
     let uri = "file:///tmp/demo.isma";
     let text = "fn main():\n    val n = 1 + 2.0\n    val unused = 3\n";
-    send(serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"capabilities": {}}}));
-    let init = recv();
-    assert!(init["result"]["capabilities"]["hoverProvider"].as_bool().unwrap());
-    send(serde_json::json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}));
-    send(serde_json::json!({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
-        "textDocument": {"uri": uri, "languageId": "isma", "version": 1, "text": text}}}));
-    let diags = recv();
-    assert_eq!(diags["method"], "textDocument/publishDiagnostics");
+    let diags = lsp.open(uri, text);
     let list = diags["params"]["diagnostics"].as_array().unwrap();
     let messages: Vec<&str> = list.iter().map(|d| d["message"].as_str().unwrap()).collect();
     assert!(messages.iter().any(|m| m.contains("cannot be applied to `Int` and `Float`")), "{messages:?}");
@@ -346,13 +390,37 @@ fn language_server_protocol_roundtrip() {
     let err = list.iter().find(|d| d["severity"] == 1).unwrap();
     assert_eq!(err["range"]["start"], serde_json::json!({"line": 1, "character": 12}));
 
-    send(serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "textDocument/hover", "params": {
-        "textDocument": {"uri": uri}, "position": {"line": 2, "character": 9}}}));
-    let hover = recv();
+    let hover = lsp.at("textDocument/hover", uri, 2, 9);
     assert!(hover["result"]["contents"]["value"].as_str().unwrap().contains("val unused: Int"), "{hover}");
+    lsp.stop();
+}
 
-    send(serde_json::json!({"jsonrpc": "2.0", "id": 3, "method": "shutdown", "params": null}));
-    assert_eq!(recv()["id"], 3);
-    send(serde_json::json!({"jsonrpc": "2.0", "method": "exit", "params": null}));
-    assert!(child.wait().unwrap().success());
+/// Editor support for nullable types: `?.` completion, `.` completion that
+/// inserts `?.`, and hovers that show smart casts.
+#[test]
+fn language_server_understands_nullable_types() {
+    let mut lsp = Lsp::start();
+    let uri = "file:///tmp/nulls.isma";
+    let text = "struct User:\n    name: String\n\nfn find() -> User?:\n    return null\n\nfn main():\n    val u = find()\n    print(u?.)\n    print(u.)\n    if u != null:\n        print(u.name)\n";
+    lsp.open(uri, text);
+    let labels = |r: &serde_json::Value| -> Vec<String> {
+        r["result"].as_array().unwrap().iter().map(|i| i["label"].as_str().unwrap().to_string()).collect()
+    };
+    // `u?.|`
+    let safe = lsp.at("textDocument/completion", uri, 8, 13);
+    assert!(labels(&safe).contains(&"name".to_string()), "{safe}");
+    assert!(safe["result"][0]["additionalTextEdits"].is_null(), "{safe}");
+    // `u.|` offers the same members and rewrites the `.` into `?.`
+    let plain = lsp.at("textDocument/completion", uri, 9, 12);
+    assert!(labels(&plain).contains(&"name".to_string()), "{plain}");
+    let edit = &plain["result"][0]["additionalTextEdits"][0];
+    assert_eq!(edit["newText"], "?.", "{plain}");
+    assert_eq!(edit["range"]["start"], serde_json::json!({"line": 9, "character": 11}));
+    // hover: declared `User?`, smart-cast to `User` inside the `if`
+    let decl = lsp.at("textDocument/hover", uri, 7, 8);
+    assert!(decl["result"]["contents"]["value"].as_str().unwrap().contains("val u: User?"), "{decl}");
+    let smart = lsp.at("textDocument/hover", uri, 11, 14);
+    let shown = smart["result"]["contents"]["value"].as_str().unwrap();
+    assert!(shown.contains("val u: User") && !shown.contains("User?`\n") && shown.contains("smart cast"), "{shown}");
+    lsp.stop();
 }

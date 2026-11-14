@@ -221,13 +221,18 @@ static void stack_push(RootStack *st, void *obj, const IsmaTypeInfo *ti) {
 }
 
 // Trace callbacks (they can't take a context argument, so they use `visit_to`).
+// A child may be null (a nullable field or list element), which is skipped.
 static RootStack *visit_to;
-static void visit_push(void *t, const IsmaTypeInfo *ti) { stack_push(visit_to, t, ti); }
+static void visit_push(void *t, const IsmaTypeInfo *ti) {
+    if (t) stack_push(visit_to, t, ti);
+}
 static void visit_mark_gray(void *t, const IsmaTypeInfo *ti) {
+    if (!t) return;
     *rc_word(t) -= RC_UNIT; // subtract the reference coming from inside the subgraph
     stack_push(visit_to, t, ti);
 }
 static void visit_scan_black(void *t, const IsmaTypeInfo *ti) {
+    if (!t) return;
     *rc_word(t) += RC_UNIT; // restore it: the parent turned out to be alive
     if (color_of(t) != BLACK) {
         set_color(t, BLACK);
@@ -562,6 +567,28 @@ int64_t isma_str_to_int(IsmaStr *s, const char *file, int line, int col) {
     long long v = strtoll(buf, &end, 10);
     if (*end != 0 || errno == ERANGE) bad_number(s, "Int", file, line, col);
     return (int64_t)v;
+}
+
+// `to_int_or_null()`: 1 and the value in *out if `s` is a valid Int, else 0 (and *out = 0).
+int64_t isma_str_parse_int(IsmaStr *s, int64_t *out) {
+    char buf[64], *end;
+    *out = 0;
+    if (!str_to_cbuf(s, buf, sizeof buf)) return 0;
+    errno = 0;
+    long long v = strtoll(buf, &end, 10);
+    if (*end != 0 || errno == ERANGE) return 0;
+    *out = (int64_t)v;
+    return 1;
+}
+
+int64_t isma_str_parse_float(IsmaStr *s, double *out) {
+    char buf[128], *end;
+    *out = 0;
+    if (!str_to_cbuf(s, buf, sizeof buf)) return 0;
+    double v = strtod(buf, &end);
+    if (*end != 0) return 0;
+    *out = v;
+    return 1;
 }
 
 double isma_str_to_float(IsmaStr *s, const char *file, int line, int col) {

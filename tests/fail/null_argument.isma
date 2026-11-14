@@ -1,0 +1,6 @@
+# expect-error: mismatched types: expected `Int`, found `Int?`
+fn double(x: Int) -> Int:
+    return x * 2
+
+fn main():
+    print(double("4".to_int_or_null()))

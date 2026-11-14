@@ -1,0 +1,6 @@
+# expect-error: `x` might be null
+fn main():
+    var x: Int? = 1
+    while true:
+        print(x * 2)
+        x = null
