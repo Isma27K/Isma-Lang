@@ -1,0 +1,16 @@
+# expect-max-allocs: 10
+# `acc = acc.add(v)`: `acc` is unique when `add` builds the result, so the
+# new Vec2 is built in its memory (Perceus reuse) and the loop never allocates.
+struct Vec2:
+    var x: Float
+    var y: Float
+
+    fn add(self, other: Vec2) -> Vec2:
+        return Vec2(self.x + other.x, self.y + other.y)
+
+fn main():
+    var acc = Vec2(0.0, 0.0)
+    val v = Vec2(1.0, 2.0)
+    for _ in 0..1_000_000:
+        acc = acc.add(v)
+    print(acc.y)

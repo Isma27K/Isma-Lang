@@ -1,0 +1,55 @@
+# Values stay alive while they are still in use, even when the place they
+# were read from is overwritten in the meantime.
+
+struct Holder:
+    var name: String
+    var items: List[String]
+
+fn clobber(h: Holder, s: String):
+    h.name = "replaced"
+    print(s)
+
+fn clear(h: Holder, xs: List[String]):
+    h.items = []
+    print(xs.len())
+    for x in xs:
+        print(x)
+
+fn name_of(h: Holder) -> String:
+    return h.name
+
+fn main():
+    val h = Holder("orig" + "inal", ["a" + "1", "b" + "2"])
+    clobber(h, h.name)
+    print(h.name)
+    clear(h, h.items)
+    print(h.items.len())
+
+    # Replacing the list being iterated: the loop keeps going over the old one.
+    val g = Holder("g", ["x" + "1", "y" + "2", "z"])
+    for it in g.items:
+        g.items = ["new"]
+        print(it)
+    print(g.items.len())
+
+    # Overwriting or popping a slot after reading it.
+    val names = ["p" + "1", "p" + "2"]
+    val first = names[0]
+    names[0] = "zz"
+    print(first)
+    val popped = names.pop()
+    print(popped)
+    print(names[0])
+
+    # A returned field outlives the struct it came from.
+    val kept = name_of(Holder("temp" + "orary", []))
+    print(kept)
+
+    # Self-assignment and swapping.
+    var a = "left" + "!"
+    var b = "right" + "!"
+    a = a
+    val t = a
+    a = b
+    b = t
+    print(f"{a} {b}")

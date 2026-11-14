@@ -1,0 +1,60 @@
+# Reference cycles are found and freed by the cycle collector; values that
+# are still reachable are never touched.
+
+struct Node:
+    name: String
+    var children: List[Node]
+
+struct Person:
+    name: String
+    var friends: List[Person]
+
+struct Team:
+    title: String
+    var lead: Node
+
+fn make_ring(n: Int) -> Node:
+    val first = Node("n0", [])
+    var prev = first
+    for i in 1..n:
+        val next = Node(f"n{i}", [])
+        prev.children.push(next)
+        prev = next
+    prev.children.push(first)
+    return first
+
+fn count_ring(start: Node) -> Int:
+    var n = 1
+    var cur = start.children[0]
+    while cur.name != start.name:
+        n += 1
+        cur = cur.children[0]
+    return n
+
+fn main():
+    # A node that contains itself.
+    val selfish = Node("self", [])
+    selfish.children.push(selfish)
+    print(selfish.children[0].children[0].name)
+
+    # Two people who are each other's friend.
+    val ana = Person("ana", [])
+    val budi = Person("budi", [ana])
+    ana.friends.push(budi)
+    print(ana.friends[0].friends[0].name)
+
+    # A ring that stays alive while it's in use, even across collections.
+    val ring = make_ring(5)
+    var garbage = 0
+    for _ in 0..50_000:
+        val g = make_ring(3)
+        garbage += count_ring(g)
+    print(garbage)
+    print(count_ring(ring))
+    print(ring.children[0].children[0].name)
+
+    # An acyclic wrapper holding a cyclic value.
+    val team = Team("core", make_ring(4))
+    print(count_ring(team.lead))
+    team.lead = Node("solo", [])
+    print(team.lead.name)

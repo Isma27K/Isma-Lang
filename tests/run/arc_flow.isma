@@ -1,0 +1,65 @@
+# Early exits (return, break, continue) release exactly what they should.
+
+struct Item:
+    name: String
+    var tags: List[String]
+
+fn find(items: List[Item], wanted: String) -> Item:
+    for it in items:
+        val label = f"[{it.name}]"
+        if it.name == wanted:
+            return it
+        if label == "[skip]":
+            continue
+    return Item("none", [])
+
+fn first_long(words: List[String]) -> String:
+    var i = 0
+    while true:
+        val w = words[i] + ""
+        if w.len() > 3:
+            return w
+        i += 1
+
+fn main():
+    val items = [Item("a", ["x"]), Item("skip", []), Item("b", ["y", "z"])]
+    print(find(items, "b").tags.len())
+    print(find(items, "zzz").name)
+    print(first_long(["hi", "yo", "hello", "world"]))
+
+    var total = 0
+    for it in items:
+        val msg = f"looking at {it.name}"
+        if it.name == "skip":
+            continue
+        for t in it.tags:
+            val upper = t + t
+            if upper == "zz":
+                break
+            total += upper.len()
+        if msg == "never":
+            break
+    print(total)
+
+    # push / pop of structs and nested lists
+    val stack: List[Item] = []
+    for i in 0..5:
+        stack.push(Item(f"item{i}", [f"t{i}"]))
+    val top = stack.pop()
+    print(top.name)
+    stack.pop()
+    print(stack.len())
+
+    val grid: List[List[String]] = []
+    for r in 0..3:
+        val row: List[String] = []
+        for c in 0..3:
+            row.push(f"{r}{c}")
+        grid.push(row)
+    grid[1] = ["replaced"]
+    print(grid[1][0])
+    print(grid[2][2])
+
+    # methods and fields on temporaries
+    print(Item("temp", ["q"]).tags[0])
+    print(find(items, "a").name.len())

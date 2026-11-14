@@ -1,4 +1,4 @@
-// Isma runtime v0.1
+// Isma runtime v0.2
 // Linked into every Isma program. Kept deliberately small.
 
 #include <errno.h>
@@ -9,16 +9,25 @@
 #include <string.h>
 #include <time.h>
 
+// Every heap object starts with its reference count. String literals are
+// static objects with an "immortal" count so large it never reaches zero.
+#define RC_IMMORTAL ((int64_t)1 << 62)
+
 typedef struct {
+    int64_t rc;
     int64_t len;
+    int64_t cap;
     char data[];
 } IsmaStr;
 
 typedef struct {
+    int64_t rc;
     int64_t len;
     int64_t cap;
     char *data;
 } IsmaList;
+
+typedef void (*IsmaDropFn)(void *);
 
 extern void isma_main(void);
 
@@ -54,37 +63,335 @@ void isma_exit(int64_t code) {
 }
 
 // ---------------------------------------------------------------- memory
-// v0.1: a bump arena. Nothing is ever freed (ARC is on the roadmap).
+// Objects are freed as soon as their reference count drops to zero.
+// Small objects (up to 256 bytes) come from per-size free lists carved out
+// of 1 MiB chunks; larger ones use malloc. The compiler always knows an
+// object's size, so `isma_free` is told it instead of storing it.
+// With -DISMA_SANITIZE every object is a plain malloc (so ASan can see it).
 
 #define ARENA_CHUNK (1 << 20)
+#define SMALL_MAX 256
 static char *arena_ptr = NULL;
 static char *arena_end = NULL;
+static void *free_lists[SMALL_MAX / 16 + 1];
+
+static int64_t st_allocs, st_frees, st_live, st_live_bytes, st_peak_bytes;
+static int dropping;
 
 static void *oom(void) {
     fputs("fatal: out of memory\n", stderr);
     exit(134);
 }
 
+static int64_t round16(int64_t size) { return (size + 15) & ~(int64_t)15; }
+
 void *isma_alloc(int64_t size) {
-    size = (size + 15) & ~(int64_t)15;
-    if (size > ARENA_CHUNK / 4) {
-        void *p = malloc((size_t)size);
-        return p ? p : oom();
+    size = round16(size);
+    st_allocs++;
+    st_live++;
+    st_live_bytes += size;
+    if (st_live_bytes > st_peak_bytes) st_peak_bytes = st_live_bytes;
+#ifndef ISMA_SANITIZE
+    if (size <= SMALL_MAX) {
+        void **list = &free_lists[size >> 4];
+        if (*list) {
+            void *p = *list;
+            *list = *(void **)p;
+            return p;
+        }
+        if (arena_end - arena_ptr < size) {
+            arena_ptr = malloc(ARENA_CHUNK);
+            if (!arena_ptr) oom();
+            arena_end = arena_ptr + ARENA_CHUNK;
+        }
+        void *p = arena_ptr;
+        arena_ptr += size;
+        return p;
     }
-    if (arena_end - arena_ptr < size) {
-        arena_ptr = malloc(ARENA_CHUNK);
-        if (!arena_ptr) oom();
-        arena_end = arena_ptr + ARENA_CHUNK;
+#endif
+    void *p = malloc((size_t)size);
+    return p ? p : oom();
+}
+
+void isma_free(void *p, int64_t size) {
+    size = round16(size);
+    st_frees++;
+    st_live--;
+    st_live_bytes -= size;
+#ifndef ISMA_SANITIZE
+    if (size <= SMALL_MAX) {
+        void **list = &free_lists[size >> 4];
+        *(void **)p = *list;
+        *list = p;
+        return;
     }
-    void *p = arena_ptr;
-    arena_ptr += size;
-    return p;
+#endif
+    free(p);
+}
+
+void isma_collect_cycles(void);
+static void collect_if_due(void);
+
+// Freeing an object releases its children. To keep deep structures (a
+// million-node chain) from overflowing the stack, children that die while
+// another object is being freed are queued and freed by the outermost call.
+typedef struct {
+    void *obj;
+    IsmaDropFn drop;
+} PendingDrop;
+static PendingDrop *pending;
+static int64_t n_pending, cap_pending;
+
+void isma_drop_slow(void *obj, IsmaDropFn drop) {
+    if (dropping) {
+        if (n_pending == cap_pending) {
+            cap_pending = cap_pending ? cap_pending * 2 : 64;
+            pending = realloc(pending, (size_t)cap_pending * sizeof(PendingDrop));
+            if (!pending) oom();
+        }
+        pending[n_pending++] = (PendingDrop){obj, drop};
+        return;
+    }
+    dropping = 1;
+    drop(obj);
+    while (n_pending > 0) {
+        PendingDrop d = pending[--n_pending];
+        d.drop(d.obj);
+    }
+    dropping = 0;
+    collect_if_due();
+}
+
+// ---------------------------------------------------------------- cycle collector
+// Reference counting can't free a cycle (a node whose children list contains
+// the node itself). The compiler knows which types can ever form a cycle
+// (`src/cycles.rs`); only values of those types come through here. Their
+// reference count word holds the count in bits 3.. and, in bits 0-2, a color
+// and a "buffered" flag for synchronous trial deletion (Bacon & Rajan, 2001):
+// when such a value's count drops but stays above zero, it may have just
+// become garbage held up only by a cycle, so it is remembered as a possible
+// root. When enough roots pile up, the collector subtracts the references
+// that come from inside the candidate subgraph; whatever ends up at zero is
+// unreachable garbage and is freed. Traversals use explicit stacks, so deep
+// structures can't overflow the C stack.
+
+typedef struct IsmaTypeInfo IsmaTypeInfo;
+typedef void (*IsmaVisitFn)(void *child, const IsmaTypeInfo *ti);
+struct IsmaTypeInfo {
+    void (*trace)(void *obj, IsmaVisitFn visit); // visit each child of a cyclic type
+    IsmaDropFn drop;                             // count hit zero: release children, then isma_cyclic_free
+    IsmaDropFn free_white;                       // member of a garbage cycle: release acyclic children, free memory
+    IsmaDropFn free_mem;                         // free just the memory
+};
+
+#define RC_UNIT 8
+#define COLOR_MASK 3
+#define BLACK 0  // in use (or freshly freed: count zero)
+#define PURPLE 1 // possible root of a garbage cycle
+#define GRAY 2   // being trial-deleted
+#define WHITE 3  // garbage
+#define BUFFERED 4
+
+typedef struct {
+    void *obj;
+    const IsmaTypeInfo *ti;
+} Root;
+typedef struct {
+    Root *items;
+    int64_t n, cap;
+} RootStack;
+
+static RootStack roots, work, work2, whites;
+static int64_t roots_threshold = 10000;
+static int collecting;
+static int64_t st_collections, st_cycle_frees, traced;
+
+static inline int64_t *rc_word(void *o) { return (int64_t *)o; }
+static inline int color_of(void *o) { return (int)(*rc_word(o) & COLOR_MASK); }
+static inline void set_color(void *o, int c) { *rc_word(o) = (*rc_word(o) & ~(int64_t)COLOR_MASK) | c; }
+static inline int64_t count_of(void *o) { return *rc_word(o) >> 3; }
+
+static void stack_push(RootStack *st, void *obj, const IsmaTypeInfo *ti) {
+    if (st->n == st->cap) {
+        st->cap = st->cap ? st->cap * 2 : 256;
+        st->items = realloc(st->items, (size_t)st->cap * sizeof(Root));
+        if (!st->items) oom();
+    }
+    st->items[st->n++] = (Root){obj, ti};
+}
+
+// Trace callbacks (they can't take a context argument, so they use `visit_to`).
+static RootStack *visit_to;
+static void visit_push(void *t, const IsmaTypeInfo *ti) { stack_push(visit_to, t, ti); }
+static void visit_mark_gray(void *t, const IsmaTypeInfo *ti) {
+    *rc_word(t) -= RC_UNIT; // subtract the reference coming from inside the subgraph
+    stack_push(visit_to, t, ti);
+}
+static void visit_scan_black(void *t, const IsmaTypeInfo *ti) {
+    *rc_word(t) += RC_UNIT; // restore it: the parent turned out to be alive
+    if (color_of(t) != BLACK) {
+        set_color(t, BLACK);
+        stack_push(visit_to, t, ti);
+    }
+}
+
+static void mark_gray(Root r) {
+    visit_to = &work;
+    stack_push(&work, r.obj, r.ti);
+    while (work.n > 0) {
+        Root x = work.items[--work.n];
+        if (color_of(x.obj) != GRAY) {
+            set_color(x.obj, GRAY);
+            traced++;
+            x.ti->trace(x.obj, visit_mark_gray);
+        }
+    }
+}
+
+static void scan_black(Root r) {
+    set_color(r.obj, BLACK);
+    stack_push(&work2, r.obj, r.ti);
+    while (work2.n > 0) {
+        Root x = work2.items[--work2.n];
+        visit_to = &work2;
+        x.ti->trace(x.obj, visit_scan_black);
+    }
+}
+
+static void scan(Root r) {
+    stack_push(&work, r.obj, r.ti);
+    while (work.n > 0) {
+        Root x = work.items[--work.n];
+        if (color_of(x.obj) != GRAY) continue;
+        if (count_of(x.obj) > 0) {
+            scan_black(x); // referenced from outside the subgraph: alive
+        } else {
+            set_color(x.obj, WHITE);
+            visit_to = &work;
+            x.ti->trace(x.obj, visit_push);
+        }
+    }
+}
+
+static void collect_white(Root r) {
+    stack_push(&work, r.obj, r.ti);
+    while (work.n > 0) {
+        Root x = work.items[--work.n];
+        if (color_of(x.obj) != WHITE || (*rc_word(x.obj) & BUFFERED)) continue;
+        set_color(x.obj, BLACK);
+        stack_push(&whites, x.obj, x.ti);
+        visit_to = &work;
+        x.ti->trace(x.obj, visit_push);
+    }
+}
+
+void isma_collect_cycles(void) {
+    if (collecting || dropping) return;
+    collecting = 1;
+    st_collections++;
+    // Mark: trial-delete the subgraph under every root that is still a candidate.
+    int64_t n = 0;
+    for (int64_t i = 0; i < roots.n; i++) {
+        Root r = roots.items[i];
+        if (color_of(r.obj) == PURPLE) {
+            mark_gray(r);
+            roots.items[n++] = r;
+        } else {
+            *rc_word(r.obj) &= ~(int64_t)BUFFERED;
+            if (color_of(r.obj) == BLACK && count_of(r.obj) == 0) r.ti->free_mem(r.obj); // died while buffered
+        }
+    }
+    // Scan: anything still referenced from outside is alive, and so is all it reaches.
+    for (int64_t i = 0; i < n; i++) scan(roots.items[i]);
+    // Collect: the rest is garbage.
+    whites.n = 0;
+    for (int64_t i = 0; i < n; i++) {
+        *rc_word(roots.items[i].obj) &= ~(int64_t)BUFFERED;
+        collect_white(roots.items[i]);
+    }
+    roots.n = 0;
+    // Free only after the whole traversal, so no freed object is ever traced.
+    for (int64_t i = 0; i < whites.n; i++) {
+        st_cycle_frees++;
+        whites.items[i].ti->free_white(whites.items[i].obj);
+    }
+    // If it traced a lot of live data for little garbage, wait longer next time.
+    if (whites.n * 4 < traced && roots_threshold < ((int64_t)1 << 30)) roots_threshold *= 2;
+    traced = 0;
+    collecting = 0;
+}
+
+// Drop buffer entries that can no longer be garbage-cycle roots (used again
+// since, or already dead) without tracing anything. Returns how many remain.
+static int64_t compact_roots(void) {
+    int64_t n = 0;
+    for (int64_t i = 0; i < roots.n; i++) {
+        Root r = roots.items[i];
+        if (color_of(r.obj) == PURPLE) {
+            roots.items[n++] = r;
+        } else {
+            *rc_word(r.obj) &= ~(int64_t)BUFFERED;
+            if (count_of(r.obj) == 0) r.ti->free_mem(r.obj);
+        }
+    }
+    roots.n = n;
+    return n;
+}
+
+// Once enough candidate roots pile up, first discard the stale ones cheaply;
+// trace only if many real candidates remain. (Never in the middle of freeing
+// something: `isma_drop_slow` calls this again when it's done.)
+static void collect_if_due(void) {
+    if (roots.n < roots_threshold || dropping || collecting) return;
+    if (compact_roots() >= roots_threshold / 2) isma_collect_cycles();
+}
+
+void isma_release_cyclic(void *p, const IsmaTypeInfo *ti) {
+    int64_t rc = *rc_word(p) - RC_UNIT;
+    if ((rc >> 3) == 0) {
+        *rc_word(p) = rc & BUFFERED; // black, count zero (the collector frees it if buffered)
+        isma_drop_slow(p, ti->drop);
+        return;
+    }
+    if ((rc & COLOR_MASK) != PURPLE) {
+        rc = (rc & ~(int64_t)COLOR_MASK) | PURPLE;
+        if (!(rc & BUFFERED)) {
+            *rc_word(p) = rc | BUFFERED;
+            stack_push(&roots, p, ti);
+            collect_if_due();
+            return;
+        }
+    }
+    *rc_word(p) = rc;
+}
+
+// The end of a cyclic value's drop: free it, unless the root buffer still
+// points at it (then the collector frees it).
+void isma_cyclic_free(void *p, const IsmaTypeInfo *ti) {
+    if (*rc_word(p) & BUFFERED) return;
+    ti->free_mem(p);
 }
 
 // ---------------------------------------------------------------- strings
 
+static IsmaStr *str_dup(IsmaStr *s) {
+    s->rc++;
+    return s;
+}
+
+// A fresh string with room for at least `cap` bytes (the size class's slack
+// becomes extra capacity for in-place appends).
+static IsmaStr *str_alloc(int64_t cap) {
+    int64_t size = round16((int64_t)sizeof(IsmaStr) + cap);
+    IsmaStr *s = isma_alloc(size);
+    s->rc = 1;
+    s->len = 0;
+    s->cap = size - (int64_t)sizeof(IsmaStr);
+    return s;
+}
+
 static IsmaStr *str_new(int64_t len) {
-    IsmaStr *s = isma_alloc((int64_t)sizeof(IsmaStr) + len);
+    IsmaStr *s = str_alloc(len);
     s->len = len;
     return s;
 }
@@ -95,13 +402,47 @@ static IsmaStr *str_from(const char *data, int64_t len) {
     return s;
 }
 
+// Drop functions take `void *`: the generated code calls them through IsmaDropFn.
+void isma_str_free(void *p) {
+    IsmaStr *s = p;
+    isma_free(s, (int64_t)sizeof(IsmaStr) + s->cap);
+}
+
 IsmaStr *isma_str_concat(IsmaStr *a, IsmaStr *b) {
-    if (a->len == 0) return b;
-    if (b->len == 0) return a;
+    if (a->len == 0) return str_dup(b);
+    if (b->len == 0) return str_dup(a);
     IsmaStr *s = str_new(a->len + b->len);
     memcpy(s->data, a->data, (size_t)a->len);
     memcpy(s->data + a->len, b->data, (size_t)b->len);
     return s;
+}
+
+// `a + b` where the caller gives up its reference to `a`. When nobody else
+// holds `a`, `b` is appended in place (with doubling capacity), which makes
+// `s += x` loops and f-strings linear instead of quadratic.
+IsmaStr *isma_str_append_owned(IsmaStr *a, IsmaStr *b) {
+    if (b->len == 0) return a;
+    int64_t blen = b->len, n = a->len + blen;
+    if (a->rc != 1) {
+        IsmaStr *s = str_alloc(n + n / 2);
+        s->len = n;
+        memcpy(s->data, a->data, (size_t)a->len);
+        memcpy(s->data + a->len, b->data, (size_t)blen);
+        a->rc--; // shared: someone else still holds it, so it can't reach zero
+        return s;
+    }
+    if (n > a->cap) {
+        int64_t cap = a->cap * 2 > n ? a->cap * 2 : n;
+        IsmaStr *s = str_alloc(cap);
+        s->len = a->len;
+        memcpy(s->data, a->data, (size_t)a->len);
+        if (b == a) b = s;
+        isma_str_free(a);
+        a = s;
+    }
+    memcpy(a->data + a->len, b->data, (size_t)blen);
+    a->len = n;
+    return a;
 }
 
 int64_t isma_str_eq(IsmaStr *a, IsmaStr *b) {
@@ -247,7 +588,7 @@ IsmaStr *isma_str_substring(IsmaStr *s, int64_t start, int64_t end, const char *
         snprintf(buf, sizeof buf, "substring(%lld, %lld) would split a multi-byte character", (long long)start, (long long)end);
         isma_die(file, line, col, buf);
     }
-    if (start == 0 && end == s->len) return s;
+    if (start == 0 && end == s->len) return str_dup(s);
     return str_from(s->data + start, end - start);
 }
 
@@ -324,10 +665,11 @@ void isma_print_str(IsmaStr *s) {
 }
 
 // ---------------------------------------------------------------- lists
-// List headers live in the arena; element buffers are malloc'd so they can grow.
+// A list header is a small object; its element buffer is malloc'd so it can grow.
 
 IsmaList *isma_list_new(int64_t elem_size, int64_t cap) {
     IsmaList *l = isma_alloc((int64_t)sizeof(IsmaList));
+    l->rc = 1;
     l->len = 0;
     l->cap = cap;
     l->data = NULL;
@@ -336,6 +678,13 @@ IsmaList *isma_list_new(int64_t elem_size, int64_t cap) {
         if (!l->data) oom();
     }
     return l;
+}
+
+// Frees the header and buffer (the elements were already released).
+void isma_list_free(void *p) {
+    IsmaList *l = p;
+    free(l->data);
+    isma_free(l, (int64_t)sizeof(IsmaList));
 }
 
 void *isma_list_push_slot(IsmaList *l, int64_t elem_size) {
@@ -370,10 +719,31 @@ IsmaList *isma_args(void) {
     return l;
 }
 
+// `ISMA_ARC_STATS=1` (set by `isma run --arc-stats`) prints memory counters at
+// exit; `ISMA_ARC_CHECK=1` reports leaked objects (used by the test suite).
+static int env_flag(const char *name) {
+    const char *v = getenv(name);
+    return v && *v && *v != '0';
+}
+
+static void arc_report(void) {
+    int check = env_flag("ISMA_ARC_CHECK");
+    if (check) isma_collect_cycles(); // garbage cycles still waiting for a collection
+    if (env_flag("ISMA_ARC_STATS")) {
+        fprintf(stderr, "isma arc: %lld allocations, %lld frees, %lld live, peak %lld bytes, %lld cycle collections freed %lld\n",
+                (long long)st_allocs, (long long)st_frees, (long long)st_live, (long long)st_peak_bytes,
+                (long long)st_collections, (long long)st_cycle_frees);
+    }
+    if (check && st_live != 0) {
+        fprintf(stderr, "isma: %lld objects leaked (%lld bytes)\n", (long long)st_live, (long long)st_live_bytes);
+    }
+}
+
 int main(int argc, char **argv) {
     saved_argc = argc;
     saved_argv = argv;
     isma_main();
     fflush(stdout);
+    arc_report();
     return 0;
 }

@@ -88,7 +88,7 @@ Indentation instead of braces. `for x in list`, `and` / `or` / `not`, f-strings.
 
 ### ⚡ Runs like Rust
 
-Compiled ahead of time to a native binary with LLVM `-O3`. Integer overflow and out-of-bounds indexing still stop the program safely, and it ran **21–57× faster than Python** in the [benchmarks](#performance).
+Compiled ahead of time to a native binary with LLVM `-O3`. No garbage collector: memory is freed the moment it's no longer used. Integer overflow and out-of-bounds indexing still stop the program safely, and it ran **2–54× faster than Python** in the [benchmarks](#performance).
 
 </td>
 </tr>
@@ -128,6 +128,8 @@ isma build app.isma -o app && ./app
 | `isma build app.isma -o app` | A standalone native binary that runs without Isma |
 | `isma check app.isma` | Type-check and lint only |
 | `isma build app.isma --emit-llvm` | Also write the generated LLVM IR |
+| `isma build app.isma --emit-mir` | Also write the mid-level IR, with every reference-count operation |
+| `isma run --arc-stats app.isma` | Print allocations, frees and peak memory when the program exits |
 | `isma run --debug app.isma` | Build without optimizations (`-O0 -g`) |
 | `./uninstall.sh` | Remove everything Isma installed (default or pick targets) |
 
@@ -208,35 +210,39 @@ The VS Code extension (in the companion `isma-vscode` project) gets all its smar
 ## ⚡ Performance
 
 <p align="center">
-  <img src="docs/media/benchmark.svg" alt="Bar chart of run times in milliseconds, lower is better. fib(35): Isma 42, Rust 26, Python 891. Sieve to 10 million: Isma 39, Rust 32, Python 2,204." width="760">
+  <img src="docs/media/benchmark.svg" alt="Bar chart of run times in milliseconds, lower is better. fib(35): Isma 39, Rust 28, Python 872. Sieve to 10 million: Isma 45, Rust 35, Python 2,036. Building a 15 MB string: Isma 124, Rust 84, Python 283. Moving a particle 5 million steps: Isma 21, Rust 9, Python 1,132." width="760">
 </p>
 
 | Benchmark | Isma | Rust (`rustc -O`) | Python 3 |
 |---|---:|---:|---:|
-| `fib(35)`: 30 million recursive calls | 42 ms | 26 ms | 891 ms |
-| Sieve of Eratosthenes to 10 million | 39 ms | 32 ms | 2,204 ms |
+| `fib(35)`: 30 million recursive calls | 39 ms | 28 ms | 872 ms |
+| Sieve of Eratosthenes to 10 million | 45 ms | 35 ms | 2,036 ms |
+| Building a 15 MB string from 2 million f-strings | 124 ms | 84 ms | 283 ms |
+| Moving a `Vec2` particle 5 million steps (`pos = pos.add(vel)`) | 21 ms | 9 ms | 1,132 ms |
 
 These are the best of 3 runs on an AMD Ryzen 5 5500. Reproduce them with `./bench/run.sh`.
 
 - **Where the gap to Rust comes from.** Most of it is safety: Isma checks every integer operation for overflow, while Rust in release mode silently wraps. With the same checks (`rustc -O -C overflow-checks=on`), Rust's `fib` takes about 46 ms, slower than Isma.
 - **Help for the optimizer.** Isma tells LLVM which memory can never overlap (TBAA metadata). That lets list lengths stay in CPU registers inside hot loops.
+- **Memory without a garbage collector.** Values are reference counted, and the compiler removes most of the counting (see [Memory](docs/language.md#memory)). The particle loop allocates 3 objects in total, because each new `Vec2` reuses the memory of the one it replaces. Peak memory stayed within 10% of Rust's on both new benchmarks.
 - **Benchmarking your own code.** LLVM deletes loops whose results are never used, so print what you compute or you'll measure `0 ms`. `isma run --debug` turns optimization off.
 
 <a id="how-it-works"></a>
 ## 🔧 How it works
 
 <p align="center">
-  <img src="docs/media/pipeline.svg" alt="Diagram: your .isma file goes through the lexer, parser, type checker, LLVM IR codegen and clang -O3 with a small C runtime, producing a native binary. stdlib/time.isma joins at the parser via `import time`. The type checker also powers `isma lsp`, which feeds VS Code." width="100%">
+  <img src="docs/media/pipeline.svg" alt="Diagram: your .isma file goes through the lexer, parser, type checker, MIR with automatic reference counting, LLVM IR codegen and clang -O3 with a small C runtime, producing a native binary. stdlib/time.isma joins at the parser via `import time`. The type checker also powers `isma lsp`, which feeds VS Code." width="100%">
 </p>
 
 - **One front end, two uses.** The same lexer, parser and type checker compile your programs and power the editor through `isma lsp`.
 - **The standard library is Isma code** ([`stdlib/time.isma`](stdlib/time.isma)), compiled together with your program, so it's as fast as your own functions. A panic inside it reports *your* calling line, like Rust's `#[track_caller]`.
-- **Codegen writes LLVM IR as text** and hands it to `clang -O3`, together with a ~400-line C runtime for strings, lists, printing and clocks.
+- **Memory management happens on a mid-level IR.** The typed program is lowered to a control-flow graph in which every intermediate value has a name ([`src/mir.rs`](src/mir.rs)). [`src/arc.rs`](src/arc.rs) then adds reference counting in the style of Perceus (Koka, Lean 4). It drops each value right after its last use. Parameters are borrowed unless consumed, and projections stay borrowed while interprocedural write-effect summaries prove their slot can't change. A unique struct's memory is reused for the next one, and unique strings are appended to in place. Types that can form cycles ([`src/cycles.rs`](src/cycles.rs)) get a trial-deletion cycle collector.
+- **Codegen writes LLVM IR as text** and hands it to `clang -O3`, together with a ~750-line C runtime: the allocator, the cycle collector, strings, lists, printing and clocks.
 - **Safety stays cheap.**
   - Integer `+ - *` use LLVM's overflow-checking intrinsics.
   - Panic paths are marked cold.
   - List indexing is bounds-checked inline.
-- **About 6,800 lines of Rust.** The only dependencies are `ariadne` (error rendering) and `lsp-server` / `lsp-types` (the language server).
+- **About 8,800 lines of Rust.** The only dependencies are `ariadne` (error rendering) and `lsp-server` / `lsp-types` (the language server).
 
 <a id="roadmap"></a>
 ## 🗺️ Roadmap
@@ -246,7 +252,7 @@ These are the best of 3 runs on an AMD Ryzen 5 5500. Reproduce them with `./benc
 - [x] Lints, error hints and a VS Code extension with a language server
 - [x] `import` and a standard library written in Isma (`time`)
 - [ ] Null safety: `Int?`, `?.`, the elvis operator `?:`, smart casts
-- [ ] Memory management through automatic reference counting
+- [x] Memory management through automatic reference counting, with a cycle collector
 - [ ] `enum` + `match` with exhaustiveness checking
 - [ ] Generics for user code: `fn max[T](a: T, b: T) -> T`
 - [ ] Operator functions (so that `time.now() - start` works)
@@ -257,7 +263,7 @@ These are the best of 3 runs on an AMD Ryzen 5 5500. Reproduce them with `./benc
 ## 🧪 Development
 
 ```bash
-cargo test                          # unit tests + every program in tests/
+cargo test                          # unit tests + every program in tests/ (also leak-checked and run under ASan)
 ./bench/run.sh                      # Isma vs Rust vs Python (writes bench/results.json)
 python3 docs/media/generate.py      # re-render the README's media from real runs
 ```
@@ -274,6 +280,7 @@ tests/run/      programs + their expected output
 tests/fail/     programs that must not compile    (# expect-error: ...)
 tests/warn/     programs that must warn            (# expect-warning: ...)
 tests/panic/    programs that must panic           (# expect-panic: ...)
+tests/arc/      programs with an allocation budget (# expect-max-allocs: ...)
 bench/          Isma vs Rust vs Python
 docs/           language guide, time reference, install guide, README media
 install.sh      the installer (default or custom)

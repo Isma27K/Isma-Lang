@@ -1,13 +1,17 @@
 //! The Isma compiler: Python-like syntax, Kotlin-strict types, native speed.
 
+pub mod arc;
 pub mod ast;
 pub mod check;
 pub mod codegen;
+pub mod cycles;
 pub mod diagnostics;
 pub mod driver;
 pub mod ide;
 pub mod lexer;
+pub mod lower;
 pub mod lsp;
+pub mod mir;
 pub mod parser;
 pub mod span;
 pub mod stdlib;
@@ -114,12 +118,34 @@ pub fn analyze(src: &str) -> check::Analysis {
     a
 }
 
-/// Full pipeline up to LLVM IR text. `Ok((ir, warnings))`.
-pub fn compile_to_ir(src: &str, path: &str, target_triple: Option<&str>) -> Result<(String, Vec<Diagnostic>), Vec<Diagnostic>> {
+/// The back end's view of a program: MIR after the memory-management passes.
+pub fn compile_to_mir(src: &str) -> Result<(mir::Program, Checked), Vec<Diagnostic>> {
     let checked = check_source(src)?;
+    let mut program = lower::lower(&checked.program);
+    arc::run(&mut program);
+    Ok((program, checked))
+}
+
+/// The output of the full pipeline.
+pub struct Compiled {
+    pub ir: String,
+    /// The MIR, pretty-printed (for `--emit-mir`).
+    pub mir: String,
+    pub warnings: Vec<Diagnostic>,
+}
+
+/// Full pipeline up to LLVM IR text.
+pub fn compile(src: &str, path: &str, target_triple: Option<&str>) -> Result<Compiled, Vec<Diagnostic>> {
+    let (program, checked) = compile_to_mir(src)?;
     let mut sources = SourceMap::new(path, src);
     for m in &checked.modules {
         sources.add(&stdlib::display_path(m.name), m.base, m.source);
     }
-    Ok((codegen::generate(&checked.program, &sources, target_triple), checked.warnings))
+    let ir = codegen::generate(&program, &sources, target_triple);
+    Ok(Compiled { ir, mir: mir::print_program(&program), warnings: checked.warnings })
+}
+
+/// Full pipeline up to LLVM IR text. `Ok((ir, warnings))`.
+pub fn compile_to_ir(src: &str, path: &str, target_triple: Option<&str>) -> Result<(String, Vec<Diagnostic>), Vec<Diagnostic>> {
+    compile(src, path, target_triple).map(|c| (c.ir, c.warnings))
 }

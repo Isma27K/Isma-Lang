@@ -14,6 +14,7 @@ Isma reads like Python, checks like Kotlin and compiles to native code. This gui
 - [Structs and methods](#structs-and-methods)
 - [Lists](#lists)
 - [Strings and f-strings](#strings-and-f-strings)
+- [Memory](#memory)
 - [Modules: `import`](#modules-import)
 - [Built-in functions](#built-in-functions)
 - [Panics](#panics)
@@ -31,6 +32,8 @@ isma greet.isma Ana Budi         # everything after the script goes to the scrip
 isma build app.isma -o app       # a standalone native binary; ship it without Isma
 isma check app.isma              # type-check only
 isma build app.isma --emit-llvm  # also write the LLVM IR (app.ll)
+isma build app.isma --emit-mir   # also write the mid-level IR, showing every reference-count operation (app.mir)
+isma run --arc-stats app.isma    # print memory counters when the program exits
 isma run --debug app.isma        # -O0 -g instead of -O3
 isma clean                       # empty the compile cache
 ```
@@ -75,7 +78,7 @@ name = "other"           # error: cannot assign twice to immutable variable `nam
 | `List[T]` | Growable and bounds-checked. A reference type. |
 | structs | User-defined. A reference type, like Python and Kotlin objects. |
 
-Lists and structs are references: `val b = a` makes `b` point at the same list as `a`.
+Lists and structs are references: `val b = a` makes `b` point at the same list as `a`. Memory is managed for you, see [Memory](#memory).
 
 ## Strict typing
 
@@ -205,6 +208,35 @@ for c in "héllo".chars():
 
 `Int`, `Float` and `Bool` have `.to_string()`; `Int` has `.to_float()`; `Float` has `.to_int()`, which truncates.
 
+## Memory
+
+Isma frees memory automatically, without a garbage collector and without pauses. Every string, list and struct counts its references, and it is freed the moment the last one goes away. The compiler works out each value's **last use**, so a value dies right after it, not at the end of the block:
+
+```python
+fn main():
+    val words = load_words()     # a big list
+    print(words.len())           # last use: the list is freed right here
+    long_running_work()          # ...so it doesn't sit in memory during this
+```
+
+Most of the counting never happens. The compiler (a Perceus-style optimizer, as in Koka and Lean 4) removes it wherever it can prove it isn't needed:
+
+- **Borrowing.** Parameters are borrowed unless the function keeps them, so calls usually do no counting. Reading `task.name` or looping over `for task in tasks:` does none either, as long as nothing in the loop could replace those values.
+- **Moving.** Passing a value on its last use hands over its reference instead of copying it.
+- **Updating in place.** When a value has a single owner, `s += x` appends to the existing string, so building a string in a loop takes linear time. Likewise `pos = pos.add(vel)` builds the new struct in the old one's memory, so the loop doesn't allocate at all.
+- **Cycles.** A struct that can end up containing itself, such as `struct Node:` with `var children: List[Node]` followed by `n.children.push(n)`, is freed by a small cycle collector. The compiler only enables it for types that can actually form a cycle; strings, `List[Int]` and most structs never pay for it.
+
+To see what's happening:
+
+```console
+$ isma run --arc-stats bench/particles.isma
+5000000
+-12497502500
+isma arc: 3 allocations, 3 frees, 0 live, peak 96 bytes, 0 cycle collections freed 0
+```
+
+`isma build app.isma --emit-mir` writes the mid-level IR, with every `dup` (a new reference), `drop` (a reference released) and `drop-reuse` (memory recycled in place) the compiler inserted.
+
 ## Modules: `import`
 
 ```python
@@ -252,7 +284,6 @@ Panics cover:
 
 ## Known limitations
 
-- **Memory is never freed.** Allocation uses a bump arena, which is fine for short programs. Reference counting is planned.
 - **One file of your own.** You can `import` standard-library modules, but not your own `.isma` files yet.
 - **No top-level constants.** Everything lives inside functions.
 - **Byte-based strings.** `String.len()` and `substring()` count bytes, and there's no `s[i]` indexing; use `chars()`.

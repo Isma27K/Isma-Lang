@@ -1,0 +1,31 @@
+# Strings: building, sharing, aliasing.
+
+fn main():
+    var s = ""
+    for _ in 0..1000:
+        s += "ab"
+    print(s.len())
+
+    var doubled = "xy" + "z"
+    doubled += doubled
+    doubled = doubled + doubled
+    print(doubled)
+
+    val shared = "base" + "line"
+    var grow = shared
+    grow += "+more"
+    print(shared)
+    print(grow)
+
+    val same = shared.substring(0, shared.len())
+    print(same)
+    val empty_concat = "" + shared
+    print(empty_concat + "")
+    val as_string = shared.to_string()
+    print(as_string)
+
+    var parts = ""
+    for c in "héllo".chars():
+        parts = parts + c + "."
+    print(parts)
+    print(f"{s.len()}-{doubled}-{1 + 2}-{true}")

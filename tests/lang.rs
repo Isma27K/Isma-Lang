@@ -3,6 +3,10 @@
 //! - tests/run/*.isma    compile + run; stdout must equal the sibling `.out` file
 //! - tests/fail/*.isma   must fail to compile; first line `# expect-error: <text>`
 //! - tests/panic/*.isma  must exit 101; first line `# expect-panic: <text>`
+//! - tests/arc/*.isma    must stay within an allocation budget; first line `# expect-max-allocs: <n>`
+//!
+//! Every `run` program must also free everything it allocated (checked by the
+//! runtime with `ISMA_ARC_CHECK=1`), and is run again under AddressSanitizer.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -58,18 +62,88 @@ fn run_all(files: Vec<PathBuf>, check: fn(&Path) -> Result<(), String>) {
     }
 }
 
+fn isma_env(args: &[&str], env: &[(&str, &str)]) -> Output {
+    let mut cmd = Command::new(ISMA);
+    cmd.args(args).env("NO_COLOR", "1").env("ISMA_CACHE_DIR", cache_dir());
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    cmd.output().expect("failed to run isma")
+}
+
+/// Run a `tests/run` program and compare its output; also fail on leaks.
+fn check_run(f: &Path, extra: &[&str]) -> Result<(), String> {
+    let mut args = vec!["run"];
+    args.extend_from_slice(extra);
+    args.push(f.to_str().unwrap());
+    let out = isma_env(&args, &[("ISMA_ARC_CHECK", "1")]);
+    let expected =
+        std::fs::read_to_string(f.with_extension("out")).map_err(|e| format!("{}: missing .out file ({e})", f.display()))?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if !out.status.success() {
+        return Err(format!("{}: exited with {}\n{stderr}", f.display(), out.status));
+    }
+    if stdout != expected {
+        return Err(format!("{}: output mismatch\n--- expected\n{expected}\n--- got\n{stdout}", f.display()));
+    }
+    for bad in ["objects leaked", "runtime error", "AddressSanitizer", "LeakSanitizer"] {
+        if stderr.contains(bad) {
+            return Err(format!("{}: {bad}\n{stderr}", f.display()));
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn run_programs() {
-    run_all(cases("run"), |f| {
-        let out = isma(&["run", f.to_str().unwrap()]);
-        let expected = std::fs::read_to_string(f.with_extension("out"))
-            .map_err(|e| format!("{}: missing .out file ({e})", f.display()))?;
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        if !out.status.success() {
-            return Err(format!("{}: exited with {}\n{}", f.display(), out.status, String::from_utf8_lossy(&out.stderr)));
+    run_all(cases("run"), |f| check_run(f, &[]));
+}
+
+/// Can this clang build programs with AddressSanitizer?
+fn sanitizer_available() -> bool {
+    let Ok(clang) = isma::driver::find_clang() else { return false };
+    let dir = scratch("asan-probe");
+    let src = dir.join("probe.c");
+    std::fs::write(&src, "int main(void) { return 0; }\n").unwrap();
+    let ok = Command::new(clang)
+        .args(["-fsanitize=address,undefined", "-o"])
+        .arg(dir.join("probe"))
+        .arg(&src)
+        .output()
+        .is_ok_and(|o| o.status.success());
+    let _ = std::fs::remove_dir_all(&dir);
+    ok
+}
+
+/// Reference-counting bugs (use after free, double free) are caught by ASan:
+/// in `--sanitize` builds every object is its own malloc.
+#[test]
+fn run_programs_under_sanitizers() {
+    if !sanitizer_available() {
+        eprintln!("skipping: clang can't build with -fsanitize=address,undefined");
+        return;
+    }
+    run_all(cases("run"), |f| check_run(f, &["--sanitize"]));
+}
+
+#[test]
+fn allocation_budgets() {
+    run_all(cases("arc"), |f| {
+        let max: u64 = directive(f, "expect-max-allocs").parse().map_err(|e| format!("{}: bad budget: {e}", f.display()))?;
+        let out = isma_env(&["run", f.to_str().unwrap()], &[("ISMA_ARC_STATS", "1"), ("ISMA_ARC_CHECK", "1")]);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if !out.status.success() || stderr.contains("objects leaked") {
+            return Err(format!("{}: failed\n{stderr}", f.display()));
         }
-        if stdout != expected {
-            return Err(format!("{}: output mismatch\n--- expected\n{expected}\n--- got\n{stdout}", f.display()));
+        let allocs: u64 = stderr
+            .lines()
+            .find_map(|l| l.strip_prefix("isma arc: "))
+            .and_then(|l| l.split_whitespace().next())
+            .and_then(|n| n.parse().ok())
+            .ok_or_else(|| format!("{}: no `isma arc:` stats line in\n{stderr}", f.display()))?;
+        if allocs > max {
+            return Err(format!("{}: {allocs} allocations, budget is {max}", f.display()));
         }
         Ok(())
     });

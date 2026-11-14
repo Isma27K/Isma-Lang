@@ -9,6 +9,23 @@ pub const RUNTIME_C: &str = include_str!("../runtime/runtime.c");
 
 pub struct BuildOptions {
     pub debug: bool,
+    /// Developer mode: AddressSanitizer + UBSan, and every object a plain
+    /// malloc, so reference-counting bugs show up as use-after-free reports.
+    pub sanitize: bool,
+}
+
+impl BuildOptions {
+    fn key(&self) -> [u8; 2] {
+        [self.debug as u8, self.sanitize as u8]
+    }
+
+    fn opt_level(&self) -> &'static str {
+        if self.debug { "-O0" } else if self.sanitize { "-O1" } else { "-O3" }
+    }
+
+    fn sanitizer_flags(&self) -> &'static [&'static str] {
+        if self.sanitize { &["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-g", "-DISMA_SANITIZE"] } else { &[] }
+    }
 }
 
 /// Locate a clang binary: $ISMA_CC, then `clang` on PATH, then /usr/lib/llvm-*/bin/clang.
@@ -137,7 +154,7 @@ fn atomic_build(dest: &Path, build: impl FnOnce(&Path) -> Result<(), String>) ->
 /// The runtime compiled once to an object file and reused by every build.
 fn cached_runtime_object(clang: &Path, opts: &BuildOptions) -> Option<PathBuf> {
     let mut h = Fnv::new();
-    h.write(RUNTIME_C.as_bytes()).write(clang.as_os_str().as_encoded_bytes()).write(&[opts.debug as u8]);
+    h.write(RUNTIME_C.as_bytes()).write(clang.as_os_str().as_encoded_bytes()).write(&opts.key());
     let obj = cache_dir()?.join(format!("runtime-{}.o", h.hex()));
     if obj.is_file() {
         return Some(obj);
@@ -146,7 +163,8 @@ fn cached_runtime_object(clang: &Path, opts: &BuildOptions) -> Option<PathBuf> {
         let src = tmp.with_extension("c");
         std::fs::write(&src, RUNTIME_C).map_err(|e| e.to_string())?;
         let out = Command::new(clang)
-            .arg(if opts.debug { "-O0" } else { "-O3" })
+            .arg(opts.opt_level())
+            .args(opts.sanitizer_flags())
             .args(["-w", "-c", "-x", "c"])
             .arg(&src)
             .arg("-o")
@@ -176,9 +194,12 @@ pub fn build_executable(clang: &Path, ir: &str, output: &Path, opts: &BuildOptio
             }
         };
         let mut cmd = Command::new(clang);
-        cmd.arg(if opts.debug { "-O0" } else { "-O3" });
+        cmd.arg(opts.opt_level()).args(opts.sanitizer_flags());
         if opts.debug {
             cmd.arg("-g");
+        }
+        if opts.sanitize && runtime.extension().is_some_and(|e| e == "c") {
+            cmd.arg("-DISMA_SANITIZE");
         }
         cmd.args(["-Wno-override-module", "-w", "-o"]).arg(output).arg(&ll).arg(&runtime).arg("-lm");
         let out = cmd.output().map_err(|e| format!("failed to run {}: {e}", clang.display()))?;
@@ -199,13 +220,13 @@ pub fn build_executable(clang: &Path, ir: &str, output: &Path, opts: &BuildOptio
 pub fn cached_program_path(script: &Path, src: &str, display_path: &str, opts: &BuildOptions) -> Option<(PathBuf, String)> {
     let abs = std::fs::canonicalize(script).unwrap_or_else(|_| script.to_path_buf());
     let mut script_key = Fnv::new();
-    script_key.write(abs.as_os_str().as_encoded_bytes()).write(&[opts.debug as u8]);
+    script_key.write(abs.as_os_str().as_encoded_bytes()).write(&opts.key());
     let mut content_key = Fnv::new();
     content_key
         .write(compiler_fingerprint().as_bytes())
         .write(src.as_bytes())
         .write(display_path.as_bytes())
-        .write(&[opts.debug as u8]);
+        .write(&opts.key());
     let prefix = format!("{}-", script_key.hex());
     let path = cache_dir()?.join("bin").join(format!("{prefix}{}", content_key.hex()));
     Some((path, prefix))

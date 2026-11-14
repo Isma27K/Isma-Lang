@@ -305,6 +305,8 @@ def benchmark_svg(results: dict) -> str:
     panels = [
         ("fib", "fib(35): 30 million recursive function calls"),
         ("sieve", "Sieve of Eratosthenes up to 10 million (List[Bool])"),
+        ("strings", "Building a 15 MB string from 2 million f-strings"),
+        ("particles", "Moving a Vec2 particle 5 million steps (pos = pos.add(vel))"),
     ]
     out, y = [], 0
     out.append(f'<text class="p" x="0" y="20" font-size="17" font-weight="600">Run time in milliseconds (lower is better)</text>')
@@ -319,7 +321,9 @@ def benchmark_svg(results: dict) -> str:
         vals = [results[key][n.lower()] for n, _, _ in SERIES]
         isma, rust, py = vals
         out.append(f'<text class="p" x="0" y="{y}" font-size="13.5" font-weight="600">{esc(heading)}</text>')
-        out.append(f'<text class="s" x="0" y="{y + 18}" font-size="12">Isma is {py / isma:.0f}× faster than Python; Rust is {isma / rust:.1f}× faster than Isma</text>')
+        vs_py = f"{py / isma:.0f}×" if py / isma >= 10 else f"{py / isma:.1f}×"
+        vs_rust = f"Rust is {isma / rust:.1f}× faster than Isma" if rust < isma else f"Isma is {rust / isma:.1f}× faster than Rust"
+        out.append(f'<text class="s" x="0" y="{y + 18}" font-size="12">Isma is {vs_py} faster than Python; {vs_rust}</text>')
         top = y + 32
         scale = max_w / max(vals)
         for j, ((name, _, _), v) in enumerate(zip(SERIES, vals)):
@@ -349,13 +353,14 @@ text{{font-family:{SANS}}}
 # ------------------------------------------------------------------ pipeline diagram
 
 def pipeline_svg() -> str:
-    W, H = 1000, 262
+    W, H = 1140, 262
     bw, bh, gap, x0, y1 = 120, 58, 20, 20, 92
     stages = [
         ("your .isma file", "source code"),
         ("Lexer", "→ tokens"),
         ("Parser", "→ syntax tree"),
         ("Type checker", "strict types + lints"),
+        ("MIR + ARC", "Perceus ref counting"),
         ("Codegen", "→ LLVM IR"),
         ("clang -O3", "+ small C runtime"),
         ("native binary", "runs on its own"),
@@ -385,7 +390,10 @@ def pipeline_svg() -> str:
     arrow(xs[3] + bw / 2, y1 + bh + 2, xs[3] + bw / 2, 188)
     box(xs[4] + 30, 192, "VS Code", "squiggles · hover · completion", "box blue", 200)
     arrow(xs[3] + bw + 2, 192 + bh / 2, xs[4] + 26, 192 + bh / 2)
-    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}" role="img" aria-label="How Isma compiles: lexer, parser, type checker, LLVM codegen, clang, native binary; the checker also powers the VS Code language server">
+    # the runtime half of memory management
+    box(xs[6] - 15, 192, "C runtime", "allocator · cycle collector", "box", 150)
+    arrow(xs[6] + bw / 2, 192 - 4, xs[6] + bw / 2, y1 + bh + 2)
+    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}" role="img" aria-label="How Isma compiles: lexer, parser, type checker, MIR with reference counting, LLVM codegen, clang with the C runtime, native binary; the checker also powers the VS Code language server">
 <title>How Isma compiles a program</title>
 <defs><marker id="ah" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="ah"/></marker></defs>
 <style>
@@ -465,7 +473,7 @@ def main() -> None:
     write("hero.svg", hero_svg())
     write("pipeline.svg", pipeline_svg())
 
-    cases = sum(len(list((ROOT / "tests" / d).glob("*.isma"))) for d in ["run", "fail", "panic", "warn"])
+    cases = sum(len(list((ROOT / "tests" / d).glob("*.isma"))) for d in ["run", "fail", "panic", "warn", "arc"])
     write("badge-native.svg", badge_svg("compiles to", "native code"))
     write("badge-llvm.svg", badge_svg("optimizer", "LLVM -O3", "#2563eb"))
     write("badge-tests.svg", badge_svg("test programs", f"{cases} passing"))

@@ -9,8 +9,8 @@ Isma — Python syntax, Kotlin-strict types, native speed.
 
 USAGE:
     isma <file.isma> [args...]           Compile (cached) and run, like `python file.py`
-    isma run [--debug] <file.isma> [args...]
-    isma build <file.isma> [-o <output>] [--debug] [--emit-llvm]
+    isma run [--debug] [--arc-stats] <file.isma> [args...]
+    isma build <file.isma> [-o <output>] [--debug] [--emit-llvm] [--emit-mir]
     isma check <file.isma>
     isma lsp                             Language server (used by editors)
     isma clean                           Delete the compile cache
@@ -18,7 +18,10 @@ USAGE:
 OPTIONS:
     -o <output>    Output executable path (default: file name without .isma)
     --debug        Build with -O0 -g instead of -O3
+    --arc-stats    Print memory counters (allocations, frees, peak) when the program exits
+    --sanitize     Build with AddressSanitizer (for debugging the compiler)
     --emit-llvm    Also write the generated LLVM IR next to the output (.ll)
+    --emit-mir     Also write the mid-level IR, with reference counting, next to the output (.mir)
     -h, --help     Show this message
     -V, --version  Show the compiler version
 
@@ -50,6 +53,9 @@ struct Cli {
     output: Option<PathBuf>,
     debug: bool,
     emit_llvm: bool,
+    emit_mir: bool,
+    arc_stats: bool,
+    sanitize: bool,
     /// Arguments passed through to the program (`run` only).
     program_args: Vec<String>,
 }
@@ -58,7 +64,7 @@ const COMMANDS: &[&str] = &["run", "build", "check", "clean", "lsp", "help", "ve
 
 fn parse_args(args: &[String]) -> Result<Cli, String> {
     let mut cli =
-        Cli { command: String::new(), file: None, output: None, debug: false, emit_llvm: false, program_args: Vec::new() };
+        Cli { command: String::new(), file: None, output: None, debug: false, emit_llvm: false, emit_mir: false, arc_stats: false, sanitize: false, program_args: Vec::new() };
     let mut rest = args;
     match args.first() {
         // `isma script.isma ...` is shorthand for `isma run script.isma ...`
@@ -84,6 +90,9 @@ fn parse_args(args: &[String]) -> Result<Cli, String> {
             "-o" => cli.output = Some(PathBuf::from(it.next().ok_or("`-o` needs a path")?)),
             "--debug" => cli.debug = true,
             "--emit-llvm" => cli.emit_llvm = true,
+            "--emit-mir" => cli.emit_mir = true,
+            "--arc-stats" => cli.arc_stats = true,
+            "--sanitize" => cli.sanitize = true,
             s if s.starts_with('-') => return Err(format!("unknown option `{s}`\n\n{USAGE}")),
             s if cli.file.is_none() => cli.file = Some(PathBuf::from(s)),
             s => return Err(format!("unexpected argument `{s}`")),
@@ -122,7 +131,12 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
     let file = cli.file.clone().ok_or_else(|| format!("missing input file\n\n{USAGE}"))?;
     let src = std::fs::read_to_string(&file).map_err(|e| format!("cannot read `{}`: {e}", file.display()))?;
     let display_path = file.display().to_string();
-    let opts = BuildOptions { debug: cli.debug };
+    let opts = BuildOptions { debug: cli.debug, sanitize: cli.sanitize };
+    if cli.arc_stats {
+        // Read by the runtime when the program exits.
+        // SAFETY: still single-threaded; set before any program is spawned.
+        unsafe { std::env::set_var("ISMA_ARC_STATS", "1") };
+    }
 
     if cli.command == "check" {
         return match isma::check_source(&src) {
@@ -143,10 +157,10 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
 
     let clang = driver::find_clang()?;
     let triple = driver::target_triple(&clang);
-    let ir = match isma::compile_to_ir(&src, &display_path, triple.as_deref()) {
-        Ok((ir, warnings)) => {
-            report_warnings(&warnings, &display_path, &src);
-            ir
+    let (ir, mir) = match isma::compile(&src, &display_path, triple.as_deref()) {
+        Ok(c) => {
+            report_warnings(&c.warnings, &display_path, &src);
+            (c.ir, c.mir)
         }
         Err(d) => return Ok(report(&d, &display_path, &src)),
     };
@@ -156,6 +170,10 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
         if cli.emit_llvm {
             let ll = output.with_extension("ll");
             std::fs::write(&ll, &ir).map_err(|e| format!("cannot write `{}`: {e}", ll.display()))?;
+        }
+        if cli.emit_mir {
+            let path = output.with_extension("mir");
+            std::fs::write(&path, &mir).map_err(|e| format!("cannot write `{}`: {e}", path.display()))?;
         }
         driver::build_executable(&clang, &ir, &output, &opts)?;
         return Ok(ExitCode::SUCCESS);

@@ -1,0 +1,8 @@
+# expect-max-allocs: 40
+# `s += x` appends in place when `s` has a single owner, so building a
+# 200 KB string takes a logarithmic number of allocations, not 100 000.
+fn main():
+    var s = ""
+    for _ in 0..100_000:
+        s += "ab"
+    print(s.len())

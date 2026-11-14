@@ -1,6 +1,8 @@
 {
   "date": "2026-11-14",
   "cpu": "AMD Ryzen 5 5500",
-  "fib": {"isma": 44, "rust": 29, "python": 959},
-  "sieve": {"isma": 47, "rust": 43, "python": 2163}
+  "fib": {"isma": 39, "rust": 28, "python": 872},
+  "sieve": {"isma": 45, "rust": 35, "python": 2036},
+  "strings": {"isma": 124, "rust": 84, "python": 283},
+  "particles": {"isma": 21, "rust": 9, "python": 1132}
 }

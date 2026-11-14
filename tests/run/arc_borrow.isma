@@ -1,0 +1,50 @@
+# Borrowed projections must give way whenever their source can change.
+
+struct Item:
+    name: String
+
+struct Box:
+    var item: Item
+
+struct Holder:
+    var items: List[String]
+
+fn replace(b: Box):
+    b.item = Item("new" + "!")
+
+fn main():
+    # Popping from the list being iterated.
+    val xs = [Item("a" + ""), Item("b" + ""), Item("c" + "")]
+    for it in xs:
+        xs.pop()
+        print(it.name)
+
+    # A call that overwrites the field through another reference.
+    val b = Box(Item("old" + "?"))
+    val alias = b
+    val it = b.item
+    replace(alias)
+    print(it.name)
+    print(b.item.name)
+
+    # Replacing the list an element was read from.
+    val h = Holder(["q" + "1", "q" + "2"])
+    val first = h.items[0]
+    h.items = []
+    print(first)
+
+    # An alias of a variable that is then reassigned.
+    var s = "a" + "1"
+    val t = s
+    s += "x"
+    s = "b" + "2"
+    print(t)
+    print(s)
+
+    # Walking a chain, and reading through several levels.
+    val chain = Box(Item("deep" + "est"))
+    val boxes = [chain, Box(Item("other" + ""))]
+    val n = boxes[0].item.name
+    boxes[0] = Box(Item("swapped" + ""))
+    print(n)
+    print(boxes[0].item.name)

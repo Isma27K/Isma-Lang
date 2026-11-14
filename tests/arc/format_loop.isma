@@ -1,0 +1,7 @@
+# expect-max-allocs: 50
+# The standard library's `format` builds its result with `out += ...`.
+import time
+
+fn main():
+    val t = time.utc(2026, 11, 14, 16, 5, 9)
+    print(t.format("%Y-%m-%d %H:%M:%S %A %B %j %%"))

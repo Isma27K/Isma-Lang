@@ -1,0 +1,9 @@
+fn main():
+    var s = ""
+    var total = 0
+    for i in 0..2_000_000:
+        val part = f"{i},"
+        total += part.len()
+        s += part
+    print(total)
+    print(s.len())

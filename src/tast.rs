@@ -98,6 +98,10 @@ pub enum Builtin {
     ListLen,
     ListPush,
     ListPop,
+    /// Internal (loop counters): `x + 1` that is known not to overflow.
+    Inc,
+    /// Internal: `a + b` on strings, consuming `a` (appends in place when unique).
+    StrAppendOwned,
 }
 
 #[derive(Debug)]

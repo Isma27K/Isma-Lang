@@ -1,0 +1,17 @@
+# Freeing a very deep structure doesn't overflow the stack.
+
+struct Node:
+    value: Int
+    next: List[Node]
+
+fn main():
+    var head = Node(0, [])
+    for i in 1..1_000_000:
+        head = Node(i, [head])
+    print(head.value)
+    var n = 0
+    var cur = head
+    while cur.next.len() > 0:
+        cur = cur.next[0]
+        n += 1
+    print(n)
