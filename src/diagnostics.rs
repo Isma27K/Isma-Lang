@@ -1,8 +1,15 @@
 use crate::span::Span;
 use ariadne::{Color, Config, IndexType, Label, Report, ReportKind, Source};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Severity {
+    Error,
+    Warning,
+}
+
 #[derive(Debug, Clone)]
 pub struct Diagnostic {
+    pub severity: Severity,
     pub message: String,
     pub span: Span,
     /// Message attached to the primary span (may be empty).
@@ -15,6 +22,7 @@ pub struct Diagnostic {
 impl Diagnostic {
     pub fn error(message: impl Into<String>, span: Span) -> Self {
         Diagnostic {
+            severity: Severity::Error,
             message: message.into(),
             span,
             primary_label: String::new(),
@@ -22,6 +30,14 @@ impl Diagnostic {
             notes: Vec::new(),
             help: None,
         }
+    }
+
+    pub fn warning(message: impl Into<String>, span: Span) -> Self {
+        Diagnostic { severity: Severity::Warning, ..Diagnostic::error(message, span) }
+    }
+
+    pub fn is_error(&self) -> bool {
+        self.severity == Severity::Error
     }
 
     pub fn with_primary(mut self, msg: impl Into<String>) -> Self {
@@ -51,14 +67,17 @@ pub fn render(diags: &[Diagnostic], path: &str, src: &str, color: bool) -> Strin
     let path = path.to_string();
     for d in diags {
         let config = Config::default().with_index_type(IndexType::Byte).with_color(color);
-        let primary_color = Color::Red;
+        let (kind, primary_color) = match d.severity {
+            Severity::Error => (ReportKind::Error, Color::Red),
+            Severity::Warning => (ReportKind::Warning, Color::Yellow),
+        };
         let secondary_color = Color::Blue;
         let span = clamp(d.span, src);
         let mut primary = Label::new((path.clone(), span.range())).with_color(primary_color).with_order(0);
         if !d.primary_label.is_empty() {
             primary = primary.with_message(&d.primary_label);
         }
-        let mut report = Report::build(ReportKind::Error, (path.clone(), span.range()))
+        let mut report = Report::build(kind, (path.clone(), span.range()))
             .with_config(config)
             .with_message(&d.message)
             .with_label(primary);

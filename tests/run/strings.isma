@@ -1,6 +1,6 @@
 fn repeat(s: String, n: Int) -> String:
     var out = ""
-    for i in 0..n:
+    for _ in 0..n:
         out += s
     return out
 

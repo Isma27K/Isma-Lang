@@ -1,8 +1,10 @@
 //! Semantic analysis: name resolution, strict type checking, mutability,
-//! definite-return analysis. Produces the typed AST.
+//! definite-return analysis and lints. Produces the typed AST, plus the
+//! editor information (`IdeInfo`) the language server needs.
 
 use crate::ast::*;
 use crate::diagnostics::Diagnostic;
+use crate::ide::*;
 use crate::span::Span;
 use crate::tast::*;
 use crate::types::*;
@@ -25,6 +27,23 @@ struct LocalBinding {
     span: Span,
 }
 
+/// Per-local facts for lints (indexed by `LocalId`).
+struct LocalMeta {
+    name: String,
+    span: Span,
+    kind: LocalKind,
+    used: bool,
+    reassigned: bool,
+}
+
+pub struct Analysis {
+    /// `Some` when there are no errors (warnings are fine).
+    pub program: Option<TProgram>,
+    /// Errors and warnings.
+    pub diagnostics: Vec<Diagnostic>,
+    pub ide: IdeInfo,
+}
+
 pub struct Checker {
     structs: Vec<TStruct>,
     struct_spans: Vec<Span>,
@@ -38,9 +57,24 @@ pub struct Checker {
     scopes: Vec<HashMap<String, LocalBinding>>,
     loop_depth: usize,
     ret_ty: Type,
+    // editor support + lints
+    ide: IdeInfo,
+    local_meta: Vec<LocalMeta>,
+    field_spans: Vec<Vec<Span>>,
+    pending_struct_hovers: Vec<(Span, StructId)>,
 }
 
-pub fn check(program: &Program) -> Result<TProgram, Vec<Diagnostic>> {
+/// Type-check: `Ok((program, warnings))` or `Err(errors and warnings)`.
+pub fn check(program: &Program) -> Result<(TProgram, Vec<Diagnostic>), Vec<Diagnostic>> {
+    let a = analyze(program);
+    match a.program {
+        Some(p) => Ok((p, a.diagnostics)),
+        None => Err(a.diagnostics),
+    }
+}
+
+/// Type-check and collect everything an editor needs, even when there are errors.
+pub fn analyze(program: &Program) -> Analysis {
     let mut c = Checker {
         structs: Vec::new(),
         struct_spans: Vec::new(),
@@ -53,12 +87,36 @@ pub fn check(program: &Program) -> Result<TProgram, Vec<Diagnostic>> {
         scopes: Vec::new(),
         loop_depth: 0,
         ret_ty: Type::Unit,
+        ide: IdeInfo::default(),
+        local_meta: Vec::new(),
+        field_spans: Vec::new(),
+        pending_struct_hovers: Vec::new(),
     };
     let funcs = c.program(program);
-    if c.diags.is_empty() {
-        Ok(TProgram { structs: c.structs, funcs })
-    } else {
-        Err(c.diags)
+    c.finish_ide();
+    let has_errors = c.diags.iter().any(|d| d.is_error());
+    let program = if has_errors { None } else { Some(TProgram { structs: c.structs, funcs }) };
+    Analysis { program, diagnostics: c.diags, ide: c.ide }
+}
+
+fn fn_full_span(f: &FnDecl) -> Span {
+    let end = f.body.last().map(|s| s.span.end).unwrap_or(f.sig_span.end).max(f.sig_span.end);
+    Span { start: f.sig_span.start, end }
+}
+
+fn local_code(name: &str, ty: &str, kind: LocalKind) -> String {
+    match kind {
+        LocalKind::Param => format!("{name}: {ty}"),
+        LocalKind::Val | LocalKind::LoopVar => format!("val {name}: {ty}"),
+        LocalKind::Var => format!("var {name}: {ty}"),
+    }
+}
+
+fn local_doc(kind: LocalKind) -> Option<String> {
+    match kind {
+        LocalKind::Param => Some("parameter".into()),
+        LocalKind::LoopVar => Some("loop variable".into()),
+        _ => None,
     }
 }
 
@@ -100,6 +158,63 @@ impl Checker {
         t.display(&self.struct_names())
     }
 
+    fn hover(&mut self, span: Span, code: String, doc: Option<String>) {
+        self.ide.hovers.push(HoverInfo { span, code, doc });
+    }
+
+    fn signature(&self, name: &str, params: &[(String, Type)], ret: &Type, is_method: bool) -> String {
+        let ps: Vec<String> = params
+            .iter()
+            .enumerate()
+            .map(|(i, (n, t))| if is_method && i == 0 { "self".to_string() } else { format!("{n}: {}", self.tn(t)) })
+            .collect();
+        let mut s = format!("fn {name}({})", ps.join(", "));
+        if *ret != Type::Unit {
+            s.push_str(&format!(" -> {}", self.tn(ret)));
+        }
+        s
+    }
+
+    fn struct_summary(&self, sid: StructId) -> String {
+        let s = &self.ide.structs[sid];
+        let mut out = format!("struct {}:", s.name);
+        for f in &s.fields {
+            out.push_str(&format!("\n    {} {}: {}", if f.mutable { "var" } else { "val" }, f.name, f.ty));
+        }
+        for &m in &s.methods {
+            out.push_str(&format!("\n    {}", self.ide.functions[m].signature));
+        }
+        if s.fields.is_empty() && s.methods.is_empty() {
+            out.push_str("\n    pass");
+        }
+        out
+    }
+
+    fn finish_ide(&mut self) {
+        for (span, sid) in std::mem::take(&mut self.pending_struct_hovers) {
+            let code = self.struct_summary(sid);
+            self.hover(span, code, None);
+        }
+    }
+
+    /// Hover + go-to-definition for a use of local `id` at `span`.
+    fn local_use(&mut self, id: LocalId, decl: Span, span: Span) {
+        let m = &self.local_meta[id];
+        let code = local_code(&m.name, &self.tn(&self.locals[id].ty), m.kind);
+        let doc = local_doc(m.kind);
+        self.hover(span, code, doc);
+        self.ide.definitions.push((span, decl));
+    }
+
+    fn field_use(&mut self, sid: StructId, idx: usize, span: Span) {
+        let f = &self.ide.structs[sid].fields[idx];
+        let code = format!("{} {}: {}", if f.mutable { "var" } else { "val" }, f.name, f.ty);
+        let doc = Some(format!("field of `{}`", self.ide.structs[sid].name));
+        let def = self.field_spans[sid][idx];
+        self.hover(span, code, doc);
+        self.ide.definitions.push((span, def));
+    }
+
     // ---------- declarations ----------
 
     fn program(&mut self, program: &Program) -> Vec<TFunc> {
@@ -123,6 +238,22 @@ impl Checker {
                 self.structs.push(TStruct { name: name.clone(), fields: Vec::new() });
                 self.struct_spans.push(s.name.span);
                 self.struct_index.insert(name.clone(), id);
+                let end = s
+                    .fields
+                    .iter()
+                    .map(|f| f.ty.span.end)
+                    .chain(s.methods.iter().map(|m| fn_full_span(m).end))
+                    .max()
+                    .unwrap_or(s.name.span.end);
+                self.ide.structs.push(StructSymbol {
+                    name: name.clone(),
+                    name_span: s.name.span,
+                    full: Span { start: s.name.span.start, end },
+                    fields: Vec::new(),
+                    methods: Vec::new(),
+                });
+                self.field_spans.push(Vec::new());
+                self.pending_struct_hovers.push((s.name.span, id));
             }
         }
 
@@ -147,6 +278,16 @@ impl Checker {
                         }
                         seen.insert(&f.name.name, f.name.span);
                         let ty = self.resolve_type(&f.ty);
+                        let tn = self.tn(&ty);
+                        self.ide.structs[sid].fields.push(FieldSymbol {
+                            name: f.name.name.clone(),
+                            ty: tn.clone(),
+                            mutable: f.mutable,
+                            span: f.name.span,
+                        });
+                        self.field_spans[sid].push(f.name.span);
+                        let kw = if f.mutable { "var" } else { "val" };
+                        self.hover(f.name.span, format!("{kw} {}: {tn}", f.name.name), Some(format!("field of `{}`", s.name.name)));
                         fields.push(TField { name: f.name.name.clone(), ty, mutable: f.mutable });
                     }
                     self.structs[sid].fields = fields;
@@ -175,6 +316,7 @@ impl Checker {
                         }
                         let fid = self.declare_fn(m, Some(sid));
                         self.methods.insert((sid, m.name.name.clone()), fid);
+                        self.ide.structs[sid].methods.push(fid);
                         bodies.push((m, Some(sid)));
                     }
                 }
@@ -262,6 +404,16 @@ impl Checker {
             None if f.name.name == "main" => ("main".into(), "isma_main".into()),
             None => (f.name.name.clone(), format!("isma_fn_{}", f.name.name)),
         };
+        let sig = self.signature(&f.name.name, &params, &ret, owner.is_some());
+        let doc = owner.map(|sid| format!("method of `{}`", self.structs[sid].name));
+        self.hover(f.name.span, sig.clone(), doc);
+        self.ide.functions.push(FnSymbol {
+            name: f.name.name.clone(),
+            signature: sig,
+            name_span: f.name.span,
+            full: fn_full_span(f),
+            owner,
+        });
         let id = self.funcs.len();
         self.funcs.push(FuncSig { name, symbol, params, ret, span: f.name.span });
         id
@@ -282,6 +434,9 @@ impl Checker {
                 true
             }
         };
+        if let Some((_, doc)) = BUILTIN_TYPES.iter().find(|(n, _)| *n == name) {
+            self.hover(t.name.span, name.to_string(), Some(doc.to_string()));
+        }
         match name {
             "Int" | "Float" | "Bool" | "String" => {
                 if !expect_args(self, 0) {
@@ -303,6 +458,8 @@ impl Checker {
             }
             _ => {
                 if let Some(&sid) = self.struct_index.get(name) {
+                    self.ide.definitions.push((t.name.span, self.struct_spans[sid]));
+                    self.pending_struct_hovers.push((t.name.span, sid));
                     if !expect_args(self, 0) {
                         return Type::Error;
                     }
@@ -331,6 +488,7 @@ impl Checker {
 
     fn fn_body(&mut self, f: &FnDecl, owner: Option<StructId>, fid: FuncId) -> TFunc {
         self.locals.clear();
+        self.local_meta.clear();
         self.scopes = vec![HashMap::new()];
         self.loop_depth = 0;
         let sig_params: Vec<(String, Type)> = self.funcs[fid].params.clone();
@@ -342,7 +500,7 @@ impl Checker {
             } else {
                 f.params[i - owner.is_some() as usize].name.span
             };
-            let id = self.new_local(name, ty.clone());
+            let id = self.new_local(name, ty.clone(), span, LocalKind::Param);
             self.scopes[0].insert(name.clone(), LocalBinding { id, mutable: false, span });
             params.push(id);
         }
@@ -356,6 +514,7 @@ impl Checker {
                     .with_help("add a `return` at the end of the function"),
             );
         }
+        self.lint_locals();
         let sig = &self.funcs[fid];
         TFunc {
             name: sig.name.clone(),
@@ -368,12 +527,54 @@ impl Checker {
         }
     }
 
-    fn new_local(&mut self, name: &str, ty: Type) -> LocalId {
+    fn new_local(&mut self, name: &str, ty: Type, span: Span, kind: LocalKind) -> LocalId {
+        if name != "_" {
+            let tn = self.tn(&ty);
+            self.ide.locals.push(LocalSymbol { name: name.to_string(), ty: tn.clone(), decl: span, kind });
+            self.hover(span, local_code(name, &tn, kind), local_doc(kind));
+        }
+        self.local_meta.push(LocalMeta { name: name.to_string(), span, kind, used: false, reassigned: false });
         self.locals.push(TLocal { name: name.to_string(), ty });
         self.locals.len() - 1
     }
 
-    fn declare_local(&mut self, name: &Ident, ty: Type, mutable: bool) -> LocalId {
+    /// Warnings: unused locals, and `var`s that are never reassigned.
+    fn lint_locals(&mut self) {
+        let metas = std::mem::take(&mut self.local_meta);
+        for (id, m) in metas.iter().enumerate() {
+            if m.name.starts_with('_') || m.name == "self" {
+                continue;
+            }
+            if !m.used {
+                let (what, help) = match m.kind {
+                    LocalKind::Param => ("parameter", format!("if this is intentional, prefix it with an underscore: `_{}`", m.name)),
+                    LocalKind::LoopVar => ("loop variable", "if you only need the repetition, write `for _ in ...`".to_string()),
+                    _ => ("variable", format!("remove it, or prefix it with an underscore: `_{}`", m.name)),
+                };
+                self.diags.push(
+                    Diagnostic::warning(format!("unused {what} `{}`", m.name), m.span)
+                        .with_primary(format!("`{}` is never used", m.name))
+                        .with_help(help),
+                );
+            } else if m.kind == LocalKind::Var && !m.reassigned {
+                let mut d = Diagnostic::warning(format!("`{}` is declared `var` but never reassigned", m.name), m.span)
+                    .with_primary("never reassigned")
+                    .with_help(format!("use `val {}` instead", m.name));
+                if matches!(self.locals[id].ty, Type::List(_) | Type::Struct(_)) {
+                    d = d.with_note("`val` only stops rebinding the name; you can still change the contents (`push`, field assignment)");
+                }
+                self.diags.push(d);
+            }
+        }
+        self.local_meta = metas;
+    }
+
+    fn declare_local(&mut self, name: &Ident, ty: Type, kind: LocalKind) -> LocalId {
+        let mutable = kind == LocalKind::Var;
+        if name.name == "_" {
+            // `_` is a throwaway name: never visible, may be declared repeatedly.
+            return self.new_local("_", ty, name.span, kind);
+        }
         if let Some(prev) = self.scopes.last().unwrap().get(&name.name) {
             let prev_span = prev.span;
             self.err(
@@ -386,7 +587,7 @@ impl Checker {
                     }),
             );
         }
-        let id = self.new_local(&name.name, ty);
+        let id = self.new_local(&name.name, ty, name.span, kind);
         self.scopes.last_mut().unwrap().insert(name.name.clone(), LocalBinding { id, mutable, span: name.span });
         id
     }
@@ -399,7 +600,25 @@ impl Checker {
         if new_scope {
             self.scopes.push(HashMap::new());
         }
-        let out = stmts.iter().filter_map(|s| self.stmt(s)).collect();
+        let mut out = Vec::new();
+        let mut ended_at: Option<Span> = None;
+        let mut warned = false;
+        for s in stmts {
+            if let (Some(end), false) = (ended_at, warned) {
+                warned = true;
+                self.diags.push(
+                    Diagnostic::warning("unreachable code", s.span)
+                        .with_primary("this code will never run")
+                        .with_label(end, "any code after this is unreachable"),
+                );
+            }
+            if let Some(t) = self.stmt(s) {
+                if ended_at.is_none() && ends_flow(&t) {
+                    ended_at = Some(s.span);
+                }
+                out.push(t);
+            }
+        }
         if new_scope {
             self.scopes.pop();
         }
@@ -435,14 +654,19 @@ impl Checker {
                             .with_primary("this expression produces no value"),
                     );
                 }
-                let ty = match declared {
+                let ty = match declared.clone() {
                     Some(d) => {
                         self.expect_type(&v, &d, ty.as_ref().map(|t| t.span));
                         d
                     }
                     None => v.ty.clone(),
                 };
-                let id = self.declare_local(name, ty, *mutable);
+                if declared.is_none() && name.name != "_" && !ty.is_error() {
+                    let hint = format!(": {}", self.tn(&ty));
+                    self.ide.inlay_hints.push((name.span.end, hint));
+                }
+                let kind = if *mutable { LocalKind::Var } else { LocalKind::Val };
+                let id = self.declare_local(name, ty, kind);
                 TStmt::Let(id, v)
             }
             StmtKind::Assign { target, op, value } => self.assign(target, *op, value, s.span)?,
@@ -491,7 +715,7 @@ impl Checker {
                         }
                     }
                     self.scopes.push(HashMap::new());
-                    let v = self.declare_local(var, Type::Int, false);
+                    let v = self.declare_local(var, Type::Int, LocalKind::LoopVar);
                     self.loop_depth += 1;
                     let b = self.block(body, true);
                     self.loop_depth -= 1;
@@ -517,7 +741,11 @@ impl Checker {
                         }
                     };
                     self.scopes.push(HashMap::new());
-                    let v = self.declare_local(var, elem, false);
+                    if var.name != "_" && !elem.is_error() {
+                        let hint = format!(": {}", self.tn(&elem));
+                        self.ide.inlay_hints.push((var.span.end, hint));
+                    }
+                    let v = self.declare_local(var, elem, LocalKind::LoopVar);
                     self.loop_depth += 1;
                     let b = self.block(body, true);
                     self.loop_depth -= 1;
@@ -572,6 +800,11 @@ impl Checker {
                     return None;
                 };
                 let (id, mutable, decl_span) = (b.id, b.mutable, b.span);
+                self.local_use(id, decl_span, target.span);
+                self.local_meta[id].reassigned = true;
+                if op.is_some() {
+                    self.local_meta[id].used = true;
+                }
                 if !mutable {
                     self.err(
                         Diagnostic::error(format!("cannot assign twice to immutable variable `{name}`"), target.span)
@@ -593,6 +826,7 @@ impl Checker {
                             return None;
                         };
                         let f = self.structs[sid].fields[idx].clone();
+                        self.field_use(sid, idx, field.span);
                         if !f.mutable {
                             let sname = self.structs[sid].name.clone();
                             self.err(
@@ -723,6 +957,12 @@ impl Checker {
     }
 
     fn expr(&mut self, e: &Expr, expected: Option<&Type>) -> TExpr {
+        let t = self.expr_inner(e, expected);
+        self.ide.expr_types.push((e.span, t.ty.clone()));
+        t
+    }
+
+    fn expr_inner(&mut self, e: &Expr, expected: Option<&Type>) -> TExpr {
         let span = e.span;
         match &e.kind {
             ExprKind::Int(v) => Self::mk(TExprKind::Int(*v), Type::Int, span),
@@ -745,7 +985,9 @@ impl Checker {
             }
             ExprKind::Name(name) => {
                 if let Some(b) = self.lookup(name) {
-                    let id = b.id;
+                    let (id, decl) = (b.id, b.span);
+                    self.local_use(id, decl, span);
+                    self.local_meta[id].used = true;
                     return Self::mk(TExprKind::Local(id), self.locals[id].ty.clone(), span);
                 }
                 let d = if self.func_index.contains_key(name) || BUILTINS.contains(&name.as_str()) {
@@ -806,6 +1048,7 @@ impl Checker {
                         match self.structs[sid].fields.iter().position(|f| f.name == field.name) {
                             Some(idx) => {
                                 let ty = self.structs[sid].fields[idx].ty.clone();
+                                self.field_use(sid, idx, field.span);
                                 Self::mk(TExprKind::Field(Box::new(t), sid, idx), ty, span)
                             }
                             None => {
@@ -1044,6 +1287,9 @@ impl Checker {
                     return Self::error_expr(span);
                 }
                 if let Some(&fid) = self.func_index.get(name) {
+                    let code = self.ide.functions[fid].signature.clone();
+                    self.hover(callee.span, code, None);
+                    self.ide.definitions.push((callee.span, self.funcs[fid].span));
                     let params = self.funcs[fid].params.clone();
                     let ret = self.funcs[fid].ret.clone();
                     let what = format!("function `{name}`");
@@ -1053,6 +1299,8 @@ impl Checker {
                     };
                 }
                 if let Some(&sid) = self.struct_index.get(name) {
+                    self.pending_struct_hovers.push((callee.span, sid));
+                    self.ide.definitions.push((callee.span, self.struct_spans[sid]));
                     let params: Vec<(String, Type)> = self.structs[sid].fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect();
                     let what = format!("struct `{name}`");
                     return match self.match_args(&what, &params, args, span) {
@@ -1061,6 +1309,9 @@ impl Checker {
                     };
                 }
                 if BUILTINS.contains(&name.as_str()) {
+                    if let Some((code, doc)) = builtin_function(name) {
+                        self.hover(callee.span, code.to_string(), Some(doc.to_string()));
+                    }
                     return self.builtin_call(name, args, span);
                 }
                 let mut d = Diagnostic::error(format!("cannot find function `{name}` in this scope"), callee.span).with_primary("not found");
@@ -1168,6 +1419,12 @@ impl Checker {
     fn method_call(&mut self, recv: TExpr, method: &Ident, args: &[Arg], span: Span) -> TExpr {
         let m = method.name.as_str();
         let rty = recv.ty.clone();
+        if !matches!(rty, Type::Struct(_) | Type::Error) {
+            let tn = self.tn(&rty);
+            if let Some(b) = builtin_methods(&rty, &tn, &|t| self.tn(t)).into_iter().find(|b| b.name == m) {
+                self.hover(method.span, b.signature, Some(format!("{} (on `{tn}`)", b.doc)));
+            }
+        }
         let what = format!("method `{}`", m);
         let simple = |c: &mut Checker, recv: TExpr, b: Builtin, ret: Type, args: &[Arg]| -> TExpr {
             if !c.arity(args, 0, &what, span) {
@@ -1217,6 +1474,10 @@ impl Checker {
                 let sid = *sid;
                 match self.methods.get(&(sid, m.to_string())) {
                     Some(&fid) => {
+                        let code = self.ide.functions[fid].signature.clone();
+                        let doc = Some(format!("method of `{}`", self.structs[sid].name));
+                        self.hover(method.span, code, doc);
+                        self.ide.definitions.push((method.span, self.funcs[fid].span));
                         let params = self.funcs[fid].params[1..].to_vec();
                         let ret = self.funcs[fid].ret.clone();
                         let what = format!("method `{}`", self.funcs[fid].name);
@@ -1286,6 +1547,17 @@ fn stmt_diverges(s: &TStmt) -> bool {
         }
         TStmt::While { cond, body } => matches!(cond.kind, TExprKind::Bool(true)) && !contains_break(body),
         _ => false,
+    }
+}
+
+/// Does control never continue to the next statement (for unreachable-code lints)?
+fn ends_flow(s: &TStmt) -> bool {
+    match s {
+        TStmt::Break | TStmt::Continue => true,
+        TStmt::If { branches, else_block: Some(eb) } => {
+            branches.iter().all(|(_, b)| b.iter().any(ends_flow)) && eb.iter().any(ends_flow)
+        }
+        other => stmt_diverges(other),
     }
 }
 

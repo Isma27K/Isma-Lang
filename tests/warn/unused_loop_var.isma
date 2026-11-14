@@ -1,0 +1,4 @@
+# expect-warning: unused loop variable `i`
+fn main():
+    for i in 0..3:
+        print("hi")

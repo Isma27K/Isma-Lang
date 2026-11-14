@@ -1,0 +1,5 @@
+# expect-warning: `xs` is declared `var` but never reassigned
+fn main():
+    var xs = [1, 2]
+    xs.push(3)
+    print(xs.len())

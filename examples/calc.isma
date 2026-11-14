@@ -1,6 +1,6 @@
 # Reads numbers from stdin until an empty line, then prints stats.
 fn main():
-    var nums: List[Float] = []
+    val nums: List[Float] = []
     print("Enter numbers, one per line (empty line to finish):")
     while true:
         val line = input()

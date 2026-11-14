@@ -1,0 +1,3 @@
+# expect-warning: unused variable `total`
+fn main():
+    val total = 5

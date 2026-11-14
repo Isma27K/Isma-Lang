@@ -183,3 +183,92 @@ fn shebang_scripts_run_directly() {
     assert_eq!(String::from_utf8_lossy(&out.stdout), "hi 1\n");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn lint_warnings() {
+    run_all(cases("warn"), |f| {
+        let want = directive(f, "expect-warning");
+        let out = isma(&["check", f.to_str().unwrap()]);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if !out.status.success() {
+            return Err(format!("{}: warnings must not fail compilation:\n{stderr}", f.display()));
+        }
+        if !stderr.contains(&want) || !stderr.contains("Warning") {
+            return Err(format!("{}: expected warning containing `{want}`, got:\n{stderr}", f.display()));
+        }
+        Ok(())
+    });
+}
+
+#[test]
+fn underscore_silences_lints_and_can_repeat() {
+    let dir = scratch("underscore");
+    let f = dir.join("u.isma");
+    std::fs::write(&f, "fn main():\n    for _ in 0..2:\n        print(1)\n    val _ = 5\n    val _ = 6\n    val _unused = 7\n").unwrap();
+    let out = isma(&["check", f.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(out.stderr.is_empty(), "expected no warnings: {}", String::from_utf8_lossy(&out.stderr));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Talk to `isma lsp` over stdio exactly like an editor would.
+#[test]
+fn language_server_protocol_roundtrip() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::process::Stdio;
+
+    let mut child = Command::new(ISMA).arg("lsp").stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    let mut send = |msg: serde_json::Value| {
+        let body = msg.to_string();
+        write!(stdin, "Content-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+        stdin.flush().unwrap();
+    };
+    let mut recv = || -> serde_json::Value {
+        let mut len = 0;
+        loop {
+            let mut line = String::new();
+            stdout.read_line(&mut line).unwrap();
+            let line = line.trim();
+            if line.is_empty() {
+                break;
+            }
+            if let Some(v) = line.strip_prefix("Content-Length: ") {
+                len = v.parse().unwrap();
+            }
+        }
+        let mut buf = vec![0; len];
+        stdout.read_exact(&mut buf).unwrap();
+        serde_json::from_slice(&buf).unwrap()
+    };
+
+    let uri = "file:///tmp/demo.isma";
+    let text = "fn main():\n    val n = 1 + 2.0\n    val unused = 3\n";
+    send(serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"capabilities": {}}}));
+    let init = recv();
+    assert!(init["result"]["capabilities"]["hoverProvider"].as_bool().unwrap());
+    send(serde_json::json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}));
+    send(serde_json::json!({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+        "textDocument": {"uri": uri, "languageId": "isma", "version": 1, "text": text}}}));
+    let diags = recv();
+    assert_eq!(diags["method"], "textDocument/publishDiagnostics");
+    let list = diags["params"]["diagnostics"].as_array().unwrap();
+    let messages: Vec<&str> = list.iter().map(|d| d["message"].as_str().unwrap()).collect();
+    assert!(messages.iter().any(|m| m.contains("cannot be applied to `Int` and `Float`")), "{messages:?}");
+    assert!(messages.iter().any(|m| m.contains("unused variable `unused`")), "{messages:?}");
+    // the error is on line 1 (0-based), at `1 + 2.0`
+    let err = list.iter().find(|d| d["severity"] == 1).unwrap();
+    assert_eq!(err["range"]["start"], serde_json::json!({"line": 1, "character": 12}));
+
+    send(serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "textDocument/hover", "params": {
+        "textDocument": {"uri": uri}, "position": {"line": 2, "character": 9}}}));
+    let hover = recv();
+    assert!(hover["result"]["contents"]["value"].as_str().unwrap().contains("val unused: Int"), "{hover}");
+
+    send(serde_json::json!({"jsonrpc": "2.0", "id": 3, "method": "shutdown", "params": null}));
+    assert_eq!(recv()["id"], 3);
+    send(serde_json::json!({"jsonrpc": "2.0", "method": "exit", "params": null}));
+    assert!(child.wait().unwrap().success());
+}

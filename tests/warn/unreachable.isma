@@ -1,0 +1,6 @@
+# expect-warning: unreachable code
+fn f() -> Int:
+    return 1
+    print("never")
+fn main():
+    print(f())

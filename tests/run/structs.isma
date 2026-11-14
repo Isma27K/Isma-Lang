@@ -33,7 +33,7 @@ fn main():
     b.scale(0.5)
     print(f"scaled = {b.show()}")
 
-    var p = Particle(name="dust", pos=Vec2(0.0, 0.0), vel=Vec2(1.5, 2.0))
+    val p = Particle(name="dust", pos=Vec2(0.0, 0.0), vel=Vec2(1.5, 2.0))
     for step in 1..=3:
         p.pos = p.pos.add(p.vel)
         print(f"{p.name} step {step}: {p.pos.show()}")

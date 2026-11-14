@@ -1,7 +1,7 @@
 # Sieve of Eratosthenes over a List[Bool].
 fn sieve(limit: Int) -> List[Int]:
-    var is_prime: List[Bool] = []
-    for i in 0..=limit:
+    val is_prime: List[Bool] = []
+    for _ in 0..=limit:
         is_prime.push(true)
     is_prime[0] = false
     is_prime[1] = false
@@ -15,7 +15,7 @@ fn sieve(limit: Int) -> List[Int]:
                 j += i
         i += 1
 
-    var primes: List[Int] = []
+    val primes: List[Int] = []
     for n in 0..=limit:
         if is_prime[n]:
             primes.push(n)

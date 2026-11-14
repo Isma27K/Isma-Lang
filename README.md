@@ -35,11 +35,30 @@ $ isma run demo.isma
 You need Rust (to build the compiler) and clang. Isma uses clang to produce native code, and looks for it in `$ISMA_CC`, then `PATH`, then `/usr/lib/llvm-*/bin`.
 
 ```bash
-./install.sh                         # builds and installs to ~/.local/bin/isma
-PREFIX=/usr/local sudo -E ./install.sh   # or system-wide
-./install.sh --uninstall             # removes the binary and the cache
+./install.sh            # interactive: [1] default or [2] custom
+./install.sh -y         # default install, no questions asked
+./install.sh --dir DIR  # install into DIR, no questions asked
 ```
-`cargo install --path .` also works; that puts `isma` in `~/.cargo/bin`.
+
+- **Default** installs to `~/.local/bin`, adds it to your PATH if needed, and runs a self-test that compiles and runs a hello-world program.
+- **Custom** asks for the directory (`~/.local/bin`, `/usr/local/bin`, `~/.cargo/bin`, or any path you type), whether to edit your PATH, and whether to run the self-test.
+- If the target directory needs root, the installer asks for your sudo password just for copying the binary. Never run the script itself with `sudo`.
+- PATH changes go into your shell config (`~/.bashrc`, `~/.zshrc`, `~/.profile` or a fish `conf.d` file) between `# >>> isma >>>` markers, so they can be removed cleanly.
+
+## Uninstall
+
+```bash
+./uninstall.sh          # interactive: [1] wipe everything or [2] pick targets
+./uninstall.sh -y       # wipe everything, no questions asked
+~/.local/share/isma/uninstall.sh   # same script, still there if the repo is gone
+```
+
+The uninstaller finds every Isma binary, the compile cache, the PATH entries and the install manifest, then shows them as numbered targets. It only deletes things Isma created:
+- a binary named `isma` is removed only if it really is Isma (it checks `--version`);
+- a cache or data folder containing anyone else's files is skipped;
+- your source code is never touched.
+
+Flags for both scripts: `--no-anim` (no animations). Setting `NO_COLOR=1` turns off colors. The uninstaller also takes `--keep-cache`, and the installer takes `--no-path` and `--no-test`. Colors and animations switch off automatically when the output isn't a terminal.
 
 ## Usage: just like Python
 
@@ -250,7 +269,8 @@ The pieces in more detail:
 src/            compiler (lexer, parser, checker, codegen, driver, CLI)
 runtime/        C runtime linked into every program
 examples/       hello, fib, fizzbuzz, structs, primes_sieve, sort, collatz, guess, calc
-install.sh      installs `isma` onto your PATH
+install.sh      installs `isma` (default or custom)
+uninstall.sh    removes it again (wipe all or pick targets)
 tests/run/      programs + expected stdout
 tests/fail/     programs that must not compile (`# expect-error: ...`)
 tests/panic/    programs that must panic (`# expect-panic: ...`)

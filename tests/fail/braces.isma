@@ -1,0 +1,3 @@
+# expect-error: Isma uses `:` and indentation for blocks, not `{`
+fn main(){
+    print(1)

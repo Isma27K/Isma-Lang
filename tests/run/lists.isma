@@ -9,7 +9,7 @@ fn sum(xs: List[Int]) -> Int:
     return total
 
 fn reverse(xs: List[Int]) -> List[Int]:
-    var out: List[Int] = []
+    val out: List[Int] = []
     var i = xs.len() - 1
     while i >= 0:
         out.push(xs[i])
@@ -17,7 +17,7 @@ fn reverse(xs: List[Int]) -> List[Int]:
     return out
 
 fn main():
-    var xs = [5, 3, 8]
+    val xs = [5, 3, 8]
     xs.push(1)
     xs[0] = 10
     xs[1] += 4
@@ -33,9 +33,9 @@ fn main():
     print(xs.len())
 
     # nested lists
-    var grid: List[List[Int]] = []
+    val grid: List[List[Int]] = []
     for i in 0..3:
-        var row: List[Int] = []
+        val row: List[Int] = []
         for j in 0..3:
             row.push(i * 3 + j)
         grid.push(row)
@@ -49,7 +49,7 @@ fn main():
         print(f"{it.name}: {it.qty}")
 
     # growth
-    var big: List[Int] = []
+    val big: List[Int] = []
     for i in 0..100000:
         big.push(i)
     print(sum(big))

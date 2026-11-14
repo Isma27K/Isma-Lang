@@ -39,11 +39,11 @@ fn main():
 
     # ranges: empty, inclusive, negative
     var s = 0
-    for i in 5..5:
+    for _ in 5..5:
         s += 100
     for i in -3..=3:
         s += i
-    for i in 3..0:
+    for _ in 3..0:
         s += 1000
     print(f"s = {s}")
 

@@ -451,6 +451,28 @@ impl<'a> Lexer<'a> {
             (b'=', _) => (Tok::Assign, 1),
             (b'<', _) => (Tok::Lt, 1),
             (b'>', _) => (Tok::Gt, 1),
+            (b'{', _) | (b'}', _) => {
+                self.pos += 1;
+                // Treat `{` at the end of a line as `:` so the rest still parses.
+                let rest = &self.text[self.pos..];
+                let line_rest = rest.split('\n').next().unwrap_or("");
+                let at_eol = line_rest.trim().is_empty() || line_rest.trim_start().starts_with('#');
+                let span = self.span(start, self.pos);
+                let d = if c == b'{' {
+                    if at_eol {
+                        self.push(Tok::Colon, start, self.pos);
+                    }
+                    Diagnostic::error("Isma uses `:` and indentation for blocks, not `{`", span)
+                        .with_primary("replace this with `:`")
+                        .with_help("end the line with `:` and indent the block below it by 4 spaces:\n\nwhile x < 10:\n    x += 1")
+                } else {
+                    Diagnostic::error("Isma blocks end by un-indenting, not with `}`", span)
+                        .with_primary("remove this")
+                        .with_help("delete the `}`; a block ends where the indentation goes back")
+                };
+                self.diags.push(d);
+                return;
+            }
             _ => {
                 let ch = self.take_char();
                 let msg = match ch {

@@ -12,6 +12,7 @@ USAGE:
     isma run [--debug] <file.isma> [args...]
     isma build <file.isma> [-o <output>] [--debug] [--emit-llvm]
     isma check <file.isma>
+    isma lsp                             Language server (used by editors)
     isma clean                           Delete the compile cache
 
 OPTIONS:
@@ -53,7 +54,7 @@ struct Cli {
     program_args: Vec<String>,
 }
 
-const COMMANDS: &[&str] = &["run", "build", "check", "clean", "help", "version", "-h", "--help", "-V", "--version"];
+const COMMANDS: &[&str] = &["run", "build", "check", "clean", "lsp", "help", "version", "-h", "--help", "-V", "--version"];
 
 fn parse_args(args: &[String]) -> Result<Cli, String> {
     let mut cli =
@@ -102,6 +103,10 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
             println!("isma {}", env!("CARGO_PKG_VERSION"));
             return Ok(ExitCode::SUCCESS);
         }
+        "lsp" => {
+            isma::lsp::run().map_err(|e| format!("language server failed: {e}"))?;
+            return Ok(ExitCode::SUCCESS);
+        }
         "clean" => {
             if let Some(dir) = driver::cache_dir() {
                 if dir.exists() {
@@ -121,7 +126,10 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
 
     if cli.command == "check" {
         return match isma::check_source(&src) {
-            Ok(_) => Ok(ExitCode::SUCCESS),
+            Ok((_, warnings)) => {
+                report_warnings(&warnings, &display_path, &src);
+                Ok(ExitCode::SUCCESS)
+            }
             Err(d) => Ok(report(&d, &display_path, &src)),
         };
     }
@@ -136,7 +144,10 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
     let clang = driver::find_clang()?;
     let triple = driver::target_triple(&clang);
     let ir = match isma::compile_to_ir(&src, &display_path, triple.as_deref()) {
-        Ok(ir) => ir,
+        Ok((ir, warnings)) => {
+            report_warnings(&warnings, &display_path, &src);
+            ir
+        }
         Err(d) => return Ok(report(&d, &display_path, &src)),
     };
 
@@ -205,10 +216,33 @@ fn exit_code_of(status: std::process::ExitStatus) -> ExitCode {
     ExitCode::from(1)
 }
 
+fn yellow(s: &str) -> String {
+    if color_enabled() { format!("\x1b[1;33m{s}\x1b[0m") } else { s.to_string() }
+}
+
+fn plural(n: usize, word: &str) -> String {
+    if n == 1 { format!("{n} {word}") } else { format!("{n} {word}s") }
+}
+
+fn render_sorted(diags: &[Diagnostic], path: &str, src: &str) {
+    let mut sorted = diags.to_vec();
+    sorted.sort_by_key(|d| (d.span.start, !d.is_error()));
+    eprint!("{}", diagnostics::render(&sorted, path, src, color_enabled()));
+}
+
+fn report_warnings(warnings: &[Diagnostic], path: &str, src: &str) {
+    if warnings.is_empty() {
+        return;
+    }
+    render_sorted(warnings, path, src);
+    eprintln!("{} `{path}` generated {}", yellow("warning:"), plural(warnings.len(), "warning"));
+}
+
 fn report(diags: &[Diagnostic], path: &str, src: &str) -> ExitCode {
-    eprint!("{}", diagnostics::render(diags, path, src, color_enabled()));
-    let n = diags.len();
-    let plural = if n == 1 { "error" } else { "errors" };
-    eprintln!("{} could not compile `{path}` due to {n} previous {plural}", red("error:"));
+    render_sorted(diags, path, src);
+    let errors = diags.iter().filter(|d| d.is_error()).count();
+    let warnings = diags.len() - errors;
+    let extra = if warnings > 0 { format!("; {} emitted", plural(warnings, "warning")) } else { String::new() };
+    eprintln!("{} could not compile `{path}` due to {}{extra}", red("error:"), plural(errors, "previous error"));
     ExitCode::from(1)
 }

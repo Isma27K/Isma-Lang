@@ -1,0 +1,5 @@
+# expect-warning: unused parameter `b`
+fn first(a: Int, b: Int) -> Int:
+    return a
+fn main():
+    print(first(1, 2))
