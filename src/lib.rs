@@ -13,6 +13,7 @@ pub mod lower;
 pub mod lsp;
 pub mod mir;
 pub mod parser;
+pub mod patterns;
 pub mod span;
 pub mod stdlib;
 pub mod tast;

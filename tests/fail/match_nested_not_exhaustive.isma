@@ -1,0 +1,16 @@
+# expect-error: `Node(Leaf, _, Node(_, _, _))` is not covered
+enum Tree:
+    Leaf
+    Node(left: Tree, value: Int, right: Tree)
+
+fn depth(t: Tree) -> Int:
+    match t:
+        case Leaf:
+            return 0
+        case Node(Leaf, _, Leaf):
+            return 1
+        case Node(Node(_, _, _), _, _):
+            return 2
+
+fn main():
+    print(depth(Tree.Leaf))

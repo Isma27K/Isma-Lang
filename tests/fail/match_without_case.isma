@@ -1,0 +1,4 @@
+# expect-error: expected `case`
+fn main():
+    match 1:
+        print("one")

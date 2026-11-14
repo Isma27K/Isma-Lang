@@ -223,6 +223,10 @@ impl Server {
         if doc.ide.imports.iter().any(|(m, _)| m == receiver) {
             return Some(doc.ide.module_members(receiver).into_iter().map(member_item).collect());
         }
+        // `Shape.` -> the enum's variants
+        if let Some(e) = doc.ide.structs.iter().find(|s| s.ns == 0 && s.name == receiver && s.variants.is_some()) {
+            return Some(e.variants.iter().flatten().map(variant_item).collect());
+        }
         let mut word_end = off;
         while word_end < text.len() && is_ident(text.as_bytes()[word_end]) {
             word_end += 1;
@@ -300,6 +304,11 @@ impl Server {
             add(&f.name, lt::CompletionItemKind::FUNCTION, Some(f.signature.clone()), f.doc.clone(), "1");
         }
         for s in doc.ide.structs.iter().filter(|s| s.ns == 0) {
+            if let Some(variants) = &s.variants {
+                let names: Vec<&str> = variants.iter().map(|v| v.name.as_str()).collect();
+                add(&s.name, lt::CompletionItemKind::ENUM, Some(format!("enum {}: {}", s.name, names.join(" | "))), s.doc.clone(), "1");
+                continue;
+            }
             let fields: Vec<String> = s.fields.iter().map(|f| format!("{}: {}", f.name, f.ty)).collect();
             add(&s.name, lt::CompletionItemKind::STRUCT, Some(format!("struct {}({})", s.name, fields.join(", "))), None, "1");
         }
@@ -339,11 +348,15 @@ impl Server {
                 .iter()
                 .map(|f| sym(&f.name, Some(f.ty.clone()), lt::SymbolKind::FIELD, f.span, f.span, None))
                 .collect();
+            for v in s.variants.iter().flatten() {
+                children.push(sym(&v.name, Some(v.signature.clone()), lt::SymbolKind::ENUM_MEMBER, v.span, v.span, None));
+            }
             for &m in &s.methods {
                 let f = &ide.functions[m];
                 children.push(sym(&f.name, Some(f.signature.clone()), lt::SymbolKind::METHOD, f.full, f.name_span, None));
             }
-            out.push((s.name_span.start, sym(&s.name, None, lt::SymbolKind::STRUCT, s.full, s.name_span, Some(children))));
+            let kind = if s.variants.is_some() { lt::SymbolKind::ENUM } else { lt::SymbolKind::STRUCT };
+            out.push((s.name_span.start, sym(&s.name, None, kind, s.full, s.name_span, Some(children))));
         }
         for f in ide.functions.iter().filter(|f| f.owner.is_none() && f.ns == 0) {
             out.push((f.full.start, sym(&f.name, Some(f.signature.clone()), lt::SymbolKind::FUNCTION, f.full, f.name_span, None)));
@@ -398,6 +411,19 @@ fn member_item(m: Member) -> lt::CompletionItem {
         documentation: if m.doc.is_empty() { None } else { Some(markdown(&m.doc)) },
         insert_text: Some(insert),
         insert_text_format: Some(format),
+        ..Default::default()
+    }
+}
+
+fn variant_item(v: &VariantSymbol) -> lt::CompletionItem {
+    let has_fields = v.signature.ends_with(')');
+    lt::CompletionItem {
+        label: v.name.clone(),
+        kind: Some(lt::CompletionItemKind::ENUM_MEMBER),
+        detail: Some(v.signature.clone()),
+        documentation: v.doc.as_ref().map(|d| markdown(d)),
+        insert_text: Some(if has_fields { format!("{}($1)", v.name) } else { v.name.clone() }),
+        insert_text_format: Some(if has_fields { lt::InsertTextFormat::SNIPPET } else { lt::InsertTextFormat::PLAIN_TEXT }),
         ..Default::default()
     }
 }

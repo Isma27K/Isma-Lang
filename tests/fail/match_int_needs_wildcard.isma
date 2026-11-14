@@ -1,0 +1,10 @@
+# expect-error: `_` is not covered
+fn word(n: Int) -> String:
+    match n:
+        case 0:
+            return "zero"
+        case 1:
+            return "one"
+
+fn main():
+    print(word(1))

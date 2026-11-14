@@ -12,6 +12,7 @@ Isma reads like Python, checks like Kotlin and compiles to native code. This gui
 - [Functions](#functions)
 - [Control flow](#control-flow)
 - [Structs and methods](#structs-and-methods)
+- [Enums and `match`](#enums-and-match)
 - [Lists](#lists)
 - [Strings and f-strings](#strings-and-f-strings)
 - [Null safety](#null-safety)
@@ -78,6 +79,7 @@ name = "other"           # error: cannot assign twice to immutable variable `nam
 | `String` | Immutable UTF-8. `+` concatenates. |
 | `List[T]` | Growable and bounds-checked. A reference type. |
 | structs | User-defined. A reference type, like Python and Kotlin objects. |
+| enums | User-defined: one of several variants, which may carry data. See [Enums and `match`](#enums-and-match). |
 | `T?` | A `T` or `null`, e.g. `Int?`, `String?`, `User?`. See [Null safety](#null-safety). |
 
 Lists and structs are references: `val b = a` makes `b` point at the same list as `a`. Memory is managed for you, see [Memory](#memory).
@@ -96,7 +98,8 @@ print("n = " + 5)            # error. Write f"n = {5}" or "n = " + 5.to_string()
 
 On top of that:
 - every path through a function with a return type must `return`;
-- `==` only works on `Int`, `Float`, `Bool` and `String`, and on their nullable versions (where `null == null`);
+- `==` only works on `Int`, `Float`, `Bool`, `String` and enums without data, and on their nullable versions (where `null == null`);
+- a `match` must handle every possible value;
 - comparisons don't chain (`a < b < c` is an error);
 - an expression used as a statement must be a call, so a stray `x == 2` on its own line is caught.
 
@@ -114,6 +117,7 @@ Warnings never stop a program from compiling. They point at code that is probabl
 | `` unused import `time` `` | Remove the `import` line |
 | ``unnecessary `?.` `` / `` `?:` `` / `` `!!` `` | The value is never `null` here, often because of a [smart cast](#smart-casts): use `.`, or drop the `?:` or `!!` |
 | `` `n` is never `null`, so this is always `false` `` | Remove the check |
+| ``unreachable `case` `` / `unreachable pattern` | Earlier cases already match everything it would: remove it, or move it up |
 
 ## Functions
 
@@ -172,6 +176,109 @@ acc.owner = "bob"                    # error: cannot assign to immutable field `
 ```
 
 Methods take `self` as their first parameter.
+
+## Enums and `match`
+
+An enum's values are one of several **variants**. A variant can carry data, in named fields like a struct's:
+
+```python
+enum Shape:
+    Circle(radius: Float)
+    Rect(w: Float, h: Float)
+    Empty
+
+    fn area(self) -> Float:                # enums have methods too
+        match self:
+            case Circle(r):
+                return 3.14159 * r * r
+            case Rect(w, h):
+                return w * h
+            case Empty:
+                return 0.0
+
+val shapes = [Shape.Circle(1.0), Shape.Rect(w=2.0, h=3.0), Shape.Empty]
+```
+
+- Build a value with `Shape.Circle(1.0)`, passing the fields by position or by name as for structs. A variant without data is just `Shape.Empty`.
+- Variant fields can't be changed. To read them, take the value apart with `match`.
+- Enums can be recursive: `enum Expr:` with `Num(value: Int)` and `Add(a: Expr, b: Expr)` describes expression trees.
+- An enum whose variants carry no data is just a number underneath:
+
+  ```python
+  enum Color:
+      Red
+      Green
+      Blue
+
+  val c = Color.Green
+  print(c == Color.Green)       # true: `==` works on these
+  print(f"{c}")                 # Green
+  ```
+
+### `match`
+
+`match` tries each `case` from top to bottom and runs the first one that matches. Cases never fall through.
+
+```python
+match command:
+    case Move(Point(0, 0)):                # nested patterns
+        go_home()
+    case Move(Point(x, y)) if x == y:      # a guard: the case only matches if it's true
+        print(f"diagonal {x}")
+    case Move(p):                          # `p` is bound to the field
+        go(p)
+    case Say(text) | Shout(text):          # either one
+        print(text)
+    case Quit:
+        break
+```
+
+| Pattern | Matches |
+|---|---|
+| `_` | anything |
+| `name` (lowercase) | anything, and binds it to `name` |
+| `Circle(r)`, `Shape.Circle(r)` | that variant; each field is matched by its own pattern |
+| `Rect(w, _)`, `Rect(h=height)` | fields by position (all of them) or by name (any of them) |
+| `Circle` | any `Circle`, whatever its fields |
+| `Point(x, 0)` | a struct, field by field |
+| `0`, `-1`, `"quit"`, `true` | that exact value |
+| `null` | `null`. Any other pattern on a `T?` matches only non-null values |
+| `p \| q` | `p` or `q` (both must bind the same names) |
+| `p as name` | `p`, and binds the whole value to `name` |
+
+Floats can't be patterns: bind the value and use a guard, as in `case x if x > 0.5:`.
+
+### Exhaustiveness
+
+Every `match` must handle every value the type allows. The compiler checks, and names what's missing:
+
+```
+Error: this `match` doesn't handle every value: `Rect(_, _)` and `Empty` are not covered
+   ╭─[ shapes.isma:7:11 ]
+   │
+ 7 │     match s:
+   │           ┬
+   │           ╰── this is `Shape`
+   │
+   │ Help: add a case for it:
+   │
+   │       case Rect(_, _):
+   │           ...
+   │
+   │       or end with `case _:` to handle everything else
+───╯
+```
+
+- **Nested patterns are checked too.** A tree match with only `Leaf`, `Node(Leaf, _, Leaf)` and `Node(Node(_, _, _), _, _)` reports that `Node(Leaf, _, Node(_, _, _))` is missing.
+- **Guarded cases don't count**, because the guard might be false.
+- **Numbers and strings need a catch-all** (`_` or a name), since no list of literals can cover them.
+- **Unreachable cases are flagged.** A case that the cases above it already cover gets an "unreachable `case`" warning.
+
+The checker uses the usefulness algorithm from Luc Maranget's *Warnings for pattern matching*, the same one Rust and OCaml use.
+
+Since one case always runs, a function whose cases all `return` needs no `return` after the `match`.
+
+`match` works with [smart casts](#smart-casts). Inside a case that can't match `null`, the matched variable isn't null. After `case null: return`, it isn't null for the rest of the function. A name bound in a case after `case null:` gets the non-null type.
 
 ## Lists
 
@@ -300,7 +407,8 @@ Most of the counting never happens. The compiler (a Perceus-style optimizer, as 
 - **Borrowing.** Parameters are borrowed unless the function keeps them, so calls usually do no counting. Reading `task.name` or looping over `for task in tasks:` does none either, as long as nothing in the loop could replace those values.
 - **Moving.** Passing a value on its last use hands over its reference instead of copying it.
 - **Updating in place.** When a value has a single owner, `s += x` appends to the existing string, so building a string in a loop takes linear time. Likewise `pos = pos.add(vel)` builds the new struct in the old one's memory, so the loop doesn't allocate at all.
-- **Cycles.** A struct that can end up containing itself, such as `struct Node:` with `var children: List[Node]` followed by `n.children.push(n)`, is freed by a small cycle collector. The compiler only enables it for types that can actually form a cycle; strings, `List[Int]` and most structs never pay for it.
+- **Cycles.** A struct that can end up containing itself, such as `struct Node:` with `var children: List[Node]` followed by `n.children.push(n)`, is freed by a small cycle collector. The compiler only enables it for types that can actually form a cycle, which takes a reference that can be replaced after the value is built (a `var` field or a list). Strings, `List[Int]`, immutable trees such as an `enum Expr` and most structs never pay for it.
+- **Enums.** A variant without data is a constant shared by the whole program, so `Shape.Empty` never allocates. An enum without any data (`Color`) is a plain number and isn't counted at all.
 
 To see what's happening:
 
@@ -337,7 +445,7 @@ Available modules: [`time`](time.md).
 
 | Function | |
 |---|---|
-| `print(x)` | Print an `Int`, `Float`, `Bool` or `String`, followed by a newline. A nullable one prints `null` when it is null |
+| `print(x)` | Print an `Int`, `Float`, `Bool`, `String` or enum without data (its variant's name), followed by a newline. A nullable one prints `null` when it is null |
 | `input() -> String` | Read one line from stdin, without the newline |
 | `args() -> List[String]` | Command-line arguments passed to the program |
 | `sqrt(x: Float) -> Float` | Square root |
@@ -366,3 +474,5 @@ Panics cover:
 - **Byte-based strings.** `String.len()` and `substring()` count bytes, and there's no `s[i]` indexing; use `chars()`.
 - **No negative indexing.** `xs[-1]` panics.
 - **No operator overloading.** Compare structs with methods, e.g. `a.equals(b)` or `a.millis_since(b)`.
+- **`match` is a statement.** It doesn't produce a value; assign or `return` inside its cases.
+- **No generic enums yet.** You can't write `Option[T]` yourself (but `T?` covers the most common use).

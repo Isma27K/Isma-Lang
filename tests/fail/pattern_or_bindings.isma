@@ -1,0 +1,12 @@
+# expect-error: every alternative of `|` must bind the same names
+enum Shape:
+    Circle(radius: Float)
+    Rect(w: Float, h: Float)
+    Empty
+
+fn main():
+    match Shape.Empty:
+        case Circle(r) | Empty:
+            print(r)
+        case _:
+            pass

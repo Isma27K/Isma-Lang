@@ -175,6 +175,10 @@ impl Parser {
                     Ok(s) => items.push(Item::Struct(s)),
                     Err(()) => self.synchronize(),
                 },
+                Tok::Enum => match self.enum_decl() {
+                    Ok(e) => items.push(Item::Enum(e)),
+                    Err(()) => self.synchronize(),
+                },
                 Tok::Import => {
                     self.bump();
                     match self.expect_ident("a module name, e.g. `import time`") {
@@ -215,8 +219,8 @@ impl Parser {
                     let span = self.span();
                     let found = self.peek().clone();
                     self.diags.push(
-                        Diagnostic::error(format!("expected `fn` or `struct`, found {found}"), span)
-                            .with_note("only functions and structs may appear at the top level")
+                        Diagnostic::error(format!("expected `fn`, `struct` or `enum`, found {found}"), span)
+                            .with_note("only functions, structs and enums may appear at the top level")
                             .with_help("put statements inside `fn main():`"),
                     );
                     self.synchronize();
@@ -301,6 +305,90 @@ impl Parser {
         }
         self.eat(&Tok::Dedent);
         Ok(StructDecl { name, fields, methods })
+    }
+
+    fn enum_decl(&mut self) -> PResult<EnumDecl> {
+        self.expect(Tok::Enum)?;
+        let name = self.expect_ident("enum name")?;
+        self.expect(Tok::Colon)?;
+        self.expect(Tok::Newline)?;
+        if !self.at(&Tok::Indent) {
+            return self.unexpected("an indented list of variants");
+        }
+        self.bump();
+        let mut variants = Vec::new();
+        let mut methods = Vec::new();
+        while !self.at(&Tok::Dedent) && !self.at(&Tok::Eof) {
+            match self.peek() {
+                Tok::Newline => {
+                    self.bump();
+                }
+                Tok::Pass => {
+                    self.bump();
+                    if self.expect_newline().is_err() {
+                        self.synchronize();
+                    }
+                }
+                Tok::Fn => match self.fn_decl() {
+                    Ok(f) => methods.push(f),
+                    Err(()) => self.synchronize(),
+                },
+                Tok::Ident(_) => match self.variant_decl() {
+                    Ok(v) => variants.push(v),
+                    Err(()) => self.synchronize(),
+                },
+                Tok::Val | Tok::Var => {
+                    let span = self.span();
+                    self.diags.push(
+                        Diagnostic::error("enums don't have fields of their own", span)
+                            .with_help("give the data to a variant: `Circle(radius: Float)`"),
+                    );
+                    self.synchronize();
+                }
+                _ => {
+                    let _ = self.unexpected::<()>("a variant or method");
+                    self.synchronize();
+                }
+            }
+        }
+        self.eat(&Tok::Dedent);
+        Ok(EnumDecl { name, variants, methods })
+    }
+
+    /// `Circle(radius: Float)` or `Empty`
+    fn variant_decl(&mut self) -> PResult<VariantDecl> {
+        let name = self.expect_ident("variant name")?;
+        let mut fields = Vec::new();
+        if self.eat(&Tok::LParen) {
+            while !self.at(&Tok::RParen) {
+                if matches!(self.peek(), Tok::Var | Tok::Val) {
+                    let span = self.span();
+                    return self.error_diag(
+                        Diagnostic::error("variant fields are always immutable", span)
+                            .with_primary("remove this")
+                            .with_note("to change a value, build a new one: `Shape.Circle(r * 2.0)`"),
+                    );
+                }
+                let fname = self.expect_ident("field name")?;
+                if !self.at(&Tok::Colon) {
+                    let span = fname.span;
+                    return self.error_diag(
+                        Diagnostic::error(format!("field `{}` needs a type annotation", fname.name), span)
+                            .with_help(format!("write it as `{}: Int` (or whichever type it is)", fname.name)),
+                    );
+                }
+                self.bump();
+                let ty = self.type_expr()?;
+                fields.push(FieldDecl { name: fname, ty, mutable: false });
+                if !self.eat(&Tok::Comma) {
+                    break;
+                }
+            }
+            self.expect(Tok::RParen)?;
+        }
+        let span = name.span.merge(self.prev_span);
+        self.expect_newline()?;
+        Ok(VariantDecl { name, fields, span })
     }
 
     fn field_decl(&mut self) -> PResult<FieldDecl> {
@@ -395,6 +483,11 @@ impl Parser {
     }
 
     fn stmt(&mut self) -> PResult<Stmt> {
+        if matches!(self.peek(), Tok::Ident(n) if n == "match")
+            && let Some(m) = self.try_match_stmt()
+        {
+            return m;
+        }
         match self.peek() {
             Tok::Val | Tok::Var => self.let_stmt(),
             Tok::If => self.if_stmt(),
@@ -409,9 +502,10 @@ impl Parser {
                 let span = self.span();
                 self.error("nested functions are not supported yet", span)
             }
-            Tok::Struct => {
+            Tok::Struct | Tok::Enum => {
                 let span = self.span();
-                self.error("structs must be declared at the top level", span)
+                let what = if self.at(&Tok::Struct) { "structs" } else { "enums" };
+                self.error(format!("{what} must be declared at the top level"), span)
             }
             Tok::Import => {
                 let span = self.span();
@@ -501,6 +595,176 @@ impl Parser {
         let span = start.merge(self.prev_span);
         self.expect_newline()?;
         Ok(Stmt { kind: StmtKind::Let { mutable, name, ty, value }, span })
+    }
+
+    /// `match` is only a keyword at the start of a `match <value>:` line (as
+    /// in Python), so it can still be used as a name. `None`: not a match.
+    fn try_match_stmt(&mut self) -> Option<PResult<Stmt>> {
+        let (pos, ndiags, prev) = (self.pos, self.diags.len(), self.prev_span);
+        let start = self.bump().span;
+        let looks_like_match = !matches!(
+            self.peek(),
+            Tok::Assign | Tok::PlusEq | Tok::MinusEq | Tok::StarEq | Tok::SlashEq | Tok::PercentEq | Tok::Dot | Tok::Newline | Tok::Eof
+        );
+        let scrutinee = if looks_like_match { self.expr().ok() } else { None };
+        match scrutinee {
+            Some(scrutinee) if self.at(&Tok::Colon) => Some(self.match_body(start, scrutinee)),
+            _ => {
+                self.pos = pos;
+                self.prev_span = prev;
+                self.diags.truncate(ndiags);
+                None
+            }
+        }
+    }
+
+    fn match_body(&mut self, start: Span, scrutinee: Expr) -> PResult<Stmt> {
+        self.expect(Tok::Colon)?;
+        if !self.eat(&Tok::Newline) || !self.at(&Tok::Indent) {
+            let span = self.span();
+            return self.error_diag(
+                Diagnostic::error("expected an indented list of `case`s", span)
+                    .with_help("write each case on its own line:\n\nmatch shape:\n    case Circle(r):\n        print(r)\n    case _:\n        pass"),
+            );
+        }
+        self.bump();
+        let mut arms = Vec::new();
+        while !self.at(&Tok::Dedent) && !self.at(&Tok::Eof) {
+            if self.eat(&Tok::Newline) {
+                continue;
+            }
+            match self.match_arm() {
+                Ok(a) => arms.push(a),
+                Err(()) => self.synchronize(),
+            }
+        }
+        self.eat(&Tok::Dedent);
+        Ok(Stmt { kind: StmtKind::Match { scrutinee, arms }, span: start.merge(self.prev_span) })
+    }
+
+    fn match_arm(&mut self) -> PResult<MatchArm> {
+        if !matches!(self.peek(), Tok::Ident(n) if n == "case") {
+            let span = self.span();
+            let found = self.peek().clone();
+            return self.error_diag(
+                Diagnostic::error(format!("expected `case`, found {found}"), span)
+                    .with_primary("expected `case`")
+                    .with_note("a `match` contains only `case` lines, each with an indented block"),
+            );
+        }
+        let start = self.bump().span;
+        let pattern = self.pattern()?;
+        let guard = if self.eat(&Tok::If) { Some(self.expr()?) } else { None };
+        let span = start.merge(self.prev_span);
+        let body = self.block()?;
+        Ok(MatchArm { pattern, guard, body, span })
+    }
+
+    // ---------- patterns ----------
+
+    /// `p`, `p | q | ...`, optionally followed by `as name`.
+    fn pattern(&mut self) -> PResult<Pattern> {
+        let first = self.closed_pattern()?;
+        let mut p = if self.at(&Tok::Pipe) {
+            let mut alts = vec![first];
+            while self.eat(&Tok::Pipe) {
+                alts.push(self.closed_pattern()?);
+            }
+            let span = alts[0].span.merge(alts.last().unwrap().span);
+            Pattern { kind: PatternKind::Or(alts), span }
+        } else {
+            first
+        };
+        if matches!(self.peek(), Tok::Ident(n) if n == "as") {
+            self.bump();
+            let name = self.expect_ident("a name after `as`")?;
+            let span = p.span.merge(name.span);
+            p = Pattern { kind: PatternKind::As(Box::new(p), name), span };
+        }
+        Ok(p)
+    }
+
+    fn closed_pattern(&mut self) -> PResult<Pattern> {
+        let start = self.span();
+        let kind = match self.peek().clone() {
+            Tok::Ident(n) if n == "_" => {
+                self.bump();
+                PatternKind::Wild
+            }
+            Tok::Ident(_) => {
+                let mut path = vec![self.expect_ident("a pattern")?];
+                while self.eat(&Tok::Dot) {
+                    path.push(self.expect_ident("a name after `.`")?);
+                }
+                if self.eat(&Tok::LParen) {
+                    let mut args = Vec::new();
+                    while !self.at(&Tok::RParen) {
+                        let name = if matches!(self.peek(), Tok::Ident(_)) && matches!(self.peek_nth(1), Tok::Assign) {
+                            let id = self.expect_ident("field name")?;
+                            self.bump();
+                            Some(id)
+                        } else {
+                            None
+                        };
+                        let pat = self.pattern()?;
+                        args.push(PatArg { name, pat });
+                        if !self.eat(&Tok::Comma) {
+                            break;
+                        }
+                    }
+                    self.expect(Tok::RParen)?;
+                    PatternKind::Ctor { path, args: Some(args) }
+                } else if path.len() == 1 && !path[0].name.starts_with(|c: char| c.is_ascii_uppercase()) {
+                    // A lowercase name captures the value; capitalized names are variants.
+                    PatternKind::Bind(path.pop().unwrap())
+                } else {
+                    PatternKind::Ctor { path, args: None }
+                }
+            }
+            Tok::Int(v) => {
+                self.bump();
+                if v > i64::MAX as u64 {
+                    return self.error("integer literal is too large for `Int` (64-bit)", start);
+                }
+                PatternKind::Int(v as i64)
+            }
+            Tok::Minus => {
+                self.bump();
+                match self.peek().clone() {
+                    Tok::Int(v) => {
+                        self.bump();
+                        PatternKind::Int(if v == 1u64 << 63 { i64::MIN } else { -(v as i64) })
+                    }
+                    Tok::Float(v) => {
+                        self.bump();
+                        PatternKind::Float(-v)
+                    }
+                    _ => return self.unexpected("a number after `-`"),
+                }
+            }
+            Tok::Float(v) => {
+                self.bump();
+                PatternKind::Float(v)
+            }
+            Tok::Str(v) => {
+                self.bump();
+                PatternKind::Str(v)
+            }
+            Tok::True | Tok::False => PatternKind::Bool(matches!(self.bump().tok, Tok::True)),
+            Tok::Null => {
+                self.bump();
+                PatternKind::Null
+            }
+            Tok::LParen => {
+                self.bump();
+                let p = self.pattern()?;
+                self.expect(Tok::RParen)?;
+                return Ok(Pattern { kind: p.kind, span: start.merge(self.prev_span) });
+            }
+            Tok::FStr(_) => return self.error("f-strings can't be used as patterns; use a plain string", start),
+            _ => return self.unexpected("a pattern"),
+        };
+        Ok(Pattern { kind, span: start.merge(self.prev_span) })
     }
 
     fn if_stmt(&mut self) -> PResult<Stmt> {
@@ -1001,6 +1265,35 @@ mod tests {
             },
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn enums_and_match() {
+        let p = parse_ok(
+            "enum Shape:\n    Circle(radius: Float)\n    Rect(w: Float, h: Float)\n    Empty\n\n    fn area(self) -> Float:\n        return 0.0\n\nfn main():\n    match s:\n        case Circle(r) if r > 1.0:\n            pass\n        case Shape.Rect(w, h=_) | Empty as e:\n            pass\n        case -1 | \"x\" | null | _:\n            pass\n    val match = 1\n    match += 1\n",
+        );
+        match &p.items[0] {
+            Item::Enum(e) => {
+                assert_eq!(e.variants.len(), 3);
+                assert_eq!(e.variants[1].fields.len(), 2);
+                assert!(e.variants[2].fields.is_empty());
+                assert_eq!(e.methods.len(), 1);
+            }
+            _ => panic!(),
+        }
+        let Item::Fn(f) = &p.items[1] else { panic!() };
+        match &f.body[0].kind {
+            StmtKind::Match { arms, .. } => {
+                assert_eq!(arms.len(), 3);
+                assert!(arms[0].guard.is_some());
+                assert!(matches!(&arms[1].pattern.kind, PatternKind::As(inner, _) if matches!(&inner.kind, PatternKind::Or(a) if a.len() == 2)));
+                assert!(matches!(&arms[2].pattern.kind, PatternKind::Or(a) if a.len() == 4));
+            }
+            other => panic!("{other:?}"),
+        }
+        // `match` is still usable as a name
+        assert!(matches!(f.body[1].kind, StmtKind::Let { .. }));
+        assert!(matches!(f.body[2].kind, StmtKind::Assign { .. }));
     }
 
     #[test]

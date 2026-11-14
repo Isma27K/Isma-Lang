@@ -1,0 +1,13 @@
+# expect-error: `Rect(_, _)` and `Empty` are not covered
+enum Shape:
+    Circle(radius: Float)
+    Rect(w: Float, h: Float)
+    Empty
+
+fn area(s: Shape) -> Float:
+    match s:
+        case Circle(r):
+            return r * r
+
+fn main():
+    print(area(Shape.Empty))

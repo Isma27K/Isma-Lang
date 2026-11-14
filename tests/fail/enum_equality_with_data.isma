@@ -1,0 +1,8 @@
+# expect-error: `==` works on enums whose variants carry no data
+enum Shape:
+    Circle(radius: Float)
+    Rect(w: Float, h: Float)
+    Empty
+
+fn main():
+    print(Shape.Circle(1.0) == Shape.Empty)

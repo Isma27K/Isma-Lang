@@ -1,0 +1,9 @@
+# expect-error: the type `Shape` is defined more than once
+struct Shape:
+    x: Int
+
+enum Shape:
+    Circle(radius: Float)
+
+fn main():
+    print(1)

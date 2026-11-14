@@ -1,0 +1,14 @@
+# expect-error: `null` is not covered
+enum Color:
+    Red
+    Green
+
+fn name(c: Color?) -> String:
+    match c:
+        case Red:
+            return "red"
+        case Green:
+            return "green"
+
+fn main():
+    print(name(null))

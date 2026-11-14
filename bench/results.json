@@ -1,8 +1,9 @@
 {
   "date": "2026-11-14",
   "cpu": "AMD Ryzen 5 5500",
-  "fib": {"isma": 39, "rust": 28, "python": 872},
-  "sieve": {"isma": 45, "rust": 35, "python": 2036},
-  "strings": {"isma": 124, "rust": 84, "python": 283},
-  "particles": {"isma": 21, "rust": 9, "python": 1132}
+  "fib": {"isma": 38, "rust": 28, "python": 872},
+  "sieve": {"isma": 49, "rust": 41, "python": 2012},
+  "strings": {"isma": 120, "rust": 83, "python": 278},
+  "particles": {"isma": 21, "rust": 9, "python": 1129},
+  "trees": {"isma": 41, "rust": 92, "python": 319}
 }

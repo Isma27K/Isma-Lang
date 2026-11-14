@@ -1,0 +1,7 @@
+# expect-error: this case is a `String`, but the value is an `Int`
+fn main():
+    match 3:
+        case "three":
+            print(3)
+        case _:
+            pass

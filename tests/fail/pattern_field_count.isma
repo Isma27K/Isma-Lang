@@ -1,0 +1,12 @@
+# expect-error: `Rect` has 2 fields, but the pattern gives 1
+enum Shape:
+    Circle(radius: Float)
+    Rect(w: Float, h: Float)
+    Empty
+
+fn main():
+    match Shape.Empty:
+        case Rect(w):
+            print(w)
+        case _:
+            pass

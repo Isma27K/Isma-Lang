@@ -1,0 +1,7 @@
+# expect-error: the value is never `null`
+fn main():
+    match 3:
+        case null:
+            print("none")
+        case _:
+            pass

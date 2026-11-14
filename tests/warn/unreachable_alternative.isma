@@ -1,0 +1,7 @@
+# expect-warning: unreachable pattern
+fn main():
+    match 2:
+        case 1 | 2 | 1:
+            print("small")
+        case _:
+            print("big")

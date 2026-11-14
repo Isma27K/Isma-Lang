@@ -1,0 +1,128 @@
+# Reference counting through enums: a persistent search tree, a long chain
+# freed without recursion, `var` scrutinees reassigned inside their own match,
+# and a JSON-like enum whose lists can close a real cycle (for the collector).
+
+enum Tree:
+    Leaf
+    Node(left: Tree, key: Int, right: Tree)
+
+fn insert(t: Tree, k: Int) -> Tree:
+    match t:
+        case Leaf:
+            return Tree.Node(Tree.Leaf, k, Tree.Leaf)
+        case Node(l, key, r) if k < key:
+            return Tree.Node(insert(l, k), key, r)
+        case Node(l, key, r) if k > key:
+            return Tree.Node(l, key, insert(r, k))
+        case _:
+            return t
+
+fn contains(t: Tree, k: Int) -> Bool:
+    var cur = t
+    while true:
+        match cur:
+            case Leaf:
+                return false
+            case Node(l, key, r):
+                if k == key:
+                    return true
+                if k < key:
+                    cur = l
+                else:
+                    cur = r
+
+fn size(t: Tree) -> Int:
+    match t:
+        case Leaf:
+            return 0
+        case Node(l, _, r):
+            return size(l) + 1 + size(r)
+
+fn in_order(t: Tree, out: List[Int]):
+    match t:
+        case Leaf:
+            pass
+        case Node(l, k, r):
+            in_order(l, out)
+            out.push(k)
+            in_order(r, out)
+
+enum Chain:
+    End
+    Link(value: String, next: Chain)
+
+fn build(n: Int) -> Chain:
+    var c = Chain.End
+    for i in 0..n:
+        c = Chain.Link(f"s{i}", c)
+    return c
+
+fn length(c: Chain) -> Int:
+    var n = 0
+    var cur = c
+    while true:
+        match cur:
+            case End:
+                return n
+            case Link(_, next):
+                n += 1
+                cur = next
+
+enum Json:
+    Null
+    Num(n: Float)
+    Text(s: String)
+    Arr(items: List[Json])
+
+fn render(j: Json, depth: Int) -> String:
+    if depth > 3:
+        return "..."
+    match j:
+        case Null:
+            return "null"
+        case Num(n):
+            return f"{n}"
+        case Text(s):
+            return f"'{s}'"
+        case Arr(items):
+            var out = "["
+            var first = true
+            for x in items:
+                if not first:
+                    out += ", "
+                first = false
+                out += render(x, depth + 1)
+            return out + "]"
+
+fn main():
+    # Persistent tree: every version stays valid and shares structure.
+    var t = Tree.Leaf
+    val versions: List[Tree] = []
+    for i in 0..200:
+        t = insert(t, (i * 37) % 101)
+        if i % 50 == 0:
+            versions.push(t)
+    print(size(t))
+    print(size(versions[0]))
+    print(size(versions[3]))
+    print(contains(t, 74))
+    print(contains(t, 1000))
+    val keys: List[Int] = []
+    in_order(versions[1], keys)
+    print(keys.len())
+    print(keys[0])
+    print(keys[keys.len() - 1])
+
+    # A chain of a million links: freed iteratively, without deep recursion.
+    val long = build(1000000)
+    print(length(long))
+
+    # Lists inside an enum can point back at it: a real cycle.
+    for round in 0..300:
+        val items: List[Json] = [Json.Num(1.5), Json.Text("x"), Json.Null]
+        val arr = Json.Arr(items)
+        items.push(arr)
+        if round == 0:
+            print(render(arr, 0))
+    val done = Json.Arr([Json.Text("done")])
+    print(render(done, 0))

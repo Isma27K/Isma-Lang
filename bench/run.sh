@@ -19,7 +19,7 @@ best_of_3() {
 
 printf "%-8s %10s %10s %10s\n" bench isma rust python
 results=()
-for b in fib sieve strings particles; do
+for b in fib sieve strings particles trees; do
     $ISMA build "$b.isma" -o "out/$b-isma"
     rustc -O "$b.rs" -o "out/$b-rust" 2>/dev/null
     expected=$("out/$b-rust")

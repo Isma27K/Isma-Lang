@@ -1,0 +1,12 @@
+# expect-error: cases with an `if` guard don't count here
+fn sign(n: Int) -> String:
+    match n:
+        case x if x < 0:
+            return "-"
+        case 0:
+            return "0"
+        case x if x > 0:
+            return "+"
+
+fn main():
+    print(sign(1))

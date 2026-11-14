@@ -93,11 +93,25 @@ pub enum Rvalue {
     Field(VarId, StructId, usize),
     /// Projection `list[index]`; bounds-checked when a span is given.
     Index(VarId, Operand, Option<Span>),
-    StructNew(StructId, Vec<Operand>),
-    /// `StructNew` into the memory held by a reuse token (allocating if it's null).
-    Reuse(VarId, StructId, Vec<Operand>),
+    /// A new struct or enum value (one operand per field).
+    New(Ctor, Vec<Operand>),
+    /// `New` into the memory held by a reuse token (allocating if it's null).
+    Reuse(VarId, Ctor, Vec<Operand>),
+    /// Which variant an enum value is (`Int`).
+    Tag(VarId),
+    /// Projection: field `.3` of variant `.2` of the enum value `.0` (enum `.1`).
+    /// Only valid when the value is known to be that variant.
+    VariantField(VarId, StructId, usize, usize),
     /// A list literal with the given element type.
     ListNew(Type, Vec<Operand>),
+}
+
+/// What a `New` builds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ctor {
+    Struct(StructId),
+    /// Enum, variant.
+    Variant(StructId, usize),
 }
 
 #[derive(Debug, Clone)]
@@ -161,9 +175,10 @@ impl Func {
 }
 
 /// Does a value of this type live on the heap (and so need reference counting)?
-/// A nullable reference is a possibly-null pointer, so it counts too.
+/// A nullable reference is a possibly-null pointer, so it counts too. An enum
+/// does when some variant carries data.
 pub fn is_ref(t: &Type) -> bool {
-    matches!(t.non_null(), Type::Str | Type::List(_) | Type::Struct(_))
+    matches!(t.non_null(), Type::Str | Type::List(_) | Type::Struct(_) | Type::Enum(_, true))
 }
 
 impl Operand {
@@ -183,10 +198,10 @@ impl Rvalue {
             Rvalue::Binary(_, _, a, b, _) => vec![a, b],
             Rvalue::Call(_, args, _)
             | Rvalue::Builtin(_, args, _)
-            | Rvalue::StructNew(_, args)
+            | Rvalue::New(_, args)
             | Rvalue::Reuse(_, _, args)
             | Rvalue::ListNew(_, args) => args.iter().collect(),
-            Rvalue::Field(..) | Rvalue::Index(..) => vec![],
+            Rvalue::Field(..) | Rvalue::Index(..) | Rvalue::Tag(_) | Rvalue::VariantField(..) => vec![],
             // (the list / object of a projection is a VarId, see `base`)
         }
     }
@@ -194,7 +209,7 @@ impl Rvalue {
     /// The object a projection reads from.
     pub fn base(&self) -> Option<VarId> {
         match self {
-            Rvalue::Field(o, ..) => Some(*o),
+            Rvalue::Field(o, ..) | Rvalue::VariantField(o, ..) | Rvalue::Tag(o) => Some(*o),
             Rvalue::Index(l, ..) => Some(*l),
             _ => None,
         }
@@ -204,7 +219,7 @@ impl Rvalue {
     pub fn uses(&self) -> Vec<VarId> {
         let mut out: Vec<VarId> = self.operands().iter().filter_map(|o| o.var()).collect();
         match self {
-            Rvalue::Field(o, ..) => out.push(*o),
+            Rvalue::Field(o, ..) | Rvalue::VariantField(o, ..) | Rvalue::Tag(o) => out.push(*o),
             Rvalue::Index(l, i, _) => {
                 out.push(*l);
                 out.extend(i.var());
@@ -281,6 +296,13 @@ fn print_func(out: &mut String, f: &Func, p: &Program, names: &[String]) {
         Operand::Null(_) => "null".to_string(),
     };
     let ops = |os: &[Operand]| os.iter().map(op).collect::<Vec<_>>().join(", ");
+    let ctor = |c: &Ctor, args: &[Operand]| match c {
+        Ctor::Struct(sid) => format!("{}({})", p.structs[*sid].name, ops(args)),
+        Ctor::Variant(sid, k) => {
+            let v = &p.structs[*sid].variants()[*k];
+            if args.is_empty() { format!("{}.{}", p.structs[*sid].name, v.name) } else { format!("{}.{}({})", p.structs[*sid].name, v.name, ops(args)) }
+        }
+    };
     let rv = |r: &Rvalue| match r {
         Rvalue::Use(o) => op(o),
         Rvalue::Binary(b, _, x, y, _) => format!("{} {} {}", op(x), binop_str(*b), op(y)),
@@ -290,8 +312,13 @@ fn print_func(out: &mut String, f: &Func, p: &Program, names: &[String]) {
         Rvalue::Builtin(b, args, _) => format!("@{b:?}({})", ops(args)),
         Rvalue::Field(o, sid, idx) => format!("{}.{}", var(*o), p.structs[*sid].fields[*idx].name),
         Rvalue::Index(l, i, checked) => format!("{}[{}]{}", var(*l), op(i), if checked.is_some() { "" } else { "!" }),
-        Rvalue::StructNew(sid, args) => format!("new {}({})", p.structs[*sid].name, ops(args)),
-        Rvalue::Reuse(tok, sid, args) => format!("new {}({}) reusing {}", p.structs[*sid].name, ops(args), var(*tok)),
+        Rvalue::New(c, args) => format!("new {}", ctor(c, args)),
+        Rvalue::Reuse(tok, c, args) => format!("new {} reusing {}", ctor(c, args), var(*tok)),
+        Rvalue::Tag(o) => format!("tag {}", var(*o)),
+        Rvalue::VariantField(o, sid, k, i) => {
+            let v = &p.structs[*sid].variants()[*k];
+            format!("{} as {}.{}", var(*o), v.name, v.fields[*i].name)
+        }
         Rvalue::ListNew(_, args) => format!("[{}]", ops(args)),
     };
     for (b, block) in f.blocks.iter().enumerate() {

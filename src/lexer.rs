@@ -437,6 +437,7 @@ impl<'a> Lexer<'a> {
             (b'!', b'!') => (Tok::BangBang, 2),
             (b'?', b'.') => (Tok::QuestionDot, 2),
             (b'?', _) => (Tok::Question, 1),
+            (b'|', n) if n != b'|' => (Tok::Pipe, 1),
             (b'<', b'=') => (Tok::Le, 2),
             (b'>', b'=') => (Tok::Ge, 2),
             (b'+', b'=') => (Tok::PlusEq, 2),

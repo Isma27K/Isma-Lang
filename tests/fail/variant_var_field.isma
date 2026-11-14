@@ -1,0 +1,6 @@
+# expect-error: variant fields are always immutable
+enum Counter:
+    Count(var n: Int)
+
+fn main():
+    print(1)

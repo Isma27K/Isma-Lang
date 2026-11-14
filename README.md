@@ -81,7 +81,7 @@ Indentation instead of braces. `for x in list`, `and` / `or` / `not`, f-strings.
 
 ### 🛡️ Checks like Kotlin
 
-`val` vs `var`. Null safety: only a `T?` can be `null`, and smart casts know when it isn't. No implicit conversions, no "truthy" values, and every path must `return`. Mistakes are caught before the program runs, with messages that tell you the fix.
+`val` vs `var`. Null safety: only a `T?` can be `null`, and smart casts know when it isn't. Enums with data, and a `match` that must handle every case. No implicit conversions, no "truthy" values, and every path must `return`. Mistakes are caught before the program runs, with messages that tell you the fix.
 
 </td>
 <td width="33%" valign="top">
@@ -155,6 +155,17 @@ fn clamp(x: Int, low: Int, high: Int) -> Int:
         return high
     return x
 
+enum Shape:                                  # enums whose variants carry data
+    Circle(radius: Float)
+    Rect(w: Float, h: Float)
+
+fn area(s: Shape) -> Float:
+    match s:                                 # the compiler checks every case is handled
+        case Circle(r):
+            return 3.14159 * r * r
+        case Rect(w, h):
+            return w * h
+
 fn first_long(words: List[String]) -> String?:  # `String?`: a String or null
     for w in words:
         if w.len() > 3:
@@ -175,10 +186,11 @@ fn main():
     print(word?.len() ?: 0)                  # safe call `?.` and elvis `?:`
     if word != null:
         print(word.len())                    # smart cast: `word` is a String here
+    print(area(Shape.Rect(w=2.0, h=3.0)))
     print(time.now().to_iso())
 ```
 
-The [**language guide**](docs/language.md) covers everything: types, strictness rules, lints, structs, lists, strings, null safety, modules, built-ins and panics.
+The [**language guide**](docs/language.md) covers everything: types, strictness rules, lints, structs, enums and `match`, lists, strings, null safety, modules, built-ins and panics.
 
 <a id="time"></a>
 ## 🕰️ Batteries included: `time`
@@ -220,21 +232,23 @@ The VS Code extension (in the companion `isma-vscode` project) gets all its smar
 ## ⚡ Performance
 
 <p align="center">
-  <img src="docs/media/benchmark.svg" alt="Bar chart of run times in milliseconds, lower is better. fib(35): Isma 39, Rust 28, Python 872. Sieve to 10 million: Isma 45, Rust 35, Python 2,036. Building a 15 MB string: Isma 124, Rust 84, Python 283. Moving a particle 5 million steps: Isma 21, Rust 9, Python 1,132." width="760">
+  <img src="docs/media/benchmark.svg" alt="Bar chart of run times in milliseconds, lower is better. fib(35): Isma 38, Rust 28, Python 872. Sieve to 10 million: Isma 49, Rust 41, Python 2,012. Building a 15 MB string: Isma 120, Rust 83, Python 278. Moving a particle 5 million steps: Isma 21, Rust 9, Python 1,129. Binary trees with 3 million enum nodes: Isma 41, Rust 92, Python 319." width="760">
 </p>
 
 | Benchmark | Isma | Rust (`rustc -O`) | Python 3 |
 |---|---:|---:|---:|
-| `fib(35)`: 30 million recursive calls | 39 ms | 28 ms | 872 ms |
-| Sieve of Eratosthenes to 10 million | 45 ms | 35 ms | 2,036 ms |
-| Building a 15 MB string from 2 million f-strings | 124 ms | 84 ms | 283 ms |
-| Moving a `Vec2` particle 5 million steps (`pos = pos.add(vel)`) | 21 ms | 9 ms | 1,132 ms |
+| `fib(35)`: 30 million recursive calls | 38 ms | 28 ms | 872 ms |
+| Sieve of Eratosthenes to 10 million | 49 ms | 41 ms | 2,012 ms |
+| Building a 15 MB string from 2 million f-strings | 120 ms | 83 ms | 278 ms |
+| Moving a `Vec2` particle 5 million steps (`pos = pos.add(vel)`) | 21 ms | 9 ms | 1,129 ms |
+| Binary trees: building and walking 3 million `enum` nodes | 41 ms | 92 ms | 319 ms |
 
 These are the best of 3 runs on an AMD Ryzen 5 5500. Reproduce them with `./bench/run.sh`.
 
 - **Where the gap to Rust comes from.** Most of it is safety: Isma checks every integer operation for overflow, while Rust in release mode silently wraps. With the same checks (`rustc -O -C overflow-checks=on`), Rust's `fib` takes about 46 ms, slower than Isma.
 - **Help for the optimizer.** Isma tells LLVM which memory can never overlap (TBAA metadata). That lets list lengths stay in CPU registers inside hot loops.
-- **Memory without a garbage collector.** Values are reference counted, and the compiler removes most of the counting (see [Memory](docs/language.md#memory)). The particle loop allocates 3 objects in total, because each new `Vec2` reuses the memory of the one it replaces. Peak memory stayed within 10% of Rust's on both new benchmarks.
+- **Memory without a garbage collector.** Values are reference counted, and the compiler removes most of the counting (see [Memory](docs/language.md#memory)). The particle loop allocates 3 objects in total, because each new `Vec2` reuses the memory of the one it replaces. Peak memory stayed within 10% of Rust's on the string, particle and tree benchmarks.
+- **Why Isma beats Rust on binary trees.** Both programs allocate one heap node per tree node (`Leaf` costs nothing: it's a shared constant in Isma, and `None` in Rust). Isma recycles freed nodes through its own size-class free lists, while Rust here uses the system `malloc`. Walking the tree does no reference counting at all, because the match borrows the fields.
 - **Benchmarking your own code.** LLVM deletes loops whose results are never used, so print what you compute or you'll measure `0 ms`. `isma run --debug` turns optimization off.
 
 <a id="how-it-works"></a>
@@ -246,14 +260,15 @@ These are the best of 3 runs on an AMD Ryzen 5 5500. Reproduce them with `./benc
 
 - **One front end, two uses.** The same lexer, parser and type checker compile your programs and power the editor through `isma lsp`.
 - **The standard library is Isma code** ([`stdlib/time.isma`](stdlib/time.isma)), compiled together with your program, so it's as fast as your own functions. A panic inside it reports *your* calling line, like Rust's `#[track_caller]`.
-- **Memory management happens on a mid-level IR.** The typed program is lowered to a control-flow graph in which every intermediate value has a name ([`src/mir.rs`](src/mir.rs)). [`src/arc.rs`](src/arc.rs) then adds reference counting in the style of Perceus (Koka, Lean 4). It drops each value right after its last use. Parameters are borrowed unless consumed, and projections stay borrowed while interprocedural write-effect summaries prove their slot can't change. A unique struct's memory is reused for the next one, and unique strings are appended to in place. Types that can form cycles ([`src/cycles.rs`](src/cycles.rs)) get a trial-deletion cycle collector.
+- **Memory management happens on a mid-level IR.** The typed program is lowered to a control-flow graph in which every intermediate value has a name ([`src/mir.rs`](src/mir.rs)). [`src/arc.rs`](src/arc.rs) then adds reference counting in the style of Perceus (Koka, Lean 4). It drops each value right after its last use. Parameters are borrowed unless consumed, and projections stay borrowed while interprocedural write-effect summaries prove their slot can't change. A unique struct's memory is reused for the next one, and unique strings are appended to in place. Types that can form cycles get a trial-deletion cycle collector. [`src/cycles.rs`](src/cycles.rs) decides which, from the type graph: a cycle needs a reference that can be replaced after construction, so immutable trees never pay for it.
+- **`match` is checked with Maranget's usefulness algorithm** ([`src/patterns.rs`](src/patterns.rs)), as in Rust and OCaml. The same pass that proves a `match` exhaustive produces the missing cases for the error message and finds unreachable ones. Cases compile to chains of tag tests, which LLVM merges into a `switch`. Enums without data are plain integers, and data-less variants of other enums are shared constants.
 - **Codegen writes LLVM IR as text** and hands it to `clang -O3`, together with a ~780-line C runtime: the allocator, the cycle collector, strings, lists, printing and clocks.
 - **Null safety is checked by flow typing.** The checker tracks which locals and `val` field chains are known to be non-null at each point (through `if`, `and`/`or`, loops, early `return`s and `?:`), which is what makes smart casts work. At run time it costs nothing: `User?` is a nullable pointer, and `Int?` is a flag-plus-value pair that stays in registers.
 - **Safety stays cheap.**
   - Integer `+ - *` use LLVM's overflow-checking intrinsics.
   - Panic paths are marked cold.
   - List indexing is bounds-checked inline.
-- **About 9,900 lines of Rust.** The only dependencies are `ariadne` (error rendering) and `lsp-server` / `lsp-types` (the language server).
+- **About 11,700 lines of Rust.** The only dependencies are `ariadne` (error rendering) and `lsp-server` / `lsp-types` (the language server).
 
 <a id="roadmap"></a>
 ## 🗺️ Roadmap
@@ -264,7 +279,7 @@ These are the best of 3 runs on an AMD Ryzen 5 5500. Reproduce them with `./benc
 - [x] `import` and a standard library written in Isma (`time`)
 - [x] Null safety: `Int?`, `?.`, the elvis operator `?:`, `!!`, smart casts
 - [x] Memory management through automatic reference counting, with a cycle collector
-- [ ] `enum` + `match` with exhaustiveness checking
+- [x] `enum` + `match` with exhaustiveness checking
 - [ ] Generics for user code: `fn max[T](a: T, b: T) -> T`
 - [ ] Operator functions (so that `time.now() - start` works)
 - [ ] Importing your own `.isma` files

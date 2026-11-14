@@ -5,6 +5,7 @@
 use crate::ast::*;
 use crate::diagnostics::Diagnostic;
 use crate::ide::*;
+use crate::patterns::{self, Ctor, Pat, Space};
 use crate::span::Span;
 use crate::tast::*;
 use crate::types::*;
@@ -68,6 +69,41 @@ enum NullUse<'a> {
     Condition,
 }
 
+/// Bindings while checking one `case` pattern.
+#[derive(Default)]
+struct PatCx {
+    /// Every name the pattern binds: (name, type, local).
+    binds: Vec<(String, Type, LocalId)>,
+    /// Names bound so far on the current alternative of a `|`.
+    seen: Vec<String>,
+    errors: bool,
+}
+
+/// Can this pattern match `null`?
+fn pat_matches_null(p: &TPat) -> bool {
+    match &p.kind {
+        TPatKind::Wild | TPatKind::Null => true,
+        TPatKind::Bind(_, inner) => pat_matches_null(inner),
+        TPatKind::Or(alts) => alts.iter().any(pat_matches_null),
+        _ => false,
+    }
+}
+
+/// "a `Shape`" / "an `Int`"
+fn a_type(name: &str) -> String {
+    let an = name.starts_with(['A', 'E', 'I', 'O', 'U', 'a', 'e', 'i', 'o', 'u']);
+    format!("{} `{name}`", if an { "an" } else { "a" })
+}
+
+/// "`a`", "`a` and `b`", "`a`, `b` and `c`"
+fn and_list(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.clone(),
+        [init @ .., last] => format!("{} and {last}", init.join(", ")),
+    }
+}
+
 /// Per-local facts for lints (indexed by `LocalId`).
 struct LocalMeta {
     name: String,
@@ -86,7 +122,10 @@ pub struct Analysis {
 }
 
 pub struct Checker {
+    /// Structs and enums, in one table.
     structs: Vec<TStruct>,
+    /// The type each entry of `structs` defines (`Type::Struct` or `Type::Enum`).
+    def_types: Vec<Type>,
     struct_spans: Vec<Span>,
     struct_ns: Vec<usize>,
     /// (namespace, name) -> struct. Namespace 0 is the user's file, k > 0 the k-th module.
@@ -129,6 +168,7 @@ pub fn check(program: &Program, source: &str, modules: &[ModuleInput]) -> Result
 pub fn analyze(program: &Program, source: &str, modules: &[ModuleInput]) -> Analysis {
     let mut c = Checker {
         structs: Vec::new(),
+        def_types: Vec::new(),
         struct_spans: Vec::new(),
         struct_ns: Vec::new(),
         struct_index: HashMap::new(),
@@ -352,6 +392,17 @@ impl Checker {
 
     fn struct_summary(&self, sid: StructId) -> String {
         let s = &self.ide.structs[sid];
+        if let Some(variants) = &s.variants {
+            let mut out = format!("enum {}:", s.name);
+            for v in variants {
+                let short = v.signature.split_once('.').map(|(_, r)| r).unwrap_or(&v.signature);
+                out.push_str(&format!("\n    {short}"));
+            }
+            for &m in &s.methods {
+                out.push_str(&format!("\n    {}", self.ide.functions[m].signature));
+            }
+            return out;
+        }
         let mut out = format!("struct {}:", s.name);
         for f in &s.fields {
             out.push_str(&format!("\n    {} {}: {}", if f.mutable { "var" } else { "val" }, f.name, f.ty));
@@ -435,49 +486,59 @@ impl Checker {
             }
         }
 
-        // Pass 1: struct names.
+        // Pass 1: struct and enum names (one namespace).
         for &(ns, program) in units {
             self.ns = ns;
             for item in &program.items {
-                let Item::Struct(s) = item else { continue };
-                let name = &s.name.name;
+                let (name_id, end, enum_boxed) = match item {
+                    Item::Struct(s) => {
+                        let end = s.fields.iter().map(|f| f.ty.span.end).chain(s.methods.iter().map(|m| fn_full_span(m).end)).max();
+                        (&s.name, end, None)
+                    }
+                    Item::Enum(e) => {
+                        let end = e.variants.iter().map(|v| v.span.end).chain(e.methods.iter().map(|m| fn_full_span(m).end)).max();
+                        (&e.name, end, Some(e.variants.iter().any(|v| !v.fields.is_empty())))
+                    }
+                    _ => continue,
+                };
+                let name = &name_id.name;
+                let what = if enum_boxed.is_some() { "enum" } else { "struct" };
                 if RESERVED_TYPES.contains(&name.as_str()) {
-                    self.err(Diagnostic::error(format!("`{name}` is a built-in type name"), s.name.span));
+                    self.err(Diagnostic::error(format!("`{name}` is a built-in type name"), name_id.span));
                     continue;
                 }
                 if let Some(&prev) = self.struct_index.get(&(ns, name.clone())) {
                     let prev_span = self.struct_spans[prev];
                     self.err(
-                        Diagnostic::error(format!("struct `{name}` is defined more than once"), s.name.span)
-                            .with_label(prev_span, "first defined here"),
+                        Diagnostic::error(format!("the type `{name}` is defined more than once"), name_id.span)
+                            .with_label(prev_span, "first defined here")
+                            .with_note(format!("this one is {} {what}", if what == "enum" { "an" } else { "a" })),
                     );
                     continue;
                 }
                 let id = self.structs.len();
                 let display = self.display_struct(ns, name);
-                self.structs.push(TStruct { name: display.clone(), fields: Vec::new() });
-                self.struct_spans.push(s.name.span);
+                self.structs.push(TStruct { name: display.clone(), fields: Vec::new(), variants: enum_boxed.map(|_| Vec::new()) });
+                self.def_types.push(match enum_boxed {
+                    Some(boxed) => Type::Enum(id, boxed),
+                    None => Type::Struct(id),
+                });
+                self.struct_spans.push(name_id.span);
                 self.struct_ns.push(ns);
                 self.struct_index.insert((ns, name.clone()), id);
-                let end = s
-                    .fields
-                    .iter()
-                    .map(|f| f.ty.span.end)
-                    .chain(s.methods.iter().map(|m| fn_full_span(m).end))
-                    .max()
-                    .unwrap_or(s.name.span.end);
-                let doc = self.doc_comment(s.name.span.start);
+                let doc = self.doc_comment(name_id.span.start);
                 self.ide.structs.push(StructSymbol {
                     name: display,
-                    name_span: s.name.span,
-                    full: Span { start: s.name.span.start, end },
+                    name_span: name_id.span,
+                    full: Span { start: name_id.span.start, end: end.unwrap_or(name_id.span.end) },
                     fields: Vec::new(),
+                    variants: enum_boxed.map(|_| Vec::new()),
                     methods: Vec::new(),
                     ns,
                     doc,
                 });
                 self.field_spans.push(Vec::new());
-                self.pending_struct_hovers.push((s.name.span, id));
+                self.pending_struct_hovers.push((name_id.span, id));
             }
         }
 
@@ -519,34 +580,59 @@ impl Checker {
                             fields.push(TField { name: f.name.name.clone(), ty, mutable: f.mutable });
                         }
                         self.structs[sid].fields = fields;
-                        for m in &s.methods {
-                            if seen.contains_key(m.name.name.as_str()) {
-                                self.err(Diagnostic::error(
-                                    format!("`{}` is both a field and a method of `{}`", m.name.name, s.name.name),
-                                    m.name.span,
-                                ));
-                                continue;
-                            }
-                            if m.self_param.is_none() {
-                                self.err(
-                                    Diagnostic::error(format!("method `{}` must take `self` as its first parameter", m.name.name), m.sig_span)
-                                        .with_note("static methods are not supported yet; use a top-level function"),
-                                );
-                                continue;
-                            }
-                            if let Some(&prev) = self.methods.get(&(sid, m.name.name.clone())) {
-                                let prev_span = self.funcs[prev].span;
-                                self.err(
-                                    Diagnostic::error(format!("method `{}` is defined more than once", m.name.name), m.name.span)
-                                        .with_label(prev_span, "first defined here"),
-                                );
-                                continue;
-                            }
-                            let fid = self.declare_fn(m, Some(sid));
-                            self.methods.insert((sid, m.name.name.clone()), fid);
-                            self.ide.structs[sid].methods.push(fid);
-                            bodies.push((m, Some(sid), ns));
+                        let fields: Vec<&str> = seen.keys().copied().collect();
+                        self.declare_methods(sid, &s.methods, &fields, ns, &mut bodies);
+                    }
+                    Item::Enum(e) => {
+                        let Some(&sid) = self.struct_index.get(&(ns, e.name.name.clone())) else { continue };
+                        if self.struct_spans[sid] != e.name.span {
+                            continue; // duplicate definition already reported
                         }
+                        if e.variants.is_empty() {
+                            self.err(
+                                Diagnostic::error(format!("enum `{}` has no variants", e.name.name), e.name.span)
+                                    .with_help("list the possible values, one per line:\n\nenum Color:\n    Red\n    Green"),
+                            );
+                        }
+                        let ename = self.structs[sid].name.clone();
+                        let mut seen: HashMap<&str, Span> = HashMap::new();
+                        let mut variants = Vec::new();
+                        for v in &e.variants {
+                            if let Some(prev) = seen.get(v.name.name.as_str()) {
+                                self.err(
+                                    Diagnostic::error(format!("variant `{}` is declared more than once", v.name.name), v.name.span)
+                                        .with_label(*prev, "first declared here"),
+                                );
+                                continue;
+                            }
+                            seen.insert(&v.name.name, v.name.span);
+                            let mut fseen: HashMap<&str, Span> = HashMap::new();
+                            let mut fields = Vec::new();
+                            for f in &v.fields {
+                                if let Some(prev) = fseen.get(f.name.name.as_str()) {
+                                    self.err(
+                                        Diagnostic::error(format!("field `{}` is declared more than once", f.name.name), f.name.span)
+                                            .with_label(*prev, "first declared here"),
+                                    );
+                                    continue;
+                                }
+                                fseen.insert(&f.name.name, f.name.span);
+                                let ty = self.resolve_type(&f.ty);
+                                let tn = self.tn(&ty);
+                                self.hover(f.name.span, format!("{}: {tn}", f.name.name), Some(format!("field of variant `{ename}.{}`", v.name.name)));
+                                fields.push(TField { name: f.name.name.clone(), ty, mutable: false });
+                            }
+                            let tv = TVariant { name: v.name.name.clone(), fields };
+                            let signature = self.variant_signature(&ename, &tv);
+                            let doc = self.doc_comment(v.name.span.start);
+                            self.hover(v.name.span, signature.clone(), Some(format!("variant of `{ename}`")));
+                            if let Some(vs) = &mut self.ide.structs[sid].variants {
+                                vs.push(VariantSymbol { name: tv.name.clone(), signature, span: v.name.span, doc });
+                            }
+                            variants.push(tv);
+                        }
+                        self.structs[sid].variants = Some(variants);
+                        self.declare_methods(sid, &e.methods, &[], ns, &mut bodies);
                     }
                     Item::Fn(f) => {
                         let name = &f.name.name;
@@ -615,10 +701,50 @@ impl Checker {
         out
     }
 
+    /// The methods of struct or enum `sid` (`fields`: names they may not reuse).
+    fn declare_methods<'p>(&mut self, sid: StructId, methods: &'p [FnDecl], fields: &[&str], ns: usize, bodies: &mut Vec<(&'p FnDecl, Option<StructId>, usize)>) {
+        let tname = self.structs[sid].name.clone();
+        for m in methods {
+            if fields.contains(&m.name.name.as_str()) {
+                self.err(Diagnostic::error(format!("`{}` is both a field and a method of `{tname}`", m.name.name), m.name.span));
+                continue;
+            }
+            if m.self_param.is_none() {
+                self.err(
+                    Diagnostic::error(format!("method `{}` must take `self` as its first parameter", m.name.name), m.sig_span)
+                        .with_note("static methods are not supported yet; use a top-level function"),
+                );
+                continue;
+            }
+            if let Some(&prev) = self.methods.get(&(sid, m.name.name.clone())) {
+                let prev_span = self.funcs[prev].span;
+                self.err(
+                    Diagnostic::error(format!("method `{}` is defined more than once", m.name.name), m.name.span)
+                        .with_label(prev_span, "first defined here"),
+                );
+                continue;
+            }
+            let fid = self.declare_fn(m, Some(sid));
+            self.methods.insert((sid, m.name.name.clone()), fid);
+            self.ide.structs[sid].methods.push(fid);
+            bodies.push((m, Some(sid), ns));
+        }
+    }
+
+    /// `Shape.Circle(radius: Float)`
+    fn variant_signature(&self, ename: &str, v: &TVariant) -> String {
+        let short = ename.rsplit('.').next().unwrap_or(ename);
+        if v.fields.is_empty() {
+            return format!("{short}.{}", v.name);
+        }
+        let fs: Vec<String> = v.fields.iter().map(|f| format!("{}: {}", f.name, self.tn(&f.ty))).collect();
+        format!("{short}.{}({})", v.name, fs.join(", "))
+    }
+
     fn declare_fn(&mut self, f: &FnDecl, owner: Option<StructId>) -> FuncId {
         let mut params = Vec::new();
         if let Some(sid) = owner {
-            params.push(("self".to_string(), Type::Struct(sid)));
+            params.push(("self".to_string(), self.def_types[sid].clone()));
         }
         let mut seen: HashMap<&str, Span> = HashMap::new();
         for p in &f.params {
@@ -724,7 +850,7 @@ impl Checker {
                     if !expect_args(self, 0) {
                         return Type::Error;
                     }
-                    return Type::Struct(sid);
+                    return self.def_types[sid].clone();
                 }
                 let mut d = Diagnostic::error(format!("cannot find type `{name}`"), t.name.span).with_primary("not found");
                 let hint = match name {
@@ -771,7 +897,7 @@ impl Checker {
                     self.err(Diagnostic::error(format!("type `{}.{name}` does not take type arguments", m.name), t.span));
                     return Type::Error;
                 }
-                Type::Struct(sid)
+                self.def_types[sid].clone()
             }
             Some(_) => {
                 self.err(Diagnostic::error(format!("`{}.{name}` is private to the `{}` module", m.name, m.name), t.name.span));
@@ -1342,10 +1468,492 @@ impl Checker {
                     TStmt::ForList { var: v, list: tl, body: b }
                 }
             },
+            StmtKind::Match { scrutinee, arms } => self.match_stmt(scrutinee, arms),
             StmtKind::Break | StmtKind::Continue => self.loop_jump(matches!(s.kind, StmtKind::Break), s.span),
             StmtKind::Return(value) => self.return_stmt(value.as_ref(), s.span),
             StmtKind::Pass => return None,
         })
+    }
+
+    fn error_count(&self) -> usize {
+        self.diags.iter().filter(|d| d.is_error()).count()
+    }
+
+    fn match_stmt(&mut self, scrutinee: &Expr, arms: &[MatchArm]) -> TStmt {
+        let ts = self.expr(scrutinee, None);
+        let sty = ts.ty.clone();
+        if sty == Type::Unit {
+            self.err(Diagnostic::error("`match` needs a value", scrutinee.span).with_primary("this expression produces no value"));
+        }
+        let check_cover = !sty.is_error() && sty != Type::Unit;
+        let path = Self::path_of(&ts);
+        let before = self.nonnull.clone();
+        // Earlier unguarded cases, for exhaustiveness and reachability.
+        let mut rows: Vec<Vec<Pat>> = Vec::new();
+        let mut tarms = Vec::new();
+        let mut ends = Vec::new();
+        let mut pattern_errors = false;
+        let mut guarded = false;
+        for arm in arms {
+            self.nonnull = before.clone();
+            self.scopes.push(HashMap::new());
+            let null_left = sty.is_nullable() && Space { structs: &self.structs }.useful(&rows, &[Pat::Ctor(Ctor::Null, vec![])], std::slice::from_ref(&sty)).is_some();
+            let mut cx = PatCx::default();
+            let errors = self.error_count();
+            // After `case null:`, a name in a later case binds the non-null value.
+            let pat = if sty.is_nullable() && !null_left && matches!(arm.pattern.kind, PatternKind::Bind(_) | PatternKind::As(..)) {
+                let inner = self.check_pattern(&arm.pattern, sty.non_null(), &mut cx);
+                TPat { kind: TPatKind::Some(Box::new(inner)), ty: sty.clone() }
+            } else {
+                self.check_pattern(&arm.pattern, &sty, &mut cx)
+            };
+            let bad = cx.errors || self.error_count() > errors;
+            pattern_errors |= bad;
+            let ap = patterns::of_tpat(&pat);
+            if check_cover && !bad {
+                self.warn_unreachable(&rows, &ap, &sty, arm);
+            }
+            // Smart cast: in a case that can't see `null`, the matched value isn't null.
+            if let Some(p) = &path
+                && sty.is_nullable()
+                && !(null_left && pat_matches_null(&pat))
+            {
+                self.add_facts(vec![p.clone()]);
+            }
+            let guard = arm.guard.as_ref().map(|g| {
+                let tg = self.expect_bool(g, "`case` guard");
+                let (when_true, _) = Self::cond_facts(&tg);
+                self.add_facts(when_true);
+                tg
+            });
+            let body = self.block(&arm.body, true);
+            if !body.iter().any(ends_flow) {
+                ends.push(std::mem::take(&mut self.nonnull));
+            }
+            self.scopes.pop();
+            match guard {
+                _ if bad => {} // (a case with errors covers nothing)
+                None => rows.push(vec![ap]),
+                Some(_) => guarded = true,
+            }
+            tarms.push(TArm { pat, guard, body });
+        }
+        if check_cover && !pattern_errors {
+            let space = Space { structs: &self.structs };
+            let missing = space.missing(rows, &sty, 3);
+            if !missing.is_empty() {
+                let mut shown: Vec<String> = missing.iter().take(3).map(|p| format!("`{}`", space.show(p, &sty))).collect();
+                if missing.len() > 3 {
+                    shown.push("more".into());
+                }
+                let what = if shown.len() == 1 { format!("{} is", shown[0]) } else { format!("{} are", and_list(&shown)) };
+                let first = space.show(&missing[0], &sty);
+                let tn = self.tn(&sty);
+                let mut d = Diagnostic::error(format!("this `match` doesn't handle every value: {what} not covered"), scrutinee.span)
+                    .with_primary(format!("this is `{tn}`"))
+                    .with_help(format!("add a case for it:\n\ncase {first}:\n    ...\n\nor end with `case _:` to handle everything else"));
+                if guarded {
+                    d = d.with_note("cases with an `if` guard don't count here, because their guard might be false");
+                }
+                self.err(d);
+            }
+        }
+        if arms.is_empty() {
+            self.err(Diagnostic::error("`match` has no cases", scrutinee.span));
+        }
+        self.nonnull = match ends.split_first() {
+            Some((first, rest)) => first.iter().filter(|p| rest.iter().all(|e| e.contains(p))).cloned().collect(),
+            None => before,
+        };
+        TStmt::Match { scrutinee: ts, arms: tarms }
+    }
+
+    /// Warn about a case (or an alternative of a `|`) that earlier cases already cover.
+    fn warn_unreachable(&mut self, rows: &[Vec<Pat>], p: &Pat, ty: &Type, arm: &MatchArm) {
+        let space = Space { structs: &self.structs };
+        let tys = std::slice::from_ref(ty);
+        if space.useful(rows, std::slice::from_ref(p), tys).is_none() {
+            self.diags.push(
+                Diagnostic::warning("unreachable `case`", arm.pattern.span)
+                    .with_primary("this case never runs")
+                    .with_note("the cases above it already match every value it would"),
+            );
+            return;
+        }
+        let ast_alts = match &arm.pattern.kind {
+            PatternKind::Or(a) => a,
+            PatternKind::As(inner, _) => match &inner.kind {
+                PatternKind::Or(a) => a,
+                _ => return,
+            },
+            _ => return,
+        };
+        let Pat::Or(alts) = p else { return };
+        for (j, alt) in alts.iter().enumerate() {
+            let mut r = rows.to_vec();
+            r.extend(alts[..j].iter().map(|a| vec![a.clone()]));
+            if space.useful(&r, std::slice::from_ref(alt), tys).is_none() {
+                self.diags.push(
+                    Diagnostic::warning("unreachable pattern", ast_alts[j].span)
+                        .with_primary("this alternative never matches")
+                        .with_note("what it matches is already handled before it"),
+                );
+            }
+        }
+    }
+
+    /// Check `p` against a value of type `ty`, declaring the names it binds.
+    fn check_pattern(&mut self, p: &Pattern, ty: &Type, cx: &mut PatCx) -> TPat {
+        let pat = |kind| TPat { kind, ty: ty.clone() };
+        let wild = || TPat { kind: TPatKind::Wild, ty: ty.clone() };
+        match &p.kind {
+            PatternKind::Wild => pat(TPatKind::Wild),
+            PatternKind::Bind(name) => {
+                let id = self.bind_name(name, ty, cx);
+                pat(TPatKind::Bind(id, Box::new(wild())))
+            }
+            PatternKind::As(inner, name) => {
+                let t = self.check_pattern(inner, ty, cx);
+                let id = self.bind_name(name, ty, cx);
+                pat(TPatKind::Bind(id, Box::new(t)))
+            }
+            PatternKind::Or(alts) => {
+                let before = cx.seen.clone();
+                let mut out = Vec::new();
+                let mut first: Option<(Vec<String>, Span)> = None;
+                for a in alts {
+                    cx.seen = before.clone();
+                    out.push(self.check_pattern(a, ty, cx));
+                    let mut names: Vec<String> = cx.seen[before.len()..].to_vec();
+                    names.sort();
+                    match &first {
+                        None => first = Some((names, a.span)),
+                        Some((want, span)) if *want != names => {
+                            let odd: Vec<String> = want.iter().filter(|n| !names.contains(n)).chain(names.iter().filter(|n| !want.contains(n))).map(|n| format!("`{n}`")).collect();
+                            self.err(
+                                Diagnostic::error("every alternative of `|` must bind the same names", a.span)
+                                    .with_label(*span, "compared to this alternative")
+                                    .with_note(format!("{} {} bound by only one of them", and_list(&odd), if odd.len() == 1 { "is" } else { "are" }))
+                                    .with_help("bind the name in every alternative, or use `_` instead"),
+                            );
+                            cx.errors = true;
+                        }
+                        _ => {}
+                    }
+                }
+                cx.seen = before;
+                cx.seen.extend(first.map(|f| f.0).unwrap_or_default());
+                pat(TPatKind::Or(out))
+            }
+            PatternKind::Null => {
+                if !ty.is_nullable() && !ty.is_error() {
+                    let tn = self.tn(ty);
+                    self.err(
+                        Diagnostic::error("this case can never match: the value is never `null`", p.span)
+                            .with_primary(format!("the value is a `{tn}`"))
+                            .with_help("remove this case"),
+                    );
+                    cx.errors = true;
+                }
+                pat(TPatKind::Null)
+            }
+            // Any other pattern describes a non-null value.
+            _ if ty.is_nullable() => {
+                let inner = self.check_pattern(p, ty.non_null(), cx);
+                pat(TPatKind::Some(Box::new(inner)))
+            }
+            _ if ty.is_error() => {
+                if let PatternKind::Ctor { args: Some(args), .. } = &p.kind {
+                    for a in args {
+                        let _ = self.check_pattern(&a.pat, &Type::Error, cx);
+                    }
+                }
+                wild()
+            }
+            PatternKind::Int(v) => self.literal_pattern(p, ty, &Type::Int, TPatKind::Int(*v), cx),
+            PatternKind::Str(v) => self.literal_pattern(p, ty, &Type::Str, TPatKind::Str(v.clone()), cx),
+            PatternKind::Bool(v) => self.literal_pattern(p, ty, &Type::Bool, TPatKind::Bool(*v), cx),
+            PatternKind::Float(_) => {
+                self.err(
+                    Diagnostic::error("floats can't be used as patterns", p.span)
+                        .with_primary("a `Float`")
+                        .with_note("an exact float comparison is rarely what you want")
+                        .with_help("bind the value and test it in a guard: `case x if x > 0.5:`"),
+                );
+                cx.errors = true;
+                wild()
+            }
+            PatternKind::Ctor { path, args } => self.ctor_pattern(p, path, args.as_deref(), ty, cx),
+        }
+    }
+
+    fn literal_pattern(&mut self, p: &Pattern, ty: &Type, lit_ty: &Type, kind: TPatKind, cx: &mut PatCx) -> TPat {
+        if ty != lit_ty {
+            let (want, found) = (self.tn(ty), self.tn(lit_ty));
+            self.err(
+                Diagnostic::error(format!("mismatched types: this case is {}, but the value is {}", a_type(&found), a_type(&want)), p.span)
+                    .with_primary(format!("expected {} pattern", a_type(&want))),
+            );
+            cx.errors = true;
+            return TPat { kind: TPatKind::Wild, ty: ty.clone() };
+        }
+        TPat { kind, ty: ty.clone() }
+    }
+
+    /// A name in a pattern: declares it, or (in another alternative of a `|`) reuses it.
+    fn bind_name(&mut self, name: &Ident, ty: &Type, cx: &mut PatCx) -> LocalId {
+        if cx.seen.contains(&name.name) {
+            self.err(Diagnostic::error(format!("`{}` is bound more than once in this pattern", name.name), name.span).with_help("use a different name, or `_`"));
+            cx.errors = true;
+        }
+        cx.seen.push(name.name.clone());
+        if let Some((_, bty, id)) = cx.binds.iter().find(|b| b.0 == name.name).cloned() {
+            if !bty.compatible(ty) {
+                let (a, b) = (self.tn(&bty), self.tn(ty));
+                self.err(Diagnostic::error(format!("`{}` is a `{a}` in one alternative and a `{b}` in another", name.name), name.span));
+                cx.errors = true;
+            }
+            let decl = self.local_meta[id].span;
+            self.local_use(id, decl, name.span, false);
+            return id;
+        }
+        let id = self.declare_local(name, ty.clone(), LocalKind::Val);
+        if !name.name.starts_with('_') && !ty.is_error() {
+            let hint = format!(": {}", self.tn(ty));
+            self.ide.inlay_hints.push((name.span.end, hint));
+        }
+        cx.binds.push((name.name.clone(), ty.clone(), id));
+        id
+    }
+
+    /// `Circle(r)`, `Shape.Rect(w, h=_)`, `Empty`, `Point(x, y)`.
+    fn ctor_pattern(&mut self, p: &Pattern, path: &[Ident], args: Option<&[PatArg]>, ty: &Type, cx: &mut PatCx) -> TPat {
+        let last = path.last().unwrap();
+        let shown: Vec<&str> = path.iter().map(|i| i.name.as_str()).collect();
+        let shown = shown.join(".");
+        // The qualifier (`Shape` in `Shape.Circle`) must name the value's type.
+        let (sid, qual_ok) = match ty {
+            Type::Enum(id, _) => (*id, path.len() == 1 || self.names_type(&path[..path.len() - 1], *id)),
+            Type::Struct(id) => (*id, self.names_type(path, *id)),
+            _ => {
+                let tn = self.tn(ty);
+                self.err(
+                    Diagnostic::error(format!("mismatched types: `{shown}` can't match {}", a_type(&tn)), p.span)
+                        .with_primary(format!("expected {} pattern", a_type(&tn))),
+                );
+                cx.errors = true;
+                return TPat { kind: TPatKind::Wild, ty: ty.clone() };
+            }
+        };
+        let tname = self.structs[sid].name.clone();
+        let short = tname.rsplit('.').next().unwrap_or(&tname).to_string();
+        if !qual_ok {
+            self.err(
+                Diagnostic::error(format!("mismatched types: `{shown}` can't match {}", a_type(&tname)), p.span)
+                    .with_primary(format!("expected {} pattern", a_type(&tname))),
+            );
+            cx.errors = true;
+            return TPat { kind: TPatKind::Wild, ty: ty.clone() };
+        }
+        if let Type::Struct(_) = ty {
+            let fields = self.structs[sid].fields.clone();
+            let subs = self.field_patterns(&fields, args, &short, p.span, cx);
+            return TPat { kind: TPatKind::Struct(sid, subs), ty: ty.clone() };
+        }
+        let variants = self.structs[sid].variants().to_vec();
+        let Some(k) = variants.iter().position(|v| v.name == last.name) else {
+            let mut d = Diagnostic::error(format!("enum `{tname}` has no variant `{}`", last.name), last.span).with_primary("unknown variant");
+            if let Some(s) = suggest(&last.name, variants.iter().map(|v| v.name.as_str())) {
+                d = d.with_help(format!("did you mean `{s}`?"));
+            } else {
+                let names: Vec<String> = variants.iter().map(|v| format!("`{}`", v.name)).collect();
+                d = d.with_note(format!("its variants are {}", and_list(&names)));
+            }
+            self.err(d);
+            cx.errors = true;
+            return TPat { kind: TPatKind::Wild, ty: ty.clone() };
+        };
+        self.variant_use(sid, k, last.span);
+        let fields = variants[k].fields.clone();
+        if fields.is_empty() && args.is_some() {
+            self.err(
+                Diagnostic::error(format!("`{}` has no fields", last.name), p.span)
+                    .with_primary("no fields to match")
+                    .with_help(format!("write `{}` without parentheses", last.name)),
+            );
+            cx.errors = true;
+        }
+        let subs = self.field_patterns(&fields, args, &last.name, p.span, cx);
+        TPat { kind: TPatKind::Variant(sid, k, subs), ty: ty.clone() }
+    }
+
+    /// Does `path` (`Shape`, `time.Month`) name the struct or enum `sid`? Adds hovers when it does.
+    fn names_type(&mut self, path: &[Ident], sid: StructId) -> bool {
+        let found = match path {
+            [name] => self.struct_index.get(&(self.ns, name.name.clone())).copied(),
+            [module, name] => self.imported_module(&module.name).and_then(|m| self.struct_index.get(&(m, name.name.clone())).copied()),
+            _ => None,
+        };
+        if found == Some(sid) {
+            let name = path.last().unwrap();
+            self.pending_struct_hovers.push((name.span, sid));
+            self.ide.definitions.push((name.span, self.struct_spans[sid]));
+        }
+        found == Some(sid)
+    }
+
+    /// The patterns for each field of a variant or struct: positional, then by
+    /// name; fields not mentioned (or all, without parentheses) match anything.
+    fn field_patterns(&mut self, fields: &[TField], args: Option<&[PatArg]>, what: &str, span: Span, cx: &mut PatCx) -> Vec<TPat> {
+        let mut slots: Vec<Option<TPat>> = vec![None; fields.len()];
+        let args = args.unwrap_or(&[]);
+        let positional = args.iter().take_while(|a| a.name.is_none()).count();
+        let named = args.len() > positional;
+        let n = fields.len();
+        if positional > n || (positional > 0 && positional < n && !named) {
+            let s = if n == 1 { "" } else { "s" };
+            let example: Vec<String> = fields.iter().map(|f| f.name.clone()).collect();
+            self.err(
+                Diagnostic::error(format!("`{what}` has {n} field{s}, but the pattern gives {positional}"), span)
+                    .with_primary(format!("expected {n} field pattern{s}"))
+                    .with_help(format!("match every field, using `_` for the ones you don't need: `{what}({})`, or name them: `{what}({}=...)`", example.join(", "), example.first().cloned().unwrap_or_default())),
+            );
+            cx.errors = true;
+        }
+        for (i, a) in args.iter().enumerate() {
+            let idx = match &a.name {
+                None if i < positional => i,
+                None => {
+                    self.err(Diagnostic::error("positional patterns must come before named ones", a.pat.span));
+                    cx.errors = true;
+                    continue;
+                }
+                Some(fname) => match fields.iter().position(|f| f.name == fname.name) {
+                    Some(idx) if slots[idx].is_some() => {
+                        self.err(Diagnostic::error(format!("field `{}` is matched more than once", fname.name), fname.span));
+                        cx.errors = true;
+                        continue;
+                    }
+                    Some(idx) => idx,
+                    None => {
+                        let mut d = Diagnostic::error(format!("`{what}` has no field `{}`", fname.name), fname.span);
+                        if let Some(s) = suggest(&fname.name, fields.iter().map(|f| f.name.as_str())) {
+                            d = d.with_help(format!("did you mean `{s}`?"));
+                        }
+                        self.err(d);
+                        cx.errors = true;
+                        continue;
+                    }
+                },
+            };
+            if idx >= n {
+                let _ = self.check_pattern(&a.pat, &Type::Error, cx);
+                continue;
+            }
+            slots[idx] = Some(self.check_pattern(&a.pat, &fields[idx].ty, cx));
+        }
+        slots.into_iter().zip(fields).map(|(s, f)| s.unwrap_or(TPat { kind: TPatKind::Wild, ty: f.ty.clone() })).collect()
+    }
+
+    /// Hover and go-to-definition for a use of variant `k` of enum `sid`.
+    fn variant_use(&mut self, sid: StructId, k: usize, span: Span) {
+        let Some(v) = self.ide.structs[sid].variants.as_ref().and_then(|vs| vs.get(k)) else { return };
+        let (code, def, doc) = (v.signature.clone(), v.span, v.doc.clone());
+        let ename = self.structs[sid].name.clone();
+        let doc = Some(match doc {
+            Some(d) => format!("variant of `{ename}`\n\n{d}"),
+            None => format!("variant of `{ename}`"),
+        });
+        self.hover(span, code, doc);
+        self.ide.definitions.push((span, def));
+    }
+
+    /// `Shape` or `module.Shape`, when an expression names an enum (to build a variant).
+    fn enum_ref(&mut self, e: &Expr) -> Option<StructId> {
+        let sid = match &e.kind {
+            ExprKind::Name(n) if self.lookup(n).is_none() => self.struct_index.get(&(self.ns, n.clone())).copied()?,
+            ExprKind::Field(m, n) => {
+                let ExprKind::Name(mn) = &m.kind else { return None };
+                if self.lookup(mn).is_some() || !self.imports.contains_key(&(self.ns, mn.clone())) {
+                    return None;
+                }
+                let module_ns = self.imported_module(mn)?;
+                let sid = self.struct_index.get(&(module_ns, n.name.clone())).copied()?;
+                if !matches!(self.def_types[sid], Type::Enum(..)) {
+                    return None;
+                }
+                self.module_hover(module_ns, m.span);
+                sid
+            }
+            _ => return None,
+        };
+        if !matches!(self.def_types[sid], Type::Enum(..)) {
+            return None;
+        }
+        let name_span = match &e.kind {
+            ExprKind::Field(_, n) => n.span,
+            _ => e.span,
+        };
+        self.pending_struct_hovers.push((name_span, sid));
+        self.ide.definitions.push((name_span, self.struct_spans[sid]));
+        Some(sid)
+    }
+
+    /// `Shape.Circle(args)` (or `Shape.Empty` when `args` is `None`).
+    fn variant_value(&mut self, sid: StructId, name: &Ident, args: Option<&[Arg]>, span: Span) -> TExpr {
+        let ename = self.structs[sid].name.clone();
+        let variants = self.structs[sid].variants().to_vec();
+        let ty = self.def_types[sid].clone();
+        let Some(k) = variants.iter().position(|v| v.name == name.name) else {
+            let mut d = Diagnostic::error(format!("enum `{ename}` has no variant `{}`", name.name), name.span).with_primary("unknown variant");
+            if self.methods.contains_key(&(sid, name.name.clone())) {
+                d = d.with_note(format!("`{}` is a method: call it on a `{ename}` value", name.name));
+            } else if let Some(s) = suggest(&name.name, variants.iter().map(|v| v.name.as_str())) {
+                d = d.with_help(format!("did you mean `{s}`?"));
+            } else {
+                let names: Vec<String> = variants.iter().map(|v| format!("`{}`", v.name)).collect();
+                d = d.with_note(format!("its variants are {}", and_list(&names)));
+            }
+            self.err(d);
+            for a in args.unwrap_or(&[]) {
+                let _ = self.expr(&a.value, None);
+            }
+            return Self::error_expr(span);
+        };
+        self.variant_use(sid, k, name.span);
+        let v = &variants[k];
+        let short = ename.rsplit('.').next().unwrap_or(&ename).to_string();
+        match args {
+            None if v.fields.is_empty() => Self::mk(TExprKind::EnumNew(sid, k, Vec::new()), ty, span),
+            None => {
+                let sig = self.variant_signature(&ename, v);
+                self.err(
+                    Diagnostic::error(format!("`{short}.{}` needs its fields", v.name), span)
+                        .with_primary("missing fields")
+                        .with_help(format!("build it with `{sig}`")),
+                );
+                Self::error_expr(span)
+            }
+            Some(args) if v.fields.is_empty() => {
+                for a in args {
+                    let _ = self.expr(&a.value, None);
+                }
+                self.err(
+                    Diagnostic::error(format!("`{short}.{}` has no fields", v.name), span)
+                        .with_primary("no fields to pass")
+                        .with_help(format!("write `{short}.{}` without parentheses", v.name)),
+                );
+                Self::error_expr(span)
+            }
+            Some(args) => {
+                let params: Vec<(String, Type)> = v.fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect();
+                let what = format!("variant `{short}.{}`", v.name);
+                match self.match_args(&what, &params, args, span) {
+                    Some(targs) => Self::mk(TExprKind::EnumNew(sid, k, targs), ty, span),
+                    None => Self::mk(TExprKind::Int(0), ty, span),
+                }
+            }
+        }
     }
 
     fn loop_jump(&mut self, is_break: bool, span: Span) -> TStmt {
@@ -1583,6 +2191,23 @@ impl Checker {
     fn no_field(&mut self, ty: &Type, field: &Ident) {
         let tn = self.tn(ty);
         let mut d = Diagnostic::error(format!("no field `{}` on type `{tn}`", field.name), field.span).with_primary("unknown field");
+        if let Type::Enum(sid, _) = ty {
+            let sid = *sid;
+            if self.methods.contains_key(&(sid, field.name.clone())) {
+                d = d.with_help(format!("`{}` is a method; call it with `.{}()`", field.name, field.name));
+            } else {
+                let example = self.structs[sid]
+                    .variants()
+                    .iter()
+                    .find(|v| v.fields.iter().any(|f| f.name == field.name))
+                    .or(self.structs[sid].variants().first())
+                    .map(|v| if v.fields.is_empty() { v.name.clone() } else { format!("{}({})", v.name, v.fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>().join(", ")) })
+                    .unwrap_or_default();
+                d = d.with_note("the data inside an enum value is taken apart with `match`").with_help(format!("match on it: `case {example}:`"));
+            }
+            self.err(d);
+            return;
+        }
         if let Type::Struct(sid) = ty {
             let sid = *sid;
             if self.methods.contains_key(&(sid, field.name.clone())) {
@@ -1683,9 +2308,14 @@ impl Checker {
                     Diagnostic::error(format!("`{name}` is a function, not a value"), span)
                         .with_help(format!("call it: `{name}(...)`"))
                         .with_note("functions are not first-class values yet")
-                } else if self.struct_index.contains_key(&(self.ns, name.clone())) {
-                    Diagnostic::error(format!("`{name}` is a struct, not a value"), span)
-                        .with_help(format!("construct one with `{name}(...)`"))
+                } else if let Some(&sid) = self.struct_index.get(&(self.ns, name.clone())) {
+                    match self.structs[sid].variants() {
+                        [] if self.structs[sid].variants.is_none() => {
+                            Diagnostic::error(format!("`{name}` is a struct, not a value"), span).with_help(format!("construct one with `{name}(...)`"))
+                        }
+                        vs => Diagnostic::error(format!("`{name}` is an enum, not a value"), span)
+                            .with_help(format!("pick a variant, e.g. `{name}.{}`", vs.first().map(|v| v.name.as_str()).unwrap_or("..."))),
+                    }
                 } else {
                     let mut d = Diagnostic::error(format!("cannot find value `{name}` in this scope"), span).with_primary("not found in this scope");
                     let candidates: Vec<String> = self.scopes.iter().flat_map(|s| s.keys().cloned()).collect();
@@ -1737,6 +2367,9 @@ impl Checker {
             }
             ExprKind::Call { callee, args } => self.call(callee, args, span, expected),
             ExprKind::Field(obj, field) => {
+                if let Some(sid) = self.enum_ref(obj) {
+                    return self.variant_value(sid, field, None, span);
+                }
                 let t = self.expr(obj, None);
                 self.field_access(t, field, span)
             }
@@ -1953,7 +2586,7 @@ impl Checker {
     fn stringify(&mut self, t: TExpr, span: Span) -> TExpr {
         match &t.ty {
             Type::Str => t,
-            Type::Int | Type::Float | Type::Bool => Self::mk(TExprKind::Builtin(Builtin::ToStr, vec![t]), Type::Str, span),
+            Type::Int | Type::Float | Type::Bool | Type::Enum(_, false) => Self::mk(TExprKind::Builtin(Builtin::ToStr, vec![t]), Type::Str, span),
             Type::Error => t,
             Type::Null => Self::mk(TExprKind::Str("null".into()), Type::Str, span),
             // `x?.to_string() ?: "null"`
@@ -2061,8 +2694,11 @@ impl Checker {
                     };
                     d.with_help(help).with_note("Isma has no operator overloading: operators work on numbers, `Bool` and `String`")
                 }
+                (Type::Enum(..), _) | (_, Type::Enum(..)) if op.is_comparison() => d
+                    .with_note("`==` works on enums whose variants carry no data; this one's do")
+                    .with_help("use `match` to look at the variant and its data"),
                 (Type::Struct(_) | Type::List(_), _) if op.is_comparison() => {
-                    d.with_note("`==` is only defined for `Int`, `Float`, `Bool` and `String`")
+                    d.with_note("`==` is only defined for `Int`, `Float`, `Bool`, `String` and enums without data")
                 }
                 _ => d,
             };
@@ -2199,6 +2835,17 @@ impl Checker {
                 if let Some(&sid) = self.struct_index.get(&(self.ns, name.clone())) {
                     self.pending_struct_hovers.push((callee.span, sid));
                     self.ide.definitions.push((callee.span, self.struct_spans[sid]));
+                    if let Some(first) = self.structs[sid].variants.as_ref().map(|vs| vs.first().map(|v| v.name.clone()).unwrap_or_default()) {
+                        self.err(
+                            Diagnostic::error(format!("`{name}` is an enum: a value is one of its variants"), callee.span)
+                                .with_primary("not a constructor")
+                                .with_help(format!("build a variant, e.g. `{name}.{first}(...)`")),
+                        );
+                        for a in args {
+                            let _ = self.expr(&a.value, None);
+                        }
+                        return Self::error_expr(span);
+                    }
                     let params: Vec<(String, Type)> = self.structs[sid].fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect();
                     let what = format!("struct `{name}`");
                     return match self.match_args(&what, &params, args, span) {
@@ -2254,6 +2901,9 @@ impl Checker {
                 Self::error_expr(span)
             }
             ExprKind::Field(obj, method) => {
+                if let Some(sid) = self.enum_ref(obj) {
+                    return self.variant_value(sid, method, Some(args), span);
+                }
                 if let ExprKind::Name(m) = &obj.kind
                     && self.lookup(m).is_none()
                     && let Some(module_ns) = self.imported_module(m)
@@ -2437,7 +3087,9 @@ impl Checker {
             match &param {
                 Some(p) => t = self.coerce(t, p, None),
                 // print accepts any primitive, and prints `null` for a null one
-                None if t.ty == Type::Null || t.ty.is_nullable() && t.ty.non_null().is_primitive() => t = self.stringify(t, a.value.span),
+                None if t.ty == Type::Null || t.ty.is_nullable() && t.ty.non_null().is_primitive() || matches!(t.ty, Type::Enum(_, false)) => {
+                    t = self.stringify(t, a.value.span)
+                }
                 None => {
                     if !t.ty.is_primitive() && !t.ty.is_error() {
                         let found = self.tn(&t.ty);
@@ -2527,7 +3179,13 @@ impl Checker {
                 let v = self.coerce(v, &elem, None);
                 Self::mk(TExprKind::Builtin(Builtin::ListPush, vec![recv, v]), Type::Unit, span)
             }
-            (Type::Struct(sid), _) => {
+            (Type::Enum(sid, false), "to_string") if !self.methods.contains_key(&(*sid, m.to_string())) => {
+                if !self.arity(args, 0, &what, span) {
+                    return Self::error_expr(span);
+                }
+                self.stringify(recv, span)
+            }
+            (Type::Struct(sid) | Type::Enum(sid, _), _) => {
                 let sid = *sid;
                 match self.methods.get(&(sid, m.to_string())) {
                     Some(&fid) if is_private(m) && self.struct_ns[sid] != self.ns => {
@@ -2558,7 +3216,8 @@ impl Checker {
                     }
                     None => {
                         let sname = self.structs[sid].name.clone();
-                        let mut d = Diagnostic::error(format!("no method `{m}` on struct `{sname}`"), method.span).with_primary("method not found");
+                        let kind = if self.structs[sid].variants.is_some() { "enum" } else { "struct" };
+                        let mut d = Diagnostic::error(format!("no method `{m}` on {kind} `{sname}`"), method.span).with_primary("method not found");
                         if self.structs[sid].fields.iter().any(|f| f.name == m) {
                             d = d.with_note(format!("`{m}` is a field, not a method; access it without parentheses: `.{m}`"));
                         } else {
@@ -2627,6 +3286,8 @@ fn stmt_diverges(s: &TStmt) -> bool {
             else_block.as_ref().is_some_and(|b| block_diverges(b)) && branches.iter().all(|(_, b)| block_diverges(b))
         }
         TStmt::While { cond, body } => matches!(cond.kind, TExprKind::Bool(true)) && !contains_break(body),
+        // Matches are exhaustive: one of the cases always runs.
+        TStmt::Match { arms, .. } => !arms.is_empty() && arms.iter().all(|a| block_diverges(&a.body)),
         _ => false,
     }
 }
@@ -2638,6 +3299,7 @@ fn ends_flow(s: &TStmt) -> bool {
         TStmt::If { branches, else_block: Some(eb) } => {
             branches.iter().all(|(_, b)| b.iter().any(ends_flow)) && eb.iter().any(ends_flow)
         }
+        TStmt::Match { arms, .. } => !arms.is_empty() && arms.iter().all(|a| a.body.iter().any(ends_flow)),
         other => stmt_diverges(other),
     }
 }
@@ -2663,6 +3325,9 @@ fn contains_break(stmts: &[TStmt]) -> bool {
         TStmt::While { cond, .. } => expr_breaks(cond),
         TStmt::ForRange { start, end, .. } => expr_breaks(start) || expr_breaks(end),
         TStmt::ForList { list, .. } => expr_breaks(list),
+        TStmt::Match { scrutinee, arms } => {
+            expr_breaks(scrutinee) || arms.iter().any(|a| a.guard.as_ref().is_some_and(expr_breaks) || contains_break(&a.body))
+        }
         TStmt::Continue | TStmt::Return(None) => false,
     })
 }
@@ -2673,7 +3338,12 @@ fn expr_breaks(e: &TExpr) -> bool {
     match &e.kind {
         TExprKind::Jump(s) => contains_break(std::slice::from_ref(&**s)),
         TExprKind::Int(_) | TExprKind::Float(_) | TExprKind::Bool(_) | TExprKind::Str(_) | TExprKind::Local(_) | TExprKind::Null => false,
-        TExprKind::Call(_, args) | TExprKind::Builtin(_, args) | TExprKind::StructNew(_, args) | TExprKind::ListLit(args) | TExprKind::FString(args) => any(args),
+        TExprKind::Call(_, args)
+        | TExprKind::Builtin(_, args)
+        | TExprKind::StructNew(_, args)
+        | TExprKind::EnumNew(_, _, args)
+        | TExprKind::ListLit(args)
+        | TExprKind::FString(args) => any(args),
         TExprKind::Binary(_, a, b) | TExprKind::And(a, b) | TExprKind::Or(a, b) | TExprKind::Index(a, b) | TExprKind::Elvis(a, b) => {
             expr_breaks(a) || expr_breaks(b)
         }

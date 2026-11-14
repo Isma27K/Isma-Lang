@@ -29,6 +29,8 @@ pub fn generate(prog: &Program, sources: &SourceMap, target_triple: Option<&str>
         tbaa: Vec::new(),
         rc_types: Vec::new(),
         cyclic: HashMap::new(),
+        units: Vec::new(),
+        name_tables: Vec::new(),
     };
     let mut funcs = String::new();
     for f in &prog.funcs {
@@ -46,8 +48,19 @@ pub fn generate(prog: &Program, sources: &SourceMap, target_triple: Option<&str>
     // Every heap object starts with its reference count.
     out.push_str("%IsmaList = type { i64, i64, i64, ptr }\n");
     for s in &prog.structs {
-        let fields: Vec<&str> = std::iter::once("i64").chain(s.fields.iter().map(|f| llty(&f.ty))).collect();
-        let _ = writeln!(out, "%struct.{} = type {{ {} }}", s.name, fields.join(", "));
+        match &s.variants {
+            // Every variant of an enum with data: { rc, tag, fields... }
+            Some(variants) => {
+                for v in variants {
+                    let fields: Vec<&str> = ["i64", "i64"].into_iter().chain(v.fields.iter().map(|f| llty(&f.ty))).collect();
+                    let _ = writeln!(out, "%enum.{}.{} = type {{ {} }}", s.name, v.name, fields.join(", "));
+                }
+            }
+            None => {
+                let fields: Vec<&str> = std::iter::once("i64").chain(s.fields.iter().map(|f| llty(&f.ty))).collect();
+                let _ = writeln!(out, "%struct.{} = type {{ {} }}", s.name, fields.join(", "));
+            }
+        }
     }
     out.push('\n');
     // File names for panic messages: the user's file, then imported modules.
@@ -132,12 +145,14 @@ fn llty(t: &Type) -> &'static str {
         Type::Int => "i64",
         Type::Float => "double",
         Type::Bool => "i1",
-        Type::Str | Type::List(_) | Type::Struct(_) => "ptr",
+        Type::Str | Type::List(_) | Type::Struct(_) | Type::Enum(_, true) => "ptr",
+        // An enum without data is just the number of its variant.
+        Type::Enum(_, false) => "i64",
         Type::Unit => "void",
         // A nullable reference is a pointer that may be null; a nullable
         // primitive is a (has-value flag, value) pair, kept in registers.
         Type::Nullable(inner) => match **inner {
-            Type::Int => "{ i1, i64 }",
+            Type::Int | Type::Enum(_, false) => "{ i1, i64 }",
             Type::Float => "{ i1, double }",
             Type::Bool => "{ i1, i1 }",
             _ => "ptr",
@@ -174,6 +189,7 @@ fn mangle(t: &Type) -> String {
         Type::Str => "str".into(),
         Type::List(e) => format!("list.{}", mangle(e)),
         Type::Struct(id) => format!("s{id}"),
+        Type::Enum(id, _) => format!("e{id}"),
         Type::Int => "int".into(),
         Type::Float => "float".into(),
         Type::Bool => "bool".into(),
@@ -201,6 +217,17 @@ fn float_const(v: f64) -> String {
     format!("0x{:016X}", v.to_bits())
 }
 
+/// The body of a `void (ptr %p)` function that runs `code[k]` for a value of
+/// variant `k` of an enum with data (the tag is at offset 8).
+fn variant_switch(code: &[String]) -> String {
+    let cases: Vec<String> = (1..code.len()).map(|k| format!("i64 {k}, label %v{k}")).collect();
+    let mut out = format!("entry:\n  %tagp = getelementptr inbounds i8, ptr %p, i64 8\n  %tag = load i64, ptr %tagp\n  switch i64 %tag, label %v0 [ {} ]\n", cases.join(" "));
+    for (k, c) in code.iter().enumerate() {
+        let _ = write!(out, "v{k}:\n{c}  ret void\n");
+    }
+    out
+}
+
 struct Codegen<'a> {
     prog: &'a Program,
     sources: &'a SourceMap<'a>,
@@ -223,6 +250,10 @@ struct Codegen<'a> {
     rc_types: Vec<Type>,
     /// Memoized `cycles::is_cyclic`.
     cyclic: HashMap<Type, bool>,
+    /// Data-less variants of enums with data, emitted as immortal singletons: (enum, variant).
+    units: Vec<(StructId, usize)>,
+    /// Enums without data whose variant names are needed (`print`, f-strings).
+    name_tables: Vec<StructId>,
 }
 
 impl<'a> Codegen<'a> {
@@ -296,6 +327,47 @@ impl<'a> Codegen<'a> {
         }
         let class = format!("field.{}.{idx}", self.prog.structs[sid].name);
         self.tbaa(&class)
+    }
+
+    fn variant_tbaa(&mut self, sid: StructId, k: usize, i: usize) -> String {
+        if is_pair(&self.prog.structs[sid].variants()[k].fields[i].ty) {
+            return String::new();
+        }
+        let class = format!("variant.{}.{k}.{i}", self.prog.structs[sid].name);
+        self.tbaa(&class)
+    }
+
+    /// `%enum.Shape.Circle`
+    fn variant_llty(&self, sid: StructId, k: usize) -> String {
+        let s = &self.prog.structs[sid];
+        format!("%enum.{}.{}", s.name, s.variants()[k].name)
+    }
+
+    /// Does enum `sid` live on the heap (some variant carries data)?
+    fn boxed(&self, sid: StructId) -> bool {
+        self.prog.structs[sid].variants().iter().any(|v| !v.fields.is_empty())
+    }
+
+    /// The immortal singleton for a data-less variant of an enum with data.
+    fn unit_value(&mut self, sid: StructId, k: usize) -> String {
+        let name = format!("@isma.unit.{sid}.{k}");
+        if !self.units.contains(&(sid, k)) {
+            self.units.push((sid, k));
+            let _ = writeln!(self.globals, "{name} = internal global {{ i64, i64 }} {{ i64 {RC_IMMORTAL}, i64 {k} }}, align 8");
+        }
+        name
+    }
+
+    /// `[N x ptr]` of the variant names of a data-less enum, as Isma strings.
+    fn name_table(&mut self, sid: StructId) -> String {
+        let name = format!("@isma.names.{sid}");
+        if !self.name_tables.contains(&sid) {
+            self.name_tables.push(sid);
+            let names: Vec<String> = self.prog.structs[sid].variants().iter().map(|v| v.name.clone()).collect();
+            let entries: Vec<String> = names.iter().map(|n| format!("ptr {}", self.string_literal(n))).collect();
+            let _ = writeln!(self.globals, "{name} = private constant [{} x ptr] [{}]", entries.len(), entries.join(", "));
+        }
+        name
     }
 
     /// `ptr file, i32 line, i32 col` arguments for runtime panics.
@@ -689,8 +761,62 @@ impl<'a> Codegen<'a> {
                 let _ = writeln!(out, "define internal void @isma.white.{m}(ptr %p) #0 {{\n  call void @isma_list_free(ptr %p)\n  ret void\n}}\n");
                 let _ = writeln!(out, "define internal void @isma.mem.{m}(ptr %p) #0 {{\n  call void @isma_list_free(ptr %p)\n  ret void\n}}\n");
             }
-            _ => unreachable!("only structs and lists can be cyclic"),
+            Type::Enum(sid, true) => {
+                let sid = *sid;
+                let n = self.prog.structs[sid].variants().len();
+                let (mut trace, mut all, mut acyclic, mut mem) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+                for k in 0..n {
+                    let fields: Vec<Type> = self.prog.structs[sid].variants()[k].fields.iter().map(|f| f.ty.clone()).collect();
+                    let mut t = String::new();
+                    for (i, fty) in fields.iter().enumerate() {
+                        if is_ref(fty) && self.is_cyclic(fty) {
+                            let lt = self.variant_llty(sid, k);
+                            let _ = writeln!(
+                                t,
+                                "  %v{k}f{i}p = getelementptr inbounds {lt}, ptr %p, i32 0, i32 {}\n  %v{k}f{i} = load ptr, ptr %v{k}f{i}p\n  call void %visit(ptr %v{k}f{i}, ptr @isma.ti.{})",
+                                i + 2,
+                                mangle(fty.non_null())
+                            );
+                        }
+                    }
+                    trace.push(t);
+                    let rel_all = self.variant_fields_code(sid, k, |_, _| true);
+                    all.push(format!("{rel_all}  call void @isma_cyclic_free(ptr %p, ptr @isma.ti.{m})\n"));
+                    let rel_acyclic = self.variant_fields_code(sid, k, |c, t| !c.is_cyclic(t));
+                    acyclic.push(format!("{rel_acyclic}  call void @isma.mem.{m}(ptr %p)\n"));
+                    mem.push(self.variant_free_code(sid, k));
+                }
+                let _ = writeln!(out, "define internal void @isma.trace.{m}(ptr %p, ptr %visit) #0 {{\n{}}}\n", variant_switch(&trace));
+                let _ = writeln!(out, "define internal void @isma.drop.{m}(ptr %p) #0 {{\n{}}}\n", variant_switch(&all));
+                let _ = writeln!(out, "define internal void @isma.white.{m}(ptr %p) #0 {{\n{}}}\n", variant_switch(&acyclic));
+                let _ = writeln!(out, "define internal void @isma.mem.{m}(ptr %p) #0 {{\n{}}}\n", variant_switch(&mem));
+            }
+            _ => unreachable!("only structs, enums and lists can be cyclic"),
         }
+    }
+
+    /// Code (in a function with the value in `%p`) releasing the reference
+    /// fields of variant `k` of enum `sid` for which `keep(self, type)` holds.
+    fn variant_fields_code(&mut self, sid: StructId, k: usize, keep: impl Fn(&mut Self, &Type) -> bool) -> String {
+        let lt = self.variant_llty(sid, k);
+        let fields: Vec<Type> = self.prog.structs[sid].variants()[k].fields.iter().map(|f| f.ty.clone()).collect();
+        let mut out = String::new();
+        for (i, fty) in fields.iter().enumerate() {
+            if !is_ref(fty) || !keep(self, fty) {
+                continue;
+            }
+            let rel = self.release_fn(fty);
+            let _ = writeln!(out, "  %v{k}f{i}p = getelementptr inbounds {lt}, ptr %p, i32 0, i32 {}", i + 2);
+            let _ = writeln!(out, "  %v{k}f{i} = load ptr, ptr %v{k}f{i}p");
+            let _ = writeln!(out, "  call void {rel}(ptr %v{k}f{i})");
+        }
+        out
+    }
+
+    /// Code freeing `%p`, a value of variant `k` of enum `sid`.
+    fn variant_free_code(&self, sid: StructId, k: usize) -> String {
+        let lt = self.variant_llty(sid, k);
+        format!("  %v{k}szp = getelementptr {lt}, ptr null, i32 1\n  %v{k}sz = ptrtoint ptr %v{k}szp to i64\n  call void @isma_free(ptr %p, i64 %v{k}sz)\n")
     }
 
     fn rc_functions(&mut self) -> String {
@@ -739,6 +865,22 @@ impl<'a> Codegen<'a> {
                         out,
                         "define internal void @isma.drop.{m}(ptr %p) #0 {{\n  call void @isma.fields.{m}(ptr %p)\n  %szp = getelementptr %struct.{sname}, ptr null, i32 1\n  %sz = ptrtoint ptr %szp to i64\n  call void @isma_free(ptr %p, i64 %sz)\n  ret void\n}}\n"
                     );
+                }
+                Type::Enum(sid, true) => {
+                    let sid = *sid;
+                    let n = self.prog.structs[sid].variants().len();
+                    let mut release = Vec::new();
+                    let mut free = Vec::new();
+                    for k in 0..n {
+                        release.push(self.variant_fields_code(sid, k, |_, _| true));
+                        free.push(self.variant_free_code(sid, k));
+                    }
+                    // `fields` releases what the value holds (also used when its memory
+                    // is reused); `drop` also frees it, with its variant's size.
+                    let fields_body = variant_switch(&release);
+                    let drop_body = variant_switch(&release.iter().zip(&free).map(|(a, b)| format!("{a}{b}")).collect::<Vec<_>>());
+                    let _ = writeln!(out, "define internal void @isma.fields.{m}(ptr %p) #0 {{\n{fields_body}}}\n");
+                    let _ = writeln!(out, "define internal void @isma.drop.{m}(ptr %p) #0 {{\n{drop_body}}}\n");
                 }
                 Type::List(e) if is_ref(e) => {
                     let rel = self.release_fn(e);
@@ -822,6 +964,10 @@ impl<'a> Codegen<'a> {
                 let cc = if op == BinOp::Eq { "eq" } else { "ne" };
                 self.emit(format!("{r} = icmp {cc} i1 {a}, {b}"));
             }
+            Type::Enum(_, false) => {
+                let cc = if op == BinOp::Eq { "eq" } else { "ne" };
+                self.emit(format!("{r} = icmp {cc} i64 {a}, {b}"));
+            }
             Type::Str => match op {
                 BinOp::Add => self.emit(format!("{r} = call ptr @isma_str_concat(ptr {a}, ptr {b})")),
                 BinOp::Eq | BinOp::Ne => {
@@ -858,6 +1004,14 @@ impl<'a> Codegen<'a> {
                 let z = self.fresh();
                 self.emit(format!("{z} = zext i1 {v} to i64"));
                 self.emit(format!("{r} = call ptr @isma_bool_to_str(i64 {z})"));
+            }
+            // The variant's name (an immortal string literal).
+            Type::Enum(sid, false) => {
+                let n = self.prog.structs[*sid].variants().len();
+                let table = self.name_table(*sid);
+                let ep = self.fresh();
+                self.emit(format!("{ep} = getelementptr inbounds [{n} x ptr], ptr {table}, i64 0, i64 {v}"));
+                self.emit(format!("{r} = load ptr, ptr {ep}"));
             }
             _ => unreachable!(),
         }
@@ -934,11 +1088,20 @@ impl<'a> Codegen<'a> {
                 self.emit(format!("{r} = load {}, ptr {p}{md}", llty(&elem)));
                 r
             }
-            Rvalue::StructNew(sid, args) | Rvalue::Reuse(_, sid, args) => {
+            Rvalue::New(Ctor::Variant(sid, k), args) if !self.boxed(*sid) => {
+                debug_assert!(args.is_empty());
+                k.to_string()
+            }
+            Rvalue::New(Ctor::Variant(sid, k), args) if args.is_empty() => self.unit_value(*sid, *k),
+            Rvalue::New(c, args) | Rvalue::Reuse(_, c, args) => {
                 let vals: Vec<(String, Type)> = args.iter().map(|a| (self.operand(a), self.f.operand_ty(a))).collect();
-                let sname = self.prog.structs[*sid].name.clone();
+                // LLVM type, its type in Isma, and the index of the first field.
+                let (lt, ty, first) = match *c {
+                    Ctor::Struct(sid) => (format!("%struct.{}", self.prog.structs[sid].name), Type::Struct(sid), 1),
+                    Ctor::Variant(sid, k) => (self.variant_llty(sid, k), Type::Enum(sid, true), 2),
+                };
                 let szp = self.fresh();
-                self.emit(format!("{szp} = getelementptr %struct.{sname}, ptr null, i32 1"));
+                self.emit(format!("{szp} = getelementptr {lt}, ptr null, i32 1"));
                 let sz = self.fresh();
                 self.emit(format!("{sz} = ptrtoint ptr {szp} to i64"));
                 let p = self.fresh();
@@ -961,15 +1124,47 @@ impl<'a> Codegen<'a> {
                     self.emit(format!("{p} = call ptr @isma_alloc(i64 {sz})"));
                 }
                 let md = self.tbaa("rc");
-                let one = if self.is_cyclic(&Type::Struct(*sid)) { 8 } else { 1 };
+                let one = if self.is_cyclic(&ty) { 8 } else { 1 };
                 self.emit(format!("store i64 {one}, ptr {p}{md}"));
-                for (i, (v, ty)) in vals.iter().enumerate() {
+                if let Ctor::Variant(_, k) = c {
+                    let tp = self.fresh();
+                    self.emit(format!("{tp} = getelementptr inbounds i8, ptr {p}, i64 8"));
+                    let md = self.tbaa("enum.tag");
+                    self.emit(format!("store i64 {k}, ptr {tp}{md}"));
+                }
+                for (i, (v, vty)) in vals.iter().enumerate() {
                     let fp = self.fresh();
-                    self.emit(format!("{fp} = getelementptr inbounds %struct.{sname}, ptr {p}, i32 0, i32 {}", i + 1));
-                    let md = self.field_tbaa(*sid, i);
-                    self.emit(format!("store {} {v}, ptr {fp}{md}", llty(ty)));
+                    self.emit(format!("{fp} = getelementptr inbounds {lt}, ptr {p}, i32 0, i32 {}", i + first));
+                    let md = match *c {
+                        Ctor::Struct(sid) => self.field_tbaa(sid, i),
+                        Ctor::Variant(sid, k) => self.variant_tbaa(sid, k, i),
+                    };
+                    self.emit(format!("store {} {v}, ptr {fp}{md}", llty(vty)));
                 }
                 p
+            }
+            Rvalue::Tag(v) => {
+                let val = self.operand(&Operand::Var(*v));
+                if matches!(self.f.vars[*v].ty, Type::Enum(_, false)) {
+                    return val;
+                }
+                let tp = self.fresh();
+                self.emit(format!("{tp} = getelementptr inbounds i8, ptr {val}, i64 8"));
+                let r = self.fresh();
+                let md = self.tbaa("enum.tag");
+                self.emit(format!("{r} = load i64, ptr {tp}{md}"));
+                r
+            }
+            Rvalue::VariantField(v, sid, k, i) => {
+                let val = self.operand(&Operand::Var(*v));
+                let lt = self.variant_llty(*sid, *k);
+                let fty = llty(&self.prog.structs[*sid].variants()[*k].fields[*i].ty);
+                let fp = self.fresh();
+                self.emit(format!("{fp} = getelementptr inbounds {lt}, ptr {val}, i32 0, i32 {}", i + 2));
+                let r = self.fresh();
+                let md = self.variant_tbaa(*sid, *k, *i);
+                self.emit(format!("{r} = load {fty}, ptr {fp}{md}"));
+                r
             }
             Rvalue::ListNew(elem, args) => {
                 let sz = elem_size(elem);

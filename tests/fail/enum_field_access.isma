@@ -1,0 +1,9 @@
+# expect-error: the data inside an enum value is taken apart with `match`
+enum Shape:
+    Circle(radius: Float)
+    Rect(w: Float, h: Float)
+    Empty
+
+fn main():
+    val c = Shape.Circle(1.0)
+    print(c.radius)

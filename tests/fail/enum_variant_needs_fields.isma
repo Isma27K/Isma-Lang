@@ -1,0 +1,9 @@
+# expect-error: `Shape.Circle` needs its fields
+enum Shape:
+    Circle(radius: Float)
+    Rect(w: Float, h: Float)
+    Empty
+
+fn main():
+    val c = Shape.Circle
+    print(c.area())

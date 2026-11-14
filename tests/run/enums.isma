@@ -1,0 +1,210 @@
+# Enums, `match` and patterns.
+
+enum Color:
+    Red
+    Green
+    Blue
+
+    fn is_warm(self) -> Bool:
+        return self == Color.Red
+
+enum Shape:
+    Circle(radius: Float)
+    Rect(w: Float, h: Float)
+    Empty
+
+    fn area(self) -> Float:
+        match self:
+            case Circle(r):
+                return 3.0 * r * r
+            case Rect(w, h):
+                return w * h
+            case Empty:
+                return 0.0
+
+enum Expr:
+    Num(value: Int)
+    Neg(e: Expr)
+    Add(a: Expr, b: Expr)
+    Mul(a: Expr, b: Expr)
+
+struct Point:
+    x: Int
+    y: Int
+
+enum Command:
+    Move(to: Point)
+    Say(text: String)
+    Wait(ticks: Int?)
+    Quit
+
+fn eval(e: Expr) -> Int:
+    match e:
+        case Num(v):
+            return v
+        case Neg(x):
+            return -eval(x)
+        case Add(a, b):
+            return eval(a) + eval(b)
+        case Mul(a, b):
+            return eval(a) * eval(b)
+
+fn show(e: Expr) -> String:
+    match e:
+        case Num(v) if v < 0:
+            return f"({v})"
+        case Num(v):
+            return f"{v}"
+        case Neg(Num(v)):
+            return f"-{v}"
+        case Neg(x):
+            return f"-({show(x)})"
+        case Add(a, b):
+            return f"({show(a)} + {show(b)})"
+        case Mul(a, b):
+            return f"{show(a)} * {show(b)}"
+
+fn simplify(e: Expr) -> Expr:
+    match e:
+        case Add(Num(0), x) | Add(x, Num(0)):
+            return simplify(x)
+        case Mul(Num(1), x) | Mul(x, Num(1)):
+            return simplify(x)
+        case Mul(Num(0), _) | Mul(_, Num(0)):
+            return Expr.Num(0)
+        case Add(a, b):
+            return Expr.Add(simplify(a), simplify(b))
+        case Mul(a, b):
+            return Expr.Mul(simplify(a), simplify(b))
+        case Neg(Neg(x)):
+            return simplify(x)
+        case _:
+            return e
+
+fn name(c: Color) -> String:
+    match c:
+        case Red:
+            return "red"
+        case Green | Blue:
+            return "cool"
+
+fn describe(x: Int?) -> String:
+    match x:
+        case null:
+            return "nothing"
+        case 0:
+            return "zero"
+        case n if n < 0:
+            return f"negative {n}"
+        case n:
+            return f"positive {n + 1}"
+
+fn greet(word: String) -> String:
+    match word:
+        case "hi" | "hello":
+            return "hey!"
+        case "bye":
+            return "see you"
+        case other:
+            return f"what is {other}?"
+
+fn run(cmds: List[Command]) -> String:
+    var out = ""
+    var pos = Point(0, 0)
+    for c in cmds:
+        match c:
+            case Move(Point(0, 0)):
+                out += "[home]"
+                pos = Point(0, 0)
+            case Move(Point(x, y) as p) if x == y:
+                out += f"[diag {x}]"
+                pos = p
+            case Move(p):
+                out += f"[{p.x},{p.y}]"
+                pos = p
+            case Say(t):
+                out += t
+            case Wait(null):
+                continue
+            case Wait(n):
+                out += f"<{n}>"
+            case Quit:
+                break
+    return f"{out} at {pos.x},{pos.y}"
+
+fn sign(n: Int) -> String:
+    # every case returns, so no `return` is needed after the match
+    match n > 0:
+        case true:
+            return "+"
+        case false:
+            match n == 0:
+                case true:
+                    return "0"
+                case false:
+                    return "-"
+
+fn main():
+    # enums without data: plain numbers, compared and printed by name
+    val c = Color.Green
+    print(c)
+    print(c == Color.Green)
+    print(c != Color.Red)
+    print(Color.Red.is_warm())
+    print(name(Color.Red))
+    print(f"{Color.Blue} is {name(Color.Blue)}, {Color.Blue.to_string().len()} letters")
+    val palette = [Color.Red, Color.Blue, Color.Blue]
+    var blues = 0
+    for p in palette:
+        if p == Color.Blue:
+            blues += 1
+    print(blues)
+
+    # enums with data, methods, named fields
+    val shapes = [Shape.Circle(1.0), Shape.Rect(w=2.0, h=3.0), Shape.Empty]
+    var total = 0.0
+    for s in shapes:
+        total += s.area()
+    print(total)
+
+    # a recursive enum: build, evaluate, print and rewrite an expression tree
+    val e = Expr.Add(Expr.Mul(Expr.Num(1), Expr.Num(7)), Expr.Neg(Expr.Neg(Expr.Add(Expr.Num(0), Expr.Num(5)))))
+    print(show(e))
+    print(eval(e))
+    val s = simplify(e)
+    print(show(s))
+    print(eval(s))
+    print(show(Expr.Neg(Expr.Num(-2))))
+
+    # literals, null, guards and bindings
+    print(describe(null))
+    print(describe(0))
+    print(describe(-3))
+    print(describe(4))
+    print(greet("hello"))
+    print(greet("bye"))
+    print(greet("yo"))
+    print(sign(5))
+    print(sign(0))
+    print(sign(-5))
+
+    # nested struct patterns, `as`, `break`/`continue` inside cases
+    val cmds = [Command.Say("go"), Command.Move(Point(2, 2)), Command.Wait(null), Command.Wait(3), Command.Move(Point(1, 5)), Command.Move(Point(0, 0)), Command.Quit, Command.Say("never")]
+    print(run(cmds))
+
+    # nullable enums
+    val maybe: Color? = palette[1]
+    print(maybe)
+    match maybe:
+        case Blue:
+            print("blue!")
+        case _:
+            print("other")
+    val none: Shape? = null
+    match none:
+        case Circle(r):
+            print(r)
+        case null:
+            print("no shape")
+        case other:
+            print(other.area())

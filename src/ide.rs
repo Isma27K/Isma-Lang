@@ -71,15 +71,26 @@ pub struct FnSymbol {
     pub doc: Option<String>,
 }
 
+/// A struct, or an enum when `variants` is `Some` (they share one table).
 #[derive(Debug, Clone)]
 pub struct StructSymbol {
     pub name: String,
     pub name_span: Span,
     pub full: Span,
     pub fields: Vec<FieldSymbol>,
+    pub variants: Option<Vec<VariantSymbol>>,
     /// Function ids of the methods.
     pub methods: Vec<usize>,
     pub ns: usize,
+    pub doc: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct VariantSymbol {
+    pub name: String,
+    /// `Circle(radius: Float)`
+    pub signature: String,
+    pub span: Span,
     pub doc: Option<String>,
 }
 
@@ -100,7 +111,7 @@ impl IdeInfo {
     /// Fields + methods available on a value of type `t` (as seen from the user's file).
     pub fn members(&self, t: &Type) -> Vec<Member> {
         match t {
-            Type::Struct(sid) => {
+            Type::Struct(sid) | Type::Enum(sid, _) => {
                 let Some(s) = self.structs.get(*sid) else { return Vec::new() };
                 let hide_private = s.ns != 0;
                 let mut out: Vec<Member> = s
@@ -131,6 +142,9 @@ impl IdeInfo {
                         kind: MemberKind::Method,
                         takes_args: !f.signature.contains("(self)"),
                     });
+                }
+                if matches!(t, Type::Enum(_, false)) && !out.iter().any(|m| m.name == "to_string") {
+                    out.push(method("to_string", "fn to_string() -> String".into(), "The variant's name.", false));
                 }
                 out
             }
@@ -257,8 +271,8 @@ pub fn builtin_function(name: &str) -> Option<(&'static str, &'static str)> {
 pub const BUILTIN_FUNCTIONS: &[&str] = &["print", "input", "args", "panic", "assert", "sqrt", "exit"];
 
 pub const KEYWORDS: &[&str] = &[
-    "fn", "val", "var", "if", "elif", "else", "while", "for", "in", "break", "continue", "return", "pass", "struct", "import",
-    "true", "false", "and", "or", "not", "null",
+    "fn", "val", "var", "if", "elif", "else", "while", "for", "in", "break", "continue", "return", "pass", "struct", "enum",
+    "match", "case", "import", "true", "false", "and", "or", "not", "null",
 ];
 
 pub const BUILTIN_TYPES: &[(&str, &str)] = &[

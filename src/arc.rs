@@ -175,12 +175,12 @@ fn rvalue_roles(f: &Func, rv: &Rvalue, sigs: &[Vec<bool>], r: &mut Roles) {
             add(&args[0], true, r);
             add(&args[1], false, r);
         }
-        Rvalue::StructNew(_, args) | Rvalue::Reuse(_, _, args) | Rvalue::ListNew(_, args) => {
+        Rvalue::New(_, args) | Rvalue::Reuse(_, _, args) | Rvalue::ListNew(_, args) => {
             for a in args {
                 add(a, true, r);
             }
         }
-        Rvalue::Field(o, ..) => add(&Operand::Var(*o), false, r),
+        Rvalue::Field(o, ..) | Rvalue::VariantField(o, ..) | Rvalue::Tag(o) => add(&Operand::Var(*o), false, r),
         Rvalue::Index(l, i, _) => {
             add(&Operand::Var(*l), false, r);
             add(i, false, r);
@@ -206,7 +206,7 @@ fn stmt_roles(f: &Func, s: &Stmt, sigs: &[Vec<bool>], borrowed: Option<&[bool]>)
             }
             if rc(f, *d) {
                 r.def = Some(*d);
-                r.projection = alias || matches!(rv, Rvalue::Field(..) | Rvalue::Index(..));
+                r.projection = alias || matches!(rv, Rvalue::Field(..) | Rvalue::Index(..) | Rvalue::VariantField(..));
             }
         }
         Stmt::Eval(rv) => rvalue_roles(f, rv, sigs, &mut r),
@@ -342,11 +342,14 @@ fn walk_block(
 
 // ---------------------------------------------------------------- effects
 
-/// A kind of heap slot: a field of a struct, or the elements of lists of a type.
+/// A kind of heap slot: a field of a struct, the elements of lists of a
+/// type, or a field of an enum variant (which is never written after the
+/// value is built).
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 enum Class {
     Field(StructId, usize),
     Elem(Type),
+    Variant(StructId, usize, usize),
 }
 
 fn elem_of(t: &Type) -> Type {
@@ -450,6 +453,7 @@ impl Ownership {
                 }
                 let (parent, cls) = match rv {
                     Rvalue::Field(o, sid, idx) => (*o, Some(Class::Field(*sid, *idx))),
+                    Rvalue::VariantField(o, sid, k, i) => (*o, Some(Class::Variant(*sid, *k, *i))),
                     Rvalue::Index(l, ..) => (*l, Some(Class::Elem(elem_of(&f.vars[*l].ty)))),
                     Rvalue::Use(Operand::Var(x)) if rc(f, *x) => (*x, None),
                     _ => continue,
@@ -574,7 +578,7 @@ fn reuse_params(f: &Func, sizes: &[u64], cyclic: &[bool], sigs: &[Vec<bool>]) ->
         let mut dead_at: Vec<Vec<usize>> = vec![Vec::new(); f.params.len()];
         let mut used_before: Vec<Vec<usize>> = vec![Vec::new(); f.params.len()];
         walk_block(f, b, out, sigs, &plain, |i, _, live, uses| {
-            if let Stmt::Assign(_, Rvalue::StructNew(sid, _)) = &f.blocks[b].stmts[i] {
+            if let Stmt::Assign(_, Rvalue::New(Ctor::Struct(sid), _)) = &f.blocks[b].stmts[i] {
                 news.push((i, sizes[*sid]));
                 for (k, &p) in f.params.iter().enumerate() {
                     if !live.contains(p) && !uses.contains(&p) {
@@ -753,7 +757,7 @@ fn reuse(f: &mut Func, sizes: &[u64], cyclic: &[bool]) {
                         pending.push((i, *v, sizes[sid]));
                     }
                 }
-                Stmt::Assign(_, Rvalue::StructNew(sid, _)) => {
+                Stmt::Assign(_, Rvalue::New(Ctor::Struct(sid), _)) => {
                     if let Some(k) = pending.iter().position(|(_, _, size)| *size == sizes[*sid]) {
                         let (di, v, _) = pending.remove(k);
                         pairs.push((di, i, v));
@@ -767,8 +771,8 @@ fn reuse(f: &mut Func, sizes: &[u64], cyclic: &[bool]) {
             f.vars.push(Var { name: "reuse".into(), ty, kind: VarKind::Temp });
             let tok = f.vars.len() - 1;
             f.blocks[b].stmts[di] = Stmt::DropReuse(v, tok);
-            if let Stmt::Assign(d, Rvalue::StructNew(sid, args)) = &f.blocks[b].stmts[ni] {
-                f.blocks[b].stmts[ni] = Stmt::Assign(*d, Rvalue::Reuse(tok, *sid, args.clone()));
+            if let Stmt::Assign(d, Rvalue::New(c, args)) = &f.blocks[b].stmts[ni] {
+                f.blocks[b].stmts[ni] = Stmt::Assign(*d, Rvalue::Reuse(tok, *c, args.clone()));
             }
         }
     }
@@ -853,6 +857,14 @@ mod tests {
         assert!(add.contains("drop-reuse self%0") && add.contains("reusing"), "{add}");
         let main = mir_of(src, "main");
         assert_eq!(count(&main, "dup"), 0, "{main}");
+    }
+
+    #[test]
+    fn matching_borrows_the_fields() {
+        let src = "enum Tree:\n    Leaf\n    Node(left: Tree, right: Tree)\n\nfn count(t: Tree) -> Int:\n    match t:\n        case Leaf:\n            return 0\n        case Node(l, r):\n            return 1 + count(l) + count(r)\n\nfn main():\n    print(count(Tree.Node(Tree.Leaf, Tree.Leaf)))\n";
+        let count = mir_of(src, "count");
+        assert!(count.contains("fn count(t%0: Tree)"), "{count}");
+        assert_eq!(count.matches("dup").count() + count.matches("drop").count(), 0, "{count}");
     }
 
     #[test]

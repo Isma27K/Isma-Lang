@@ -1,0 +1,17 @@
+# expect-error: function `area` might not return a value
+enum Shape:
+    Circle(radius: Float)
+    Rect(w: Float, h: Float)
+    Empty
+
+fn area(s: Shape) -> Float:
+    match s:
+        case Circle(r):
+            return r
+        case Rect(w, h):
+            print(w * h)
+        case Empty:
+            return 0.0
+
+fn main():
+    print(area(Shape.Empty))

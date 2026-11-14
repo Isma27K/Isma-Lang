@@ -11,6 +11,10 @@ pub enum Type {
     Unit,
     List(Box<Type>),
     Struct(StructId),
+    /// A user enum (its id indexes the same table as structs). The flag is
+    /// true when some variant carries data: values are then reference-counted
+    /// heap objects. Otherwise a value is just its variant's number.
+    Enum(StructId, bool),
     /// `T?`: a `T` or `null`. Never nested, and never `Unit?`.
     Nullable(Box<Type>),
     /// The type of a bare `null` literal before it meets an expected type.
@@ -55,8 +59,10 @@ impl Type {
         self.compatible(to) || matches!(to, Type::Nullable(inner) if *self == Type::Null || self.compatible(inner))
     }
 
+    /// Compared with `==`, printed and formatted directly. An enum without
+    /// data counts: it's just a number, printed as its variant's name.
     pub fn is_primitive(&self) -> bool {
-        matches!(self, Type::Int | Type::Float | Type::Bool | Type::Str)
+        matches!(self, Type::Int | Type::Float | Type::Bool | Type::Str | Type::Enum(_, false))
     }
 
     pub fn is_numeric(&self) -> bool {
@@ -80,7 +86,7 @@ impl Type {
             Type::Str => "String".into(),
             Type::Unit => "Unit".into(),
             Type::List(t) => format!("List[{}]", t.display(struct_names)),
-            Type::Struct(id) => struct_names[*id].clone(),
+            Type::Struct(id) | Type::Enum(id, _) => struct_names[*id].clone(),
             Type::Nullable(t) => format!("{}?", t.display(struct_names)),
             Type::Null => "null".into(),
             Type::Error => "{unknown}".into(),

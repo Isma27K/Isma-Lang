@@ -1,0 +1,8 @@
+# expect-error: enum `Shape` has no variant `Triangle`
+enum Shape:
+    Circle(radius: Float)
+    Rect(w: Float, h: Float)
+    Empty
+
+fn main():
+    val t = Shape.Triangle(1.0)

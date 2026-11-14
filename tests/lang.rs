@@ -26,8 +26,32 @@ fn cases(dir: &str) -> Vec<PathBuf> {
 }
 
 /// A cache private to this test process, so every test run really compiles.
+///
+/// Its name must stay outside the `isma-test-<name>-<pid>` paths `scratch`
+/// hands out: it used to be `isma-test-cache-<pid>`, which is `scratch("cache")`,
+/// so the cache test wiped it while other tests were linking against the
+/// runtime object inside. Caches left behind by earlier runs are swept here.
 fn cache_dir() -> PathBuf {
-    std::env::temp_dir().join(format!("isma-test-cache-{}", std::process::id()))
+    const PREFIX: &str = "isma-shared-cache-";
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let tmp = std::env::temp_dir();
+        let me = std::process::id();
+        for e in std::fs::read_dir(&tmp).into_iter().flatten().flatten() {
+            let pid = e.file_name().to_str().and_then(|n| n.strip_prefix(PREFIX)?.parse::<u32>().ok());
+            if pid.is_some_and(|pid| pid != me && !process_alive(pid)) {
+                let _ = std::fs::remove_dir_all(e.path());
+            }
+        }
+        tmp.join(format!("{PREFIX}{me}"))
+    })
+    .clone()
+}
+
+fn process_alive(pid: u32) -> bool {
+    // Only Linux can tell cheaply; elsewhere, keep every cache rather than
+    // risk deleting one a concurrent test run is using.
+    !cfg!(target_os = "linux") || Path::new("/proc").join(pid.to_string()).exists()
 }
 
 fn isma(args: &[&str]) -> Output {
@@ -422,5 +446,34 @@ fn language_server_understands_nullable_types() {
     let smart = lsp.at("textDocument/hover", uri, 11, 14);
     let shown = smart["result"]["contents"]["value"].as_str().unwrap();
     assert!(shown.contains("val u: User") && !shown.contains("User?`\n") && shown.contains("smart cast"), "{shown}");
+    lsp.stop();
+}
+
+/// Editor support for enums: variant completion after `Shape.`, hovers on
+/// variants in patterns, inlay hints for pattern bindings, and the outline.
+#[test]
+fn language_server_understands_enums() {
+    let mut lsp = Lsp::start();
+    let uri = "file:///tmp/enums.isma";
+    let text = "enum Shape:\n    Circle(radius: Float)\n    Empty\n\nfn area(s: Shape) -> Float:\n    match s:\n        case Circle(r):\n            return r\n        case Empty:\n            return 0.0\n\nfn main():\n    print(area(Shape.))\n";
+    lsp.open(uri, text);
+    // `Shape.|`
+    let items = lsp.at("textDocument/completion", uri, 12, 21);
+    let circle = items["result"].as_array().unwrap().iter().find(|i| i["label"] == "Circle").unwrap_or_else(|| panic!("{items}"));
+    assert_eq!(circle["insertText"], "Circle($1)");
+    assert_eq!(circle["detail"], "Shape.Circle(radius: Float)");
+    // hover on `Circle` in `case Circle(r):`
+    let hover = lsp.at("textDocument/hover", uri, 6, 15);
+    let shown = hover["result"]["contents"]["value"].as_str().unwrap();
+    assert!(shown.contains("Shape.Circle(radius: Float)") && shown.contains("variant of `Shape`"), "{shown}");
+    // `r` gets a type hint
+    let hints = lsp.request("textDocument/inlayHint", serde_json::json!({"textDocument": {"uri": uri}, "range": {"start": {"line": 0, "character": 0}, "end": {"line": 13, "character": 0}}}));
+    assert!(hints["result"].as_array().unwrap().iter().any(|h| h["label"] == ": Float" && h["position"]["line"] == 6), "{hints}");
+    // outline: the enum with its variants
+    let outline = lsp.request("textDocument/documentSymbol", serde_json::json!({"textDocument": {"uri": uri}}));
+    let shape = &outline["result"][0];
+    assert_eq!(shape["name"], "Shape");
+    assert_eq!(shape["kind"], 10); // ENUM
+    assert_eq!(shape["children"][0]["name"], "Circle");
     lsp.stop();
 }

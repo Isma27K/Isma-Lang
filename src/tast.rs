@@ -11,10 +11,25 @@ pub struct TProgram {
     pub funcs: Vec<TFunc>,
 }
 
+/// A struct, or an enum (`variants` is `Some`): both live in one table, so
+/// a `StructId` names either.
 #[derive(Debug, Clone)]
 pub struct TStruct {
     pub name: String,
     pub fields: Vec<TField>,
+    pub variants: Option<Vec<TVariant>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TVariant {
+    pub name: String,
+    pub fields: Vec<TField>,
+}
+
+impl TStruct {
+    pub fn variants(&self) -> &[TVariant] {
+        self.variants.as_deref().unwrap_or(&[])
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -53,9 +68,43 @@ pub enum TStmt {
     While { cond: TExpr, body: Vec<TStmt> },
     ForRange { var: LocalId, start: TExpr, end: TExpr, inclusive: bool, body: Vec<TStmt> },
     ForList { var: LocalId, list: TExpr, body: Vec<TStmt> },
+    /// Exhaustive (checked): exactly one arm runs.
+    Match { scrutinee: TExpr, arms: Vec<TArm> },
     Break,
     Continue,
     Return(Option<TExpr>),
+}
+
+#[derive(Debug)]
+pub struct TArm {
+    pub pat: TPat,
+    pub guard: Option<TExpr>,
+    pub body: Vec<TStmt>,
+}
+
+/// A checked pattern; `ty` is the type of the value it's matched against.
+#[derive(Debug, Clone)]
+pub struct TPat {
+    pub kind: TPatKind,
+    pub ty: Type,
+}
+
+#[derive(Debug, Clone)]
+pub enum TPatKind {
+    Wild,
+    /// Matches when the inner pattern does, and binds the value to the local.
+    Bind(LocalId, Box<TPat>),
+    /// A variant of an enum, with one pattern per field.
+    Variant(StructId, usize, Vec<TPat>),
+    /// A struct, with one pattern per field.
+    Struct(StructId, Vec<TPat>),
+    Int(i64),
+    Str(String),
+    Bool(bool),
+    Null,
+    /// A non-null value of a `T?` whose `T` matches the inner pattern.
+    Some(Box<TPat>),
+    Or(Vec<TPat>),
 }
 
 #[derive(Debug)]
@@ -129,6 +178,8 @@ pub enum TExprKind {
     Field(Box<TExpr>, StructId, usize),
     Index(Box<TExpr>, Box<TExpr>),
     StructNew(StructId, Vec<TExpr>),
+    /// `Shape.Circle(r)`: enum, variant, one value per field.
+    EnumNew(StructId, usize, Vec<TExpr>),
     ListLit(Vec<TExpr>),
     /// Concatenation of String-typed parts.
     FString(Vec<TExpr>),

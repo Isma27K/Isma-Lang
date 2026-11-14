@@ -7,7 +7,7 @@
 
 use crate::ast::BinOp;
 use crate::mir::*;
-use crate::tast::{self, Builtin, TExpr, TExprKind, TFunc, TProgram, TStmt};
+use crate::tast::{self, Builtin, TExpr, TExprKind, TFunc, TPat, TPatKind, TProgram, TStmt};
 use crate::types::*;
 
 pub fn lower(prog: &TProgram) -> Program {
@@ -275,6 +275,28 @@ impl<'a> Lower<'a> {
                 self.goto(lc);
                 self.cur = le;
             }
+            TStmt::Match { scrutinee, arms } => {
+                // The value is evaluated once; then each case is tried in order.
+                let v = self.operand(scrutinee);
+                let v = self.as_var(v, &scrutinee.ty);
+                let end = self.new_block();
+                for arm in arms {
+                    let next = self.new_block();
+                    self.pattern(&arm.pat, v, next);
+                    if let Some(g) = &arm.guard {
+                        let c = self.operand(g);
+                        let body = self.new_block();
+                        self.term(Term::Branch(c, body, next));
+                        self.cur = body;
+                    }
+                    self.stmts(&arm.body);
+                    self.goto(end);
+                    self.cur = next;
+                }
+                // The checker proved the cases exhaustive.
+                self.term(Term::Unreachable);
+                self.cur = end;
+            }
             TStmt::Break => {
                 let target = self.loops.last().expect("break outside loop").1;
                 self.term(Term::Goto(target));
@@ -312,6 +334,87 @@ impl<'a> Lower<'a> {
         if noreturn {
             self.term(Term::Unreachable);
         }
+    }
+
+    // ---------- patterns ----------
+
+    /// Test pattern `p` against variable `v`: jump to `fail` if it doesn't
+    /// match, otherwise continue in the current block with its names bound.
+    fn pattern(&mut self, p: &TPat, v: VarId, fail: BlockId) {
+        match &p.kind {
+            TPatKind::Wild => {}
+            TPatKind::Bind(id, inner) => {
+                self.pattern(inner, v, fail);
+                self.push(Stmt::Assign(*id, Rvalue::Use(Operand::Var(v))));
+            }
+            TPatKind::Int(n) => self.test(Rvalue::Binary(BinOp::Eq, Type::Int, Operand::Var(v), Operand::Int(*n), Default::default()), fail),
+            TPatKind::Str(s) => self.test(Rvalue::Binary(BinOp::Eq, Type::Str, Operand::Var(v), Operand::Str(s.clone()), Default::default()), fail),
+            TPatKind::Bool(b) => {
+                let ok = self.new_block();
+                let (t, f) = if *b { (ok, fail) } else { (fail, ok) };
+                self.term(Term::Branch(Operand::Var(v), t, f));
+                self.cur = ok;
+            }
+            TPatKind::Null => {
+                let c = self.is_null(Operand::Var(v), &p.ty);
+                let ok = self.new_block();
+                self.term(Term::Branch(c, ok, fail));
+                self.cur = ok;
+            }
+            TPatKind::Some(inner) => {
+                let c = self.is_null(Operand::Var(v), &p.ty);
+                let ok = self.new_block();
+                self.term(Term::Branch(c, fail, ok));
+                self.cur = ok;
+                let u = self.unwrap(Operand::Var(v), &p.ty);
+                let t = self.temp(inner.ty.clone());
+                self.push(Stmt::Assign(t, u));
+                self.pattern(inner, t, fail);
+            }
+            TPatKind::Variant(sid, k, subs) => {
+                if self.prog.structs[*sid].variants().len() > 1 {
+                    let tag = self.temp(Type::Int);
+                    self.push(Stmt::Assign(tag, Rvalue::Tag(v)));
+                    self.test(Rvalue::Binary(BinOp::Eq, Type::Int, Operand::Var(tag), Operand::Int(*k as i64), Default::default()), fail);
+                }
+                for (i, sub) in subs.iter().enumerate() {
+                    if !matches!(sub.kind, TPatKind::Wild) {
+                        let f = self.temp(sub.ty.clone());
+                        self.push(Stmt::Assign(f, Rvalue::VariantField(v, *sid, *k, i)));
+                        self.pattern(sub, f, fail);
+                    }
+                }
+            }
+            TPatKind::Struct(sid, subs) => {
+                for (i, sub) in subs.iter().enumerate() {
+                    if !matches!(sub.kind, TPatKind::Wild) {
+                        let f = self.temp(sub.ty.clone());
+                        self.push(Stmt::Assign(f, Rvalue::Field(v, *sid, i)));
+                        self.pattern(sub, f, fail);
+                    }
+                }
+            }
+            TPatKind::Or(alts) => {
+                let ok = self.new_block();
+                for (j, alt) in alts.iter().enumerate() {
+                    let last = j + 1 == alts.len();
+                    let next = if last { fail } else { self.new_block() };
+                    self.pattern(alt, v, next);
+                    self.goto(ok);
+                    self.cur = next;
+                }
+                self.cur = ok;
+            }
+        }
+    }
+
+    /// Continue if `cond` (a `Bool`) holds, else jump to `fail`.
+    fn test(&mut self, cond: Rvalue, fail: BlockId) {
+        let c = self.temp(Type::Bool);
+        self.push(Stmt::Assign(c, cond));
+        let ok = self.new_block();
+        self.term(Term::Branch(Operand::Var(c), ok, fail));
+        self.cur = ok;
     }
 
     // ---------- expressions ----------
@@ -500,7 +603,11 @@ impl<'a> Lower<'a> {
             }
             TExprKind::StructNew(sid, args) => {
                 let a = self.operands(args);
-                Rvalue::StructNew(*sid, a)
+                Rvalue::New(Ctor::Struct(*sid), a)
+            }
+            TExprKind::EnumNew(sid, k, args) => {
+                let a = self.operands(args);
+                Rvalue::New(Ctor::Variant(*sid, *k), a)
             }
             TExprKind::ListLit(elems) => {
                 let elem = match &e.ty {
@@ -629,6 +736,11 @@ fn mark_reassigned(stmts: &[TStmt], out: &mut [bool]) {
                 }
             }
             TStmt::While { body, .. } | TStmt::ForRange { body, .. } | TStmt::ForList { body, .. } => mark_reassigned(body, out),
+            TStmt::Match { arms, .. } => {
+                for a in arms {
+                    mark_reassigned(&a.body, out);
+                }
+            }
             _ => {}
         }
     }

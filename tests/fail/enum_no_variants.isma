@@ -1,0 +1,6 @@
+# expect-error: enum `Nothing` has no variants
+enum Nothing:
+    pass
+
+fn main():
+    print(1)

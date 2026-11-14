@@ -1,0 +1,31 @@
+# Binary trees: build and walk 3 million short-lived tree nodes.
+enum Tree:
+    Leaf
+    Node(left: Tree, right: Tree)
+
+fn make(depth: Int) -> Tree:
+    if depth == 0:
+        return Tree.Node(Tree.Leaf, Tree.Leaf)
+    return Tree.Node(make(depth - 1), make(depth - 1))
+
+fn check(t: Tree) -> Int:
+    match t:
+        case Leaf:
+            return 0
+        case Node(l, r):
+            return 1 + check(l) + check(r)
+
+fn main():
+    val max_depth = 14
+    val long_lived = make(max_depth)
+    var total = 0
+    var depth = 4
+    while depth <= max_depth:
+        var iterations = 1
+        for _ in 0..max_depth - depth + 4:
+            iterations *= 2
+        for _ in 0..iterations:
+            total += check(make(depth))
+        depth += 2
+    print(total)
+    print(check(long_lived))

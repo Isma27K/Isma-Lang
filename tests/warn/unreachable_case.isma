@@ -1,0 +1,14 @@
+# expect-warning: unreachable `case`
+enum Shape:
+    Circle(radius: Float)
+    Rect(w: Float, h: Float)
+    Empty
+
+fn main():
+    match Shape.Empty:
+        case Circle(_) | Rect(_, _):
+            print("shape")
+        case _:
+            print("nothing")
+        case Empty:
+            print("never")
