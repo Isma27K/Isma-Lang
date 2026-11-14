@@ -25,6 +25,8 @@ pub struct IdeInfo {
     pub imports: Vec<(String, Span, usize)>,
     /// Names the entry file brings in with `from m import name`: (the name it binds, what it is).
     pub imported: Vec<(String, ImportedSymbol)>,
+    /// The names of type parameters, by `ParamId`.
+    pub params: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -81,6 +83,9 @@ pub struct FnSymbol {
     pub ns: usize,
     /// The `#` comment block above the declaration.
     pub doc: Option<String>,
+    /// A copy of a generic function for some type arguments (`max[Int]`):
+    /// not a declaration of its own, so outlines and completion skip it.
+    pub instance: bool,
 }
 
 /// A struct, or an enum when `variants` is `Some` (they share one table).
@@ -95,6 +100,13 @@ pub struct StructSymbol {
     pub methods: Vec<usize>,
     pub ns: usize,
     pub doc: Option<String>,
+    /// `["T"]` for `struct Box[T]` (and for its instances).
+    pub type_params: Vec<String>,
+    /// `["Int"]` for the instance `Box[Int]`.
+    pub type_args: Vec<String>,
+    /// A generic type with type arguments (`Box[Int]`): not a declaration of
+    /// its own, so outlines and completion skip it.
+    pub instance: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -117,7 +129,7 @@ pub struct FieldSymbol {
 impl IdeInfo {
     pub fn type_name(&self, t: &Type) -> String {
         let names: Vec<String> = self.structs.iter().map(|s| s.name.clone()).collect();
-        t.display(&names)
+        t.display(&names, &self.params)
     }
 
     /// Fields + methods available on a value of type `t` (as seen from the user's file).
@@ -150,7 +162,7 @@ impl IdeInfo {
                     };
                     out.push(Member {
                         name: f.name.clone(),
-                        signature: f.signature.clone(),
+                        signature: replace_words(&f.signature, &s.type_params, &s.type_args),
                         doc,
                         kind: MemberKind::Method,
                         takes_args: !f.signature.contains("(self)"),
@@ -177,7 +189,7 @@ impl IdeInfo {
         let mut out: Vec<Member> = self
             .functions
             .iter()
-            .filter(|f| f.ns == ns && f.owner.is_none() && !f.name.starts_with('_'))
+            .filter(|f| f.ns == ns && f.owner.is_none() && !f.instance && !f.name.starts_with('_'))
             .map(|f| Member {
                 name: f.name.clone(),
                 signature: f.signature.clone(),
@@ -186,7 +198,7 @@ impl IdeInfo {
                 takes_args: !f.signature.contains("()"),
             })
             .collect();
-        for s in self.structs.iter().filter(|s| s.ns == ns) {
+        for s in self.structs.iter().filter(|s| s.ns == ns && !s.instance) {
             let short = s.name.rsplit('.').next().unwrap_or(&s.name).to_string();
             if short.starts_with('_') {
                 continue;
@@ -299,3 +311,30 @@ pub const BUILTIN_TYPES: &[(&str, &str)] = &[
     ("String", "Immutable UTF-8 text."),
     ("List", "`List[T]`: growable, bounds-checked list (reference type)."),
 ];
+
+/// `fn get(self) -> T` with `T` replaced by `Int` (whole words only), for the
+/// members of `Box[Int]`.
+pub fn replace_words(text: &str, from: &[String], to: &[String]) -> String {
+    if from.is_empty() || from.len() != to.len() {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    let mut word = String::new();
+    let flush = |word: &mut String, out: &mut String| {
+        match from.iter().position(|f| f == word) {
+            Some(i) => out.push_str(&to[i]),
+            None => out.push_str(word),
+        }
+        word.clear();
+    };
+    for c in text.chars() {
+        if c.is_alphanumeric() || c == '_' {
+            word.push(c);
+        } else {
+            flush(&mut word, &mut out);
+            out.push(c);
+        }
+    }
+    flush(&mut word, &mut out);
+    out
+}

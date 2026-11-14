@@ -72,6 +72,8 @@ impl ImportName {
 #[derive(Debug)]
 pub struct FnDecl {
     pub name: Ident,
+    /// `[T, U]` in `fn pair[T, U](a: T, b: U)`.
+    pub type_params: Vec<Ident>,
     /// Span of `self` if the first parameter is `self`.
     pub self_param: Option<Span>,
     pub params: Vec<Param>,
@@ -90,6 +92,8 @@ pub struct Param {
 #[derive(Debug)]
 pub struct StructDecl {
     pub name: Ident,
+    /// `[T]` in `struct Box[T]:`.
+    pub type_params: Vec<Ident>,
     pub fields: Vec<FieldDecl>,
     pub methods: Vec<FnDecl>,
 }
@@ -98,6 +102,8 @@ pub struct StructDecl {
 #[derive(Debug)]
 pub struct EnumDecl {
     pub name: Ident,
+    /// `[T]` in `enum Tree[T]:`.
+    pub type_params: Vec<Ident>,
     pub variants: Vec<VariantDecl>,
     pub methods: Vec<FnDecl>,
 }
@@ -221,6 +227,10 @@ pub enum ExprKind {
     /// `obj?.field` (and, as a callee, `obj?.method(...)`).
     SafeField(Box<Expr>, Ident),
     Index(Box<Expr>, Box<Expr>),
+    /// `max[Int]` in `max[Int](a, b)`, `Box[String]` in `Box[String](s)`,
+    /// `Tree[Int]` in `Tree[Int].Leaf`: a generic function or type given its
+    /// type arguments explicitly.
+    TypeApply(Box<Expr>, Vec<TypeExpr>),
     List(Vec<Expr>),
     Null,
     /// `x!!`

@@ -78,6 +78,7 @@ mod tests {
             name: name.into(),
             fields: fields.iter().enumerate().map(|(i, t)| TField { name: format!("f{i}"), ty: t.clone(), mutable: true }).collect(),
             variants: None,
+            generic: false,
         }
     }
 
@@ -120,8 +121,8 @@ mod tests {
         let expr = Type::Enum(1, true);
         let structs = vec![
             fixed("Cons", &[Type::Int, Type::Struct(0).nullable()]), // a `val next`: no cycle possible
-            TStruct { name: "Expr".into(), fields: vec![], variants: Some(vec![variant("Num", &[Type::Int]), variant("Add", &[expr.clone(), expr.clone()])]) },
-            TStruct { name: "Json".into(), fields: vec![], variants: Some(vec![variant("Arr", &[Type::List(Box::new(Type::Enum(2, true)))])]) },
+            TStruct { name: "Expr".into(), fields: vec![], variants: Some(vec![variant("Num", &[Type::Int]), variant("Add", &[expr.clone(), expr.clone()])]), generic: false },
+            TStruct { name: "Json".into(), fields: vec![], variants: Some(vec![variant("Arr", &[Type::List(Box::new(Type::Enum(2, true)))])]), generic: false },
         ];
         assert_eq!(cyclic_structs(&structs), vec![false, false, true]); // `Arr(items)`: `items.push(json)` can close a cycle
     }

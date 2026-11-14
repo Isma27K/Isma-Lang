@@ -13,14 +13,12 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 
 pub fn generate(prog: &Program, sources: &SourceMap, target_triple: Option<&str>) -> String {
-    // LLVM type names: the struct's name, made unique when two modules
-    // (`a/util.isma`, `b/util.isma`) define types with the same name.
-    let type_names: Vec<String> = prog
-        .structs
-        .iter()
-        .enumerate()
-        .map(|(sid, s)| if prog.structs.iter().filter(|o| o.name == s.name).count() > 1 { format!("{}.{sid}", s.name) } else { s.name.clone() })
-        .collect();
+    // LLVM type names: the struct's name (`Box[Int]` becomes `Box.Int.`), made
+    // unique when two modules (`a/util.isma`, `b/util.isma`) define types
+    // with the same name.
+    let safe: Vec<String> = prog.structs.iter().map(|s| llvm_name(&s.name)).collect();
+    let type_names: Vec<String> =
+        safe.iter().enumerate().map(|(sid, n)| if safe.iter().filter(|o| *o == n).count() > 1 { format!("{n}.{sid}") } else { n.clone() }).collect();
     let mut g = Codegen {
         prog,
         type_names,
@@ -42,7 +40,7 @@ pub fn generate(prog: &Program, sources: &SourceMap, target_triple: Option<&str>
         name_tables: Vec::new(),
     };
     let mut funcs = String::new();
-    for f in &prog.funcs {
+    for f in prog.funcs.iter().filter(|f| !f.generic) {
         funcs.push_str(&g.function(f));
     }
     funcs.push_str(&g.rc_functions());
@@ -57,6 +55,9 @@ pub fn generate(prog: &Program, sources: &SourceMap, target_triple: Option<&str>
     // Every heap object starts with its reference count.
     out.push_str("%IsmaList = type { i64, i64, i64, ptr }\n");
     for (s, tname) in prog.structs.iter().zip(&g.type_names) {
+        if s.generic {
+            continue;
+        }
         match &s.variants {
             // Every variant of an enum with data: { rc, tag, fields... }
             Some(variants) => {
@@ -149,6 +150,14 @@ declare { i64, i1 } @llvm.ssub.with.overflow.i64(i64, i64)
 declare { i64, i1 } @llvm.smul.with.overflow.i64(i64, i64)
 ";
 
+/// A name made of the characters LLVM allows in an unquoted identifier.
+fn llvm_name(name: &str) -> String {
+    name.chars()
+        .filter(|c| *c != ' ')
+        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '$' | '-') { c } else { '.' })
+        .collect()
+}
+
 fn llty(t: &Type) -> &'static str {
     match t {
         Type::Int => "i64",
@@ -166,7 +175,7 @@ fn llty(t: &Type) -> &'static str {
             Type::Bool => "{ i1, i1 }",
             _ => "ptr",
         },
-        Type::Error | Type::Null => unreachable!("{t:?} reached codegen"),
+        Type::Error | Type::Null | Type::Param(_) => unreachable!("{t:?} reached codegen"),
     }
 }
 

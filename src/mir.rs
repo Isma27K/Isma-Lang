@@ -34,6 +34,8 @@ pub struct Func {
     pub blocks: Vec<Block>,
     pub exported: bool,
     pub track_caller: bool,
+    /// A placeholder for a generic function (see `TFunc::generic`): never emitted.
+    pub generic: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -268,7 +270,7 @@ impl Stmt {
 pub fn print_program(p: &Program) -> String {
     let names: Vec<String> = p.structs.iter().map(|s| s.name.clone()).collect();
     let mut out = String::new();
-    for f in &p.funcs {
+    for f in p.funcs.iter().filter(|f| !f.generic) {
         print_func(&mut out, f, p, &names);
         out.push('\n');
     }
@@ -283,10 +285,10 @@ fn print_func(out: &mut String, f: &Func, p: &Program, names: &[String]) {
         .enumerate()
         .map(|(i, &v)| {
             let own = if f.param_owned.get(i).copied().unwrap_or(false) { "owned " } else { "" };
-            format!("{own}{}: {}", var(v), f.vars[v].ty.display(names))
+            format!("{own}{}: {}", var(v), f.vars[v].ty.display(names, &[]))
         })
         .collect();
-    let _ = writeln!(out, "fn {}({}) -> {}:", f.name, params.join(", "), f.ret.display(names));
+    let _ = writeln!(out, "fn {}({}) -> {}:", f.name, params.join(", "), f.ret.display(names, &[]));
     let op = |o: &Operand| match o {
         Operand::Var(v) => var(*v),
         Operand::Int(i) => i.to_string(),

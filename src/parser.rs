@@ -350,9 +350,52 @@ impl Parser {
         Ok(Ident { name: name.into(), span: start })
     }
 
+    /// `[T, U]` after the name of a generic function, struct or enum (nothing if there's no `[`).
+    fn type_params(&mut self) -> PResult<Vec<Ident>> {
+        if !self.at(&Tok::LBracket) {
+            return Ok(Vec::new());
+        }
+        let open = self.bump().span;
+        let mut params = Vec::new();
+        while !self.at(&Tok::RBracket) {
+            let p = self.expect_ident("a type parameter name, like `T`")?;
+            if self.at(&Tok::Colon) {
+                let span = self.span();
+                return self.error_diag(
+                    Diagnostic::error(format!("type parameters don't take bounds: write `{}` alone", p.name), span)
+                        .with_primary("remove this")
+                        .with_note(format!(
+                            "Isma works out what `{}` must support from how the code uses it: comparing two `{}`s with `<` makes it need `<=>`, printing one makes it need `to_string`",
+                            p.name, p.name
+                        )),
+                );
+            }
+            params.push(p);
+            if !self.eat(&Tok::Comma) {
+                break;
+            }
+        }
+        self.expect(Tok::RBracket)?;
+        if params.is_empty() {
+            return self.error_diag(
+                Diagnostic::error("empty list of type parameters", open.merge(self.prev_span))
+                    .with_help("name at least one, like `[T]`, or remove the brackets"),
+            );
+        }
+        Ok(params)
+    }
+
     fn fn_decl(&mut self) -> PResult<FnDecl> {
         let start = self.expect(Tok::Fn)?;
         let name = self.fn_name()?;
+        let type_params = if is_operator_name(&name.name) { Vec::new() } else { self.type_params()? };
+        if self.at(&Tok::LBracket) && is_operator_name(&name.name) {
+            let span = self.span();
+            return self.error_diag(
+                Diagnostic::error("operator functions can't have type parameters", span)
+                    .with_note("they can use the type parameters of the generic type they belong to"),
+            );
+        }
         self.expect(Tok::LParen)?;
         let mut self_param = None;
         let mut params = Vec::new();
@@ -384,12 +427,13 @@ impl Parser {
         let ret = if self.eat(&Tok::Arrow) { Some(self.type_expr()?) } else { None };
         let sig_span = start.merge(self.prev_span);
         let body = self.block()?;
-        Ok(FnDecl { name, self_param, params, ret, body, sig_span })
+        Ok(FnDecl { name, type_params, self_param, params, ret, body, sig_span })
     }
 
     fn struct_decl(&mut self) -> PResult<StructDecl> {
         self.expect(Tok::Struct)?;
         let name = self.expect_ident("struct name")?;
+        let type_params = self.type_params()?;
         self.expect(Tok::Colon)?;
         self.expect(Tok::Newline)?;
         if !self.at(&Tok::Indent) {
@@ -424,12 +468,13 @@ impl Parser {
             }
         }
         self.eat(&Tok::Dedent);
-        Ok(StructDecl { name, fields, methods })
+        Ok(StructDecl { name, type_params, fields, methods })
     }
 
     fn enum_decl(&mut self) -> PResult<EnumDecl> {
         self.expect(Tok::Enum)?;
         let name = self.expect_ident("enum name")?;
+        let type_params = self.type_params()?;
         self.expect(Tok::Colon)?;
         self.expect(Tok::Newline)?;
         if !self.at(&Tok::Indent) {
@@ -472,7 +517,7 @@ impl Parser {
             }
         }
         self.eat(&Tok::Dedent);
-        Ok(EnumDecl { name, variants, methods })
+        Ok(EnumDecl { name, type_params, variants, methods })
     }
 
     /// `Circle(radius: Float)` or `Empty`
@@ -1175,6 +1220,11 @@ impl Parser {
                     e = Expr { kind: ExprKind::NotNull(Box::new(e)), span };
                 }
                 Tok::LBracket => {
+                    if let Some(args) = self.try_type_args(&e) {
+                        let span = e.span.merge(self.prev_span);
+                        e = Expr { kind: ExprKind::TypeApply(Box::new(e), args), span };
+                        continue;
+                    }
                     self.bump();
                     let idx = self.expr()?;
                     self.expect(Tok::RBracket)?;
@@ -1185,6 +1235,38 @@ impl Parser {
             }
         }
         Ok(e)
+    }
+
+    /// `[Int]` in `max[Int](a, b)` or `Tree[Int].Leaf`: explicit type
+    /// arguments. They look like an index, so this is decided by what follows:
+    /// `(` (a call: an indexed value is never callable), or `.` after a type
+    /// name. Anything else is put back and parsed as an index.
+    fn try_type_args(&mut self, base: &Expr) -> Option<Vec<TypeExpr>> {
+        let last = match &base.kind {
+            ExprKind::Name(n) => n.as_str(),
+            ExprKind::Field(m, n) if matches!(m.kind, ExprKind::Name(_)) => n.name.as_str(),
+            _ => return None,
+        };
+        let type_like = last.starts_with(|c: char| c.is_ascii_uppercase());
+        let (pos, prev, ndiags) = (self.pos, self.prev_span, self.diags.len());
+        self.bump();
+        let mut args = Vec::new();
+        let ok = loop {
+            match self.type_expr() {
+                Ok(t) => args.push(t),
+                Err(()) => break false,
+            }
+            if !self.eat(&Tok::Comma) {
+                break self.eat(&Tok::RBracket);
+            }
+        };
+        if ok && (self.at(&Tok::LParen) || type_like && self.at(&Tok::Dot)) {
+            return Some(args);
+        }
+        self.pos = pos;
+        self.prev_span = prev;
+        self.diags.truncate(ndiags);
+        None
     }
 
     fn primary(&mut self) -> PResult<Expr> {

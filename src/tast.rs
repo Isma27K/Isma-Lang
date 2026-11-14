@@ -18,6 +18,10 @@ pub struct TStruct {
     pub name: String,
     pub fields: Vec<TField>,
     pub variants: Option<Vec<TVariant>>,
+    /// A generic type, or an instance of one whose type arguments still
+    /// contain type parameters (`Box[T]`): only generic code uses it, so the
+    /// back end skips it.
+    pub generic: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -51,6 +55,10 @@ pub struct TFunc {
     /// Standard-library functions report panics at their caller's location
     /// (like Rust's `#[track_caller]`): they take it as hidden arguments.
     pub track_caller: bool,
+    /// A generic function (or method of a generic type), as written: an empty
+    /// placeholder. Its copies for concrete types (`max[Int]`) are the ones
+    /// that run.
+    pub generic: bool,
 }
 
 #[derive(Debug, Clone)]

@@ -1,6 +1,8 @@
 pub type StructId = usize;
 pub type FuncId = usize;
 pub type LocalId = usize;
+/// A type parameter (`T` in `fn max[T]`): an index into the checker's table of them.
+pub type ParamId = usize;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Type {
@@ -19,6 +21,10 @@ pub enum Type {
     Nullable(Box<Type>),
     /// The type of a bare `null` literal before it meets an expected type.
     Null,
+    /// A type parameter inside generic code (`T` in `fn max[T](a: T, b: T)`).
+    /// Generic code is checked once with its parameters as they are, then
+    /// copied for every set of types it's used with: the back end never sees one.
+    Param(ParamId),
     /// Produced after a type error; compatible with everything so one
     /// mistake doesn't cascade into a pile of follow-up errors.
     Error,
@@ -78,18 +84,37 @@ impl Type {
         }
     }
 
-    pub fn display(&self, struct_names: &[String]) -> String {
+    /// Does a type parameter occur in it? (Struct and enum instances count
+    /// through `generic`: per struct id, whether its type arguments have one.)
+    pub fn has_param(&self, generic: &[bool]) -> bool {
+        match self {
+            Type::Param(_) => true,
+            Type::List(t) | Type::Nullable(t) => t.has_param(generic),
+            Type::Struct(id) | Type::Enum(id, _) => generic.get(*id).copied().unwrap_or(false),
+            _ => false,
+        }
+    }
+
+    /// `struct_names` per struct id, `param_names` per type parameter.
+    pub fn display(&self, struct_names: &[String], param_names: &[String]) -> String {
         match self {
             Type::Int => "Int".into(),
             Type::Float => "Float".into(),
             Type::Bool => "Bool".into(),
             Type::Str => "String".into(),
             Type::Unit => "Unit".into(),
-            Type::List(t) => format!("List[{}]", t.display(struct_names)),
+            Type::List(t) => format!("List[{}]", t.display(struct_names, param_names)),
             Type::Struct(id) | Type::Enum(id, _) => struct_names[*id].clone(),
-            Type::Nullable(t) => format!("{}?", t.display(struct_names)),
+            Type::Nullable(t) => format!("{}?", t.display(struct_names, param_names)),
+            Type::Param(p) => param_names.get(*p).cloned().unwrap_or_else(|| "T".into()),
             Type::Null => "null".into(),
             Type::Error => "{unknown}".into(),
         }
     }
+}
+
+/// A type's name without its module and type arguments: `Box` for `geo.Box[geo.Point]`.
+pub fn short_name(name: &str) -> &str {
+    let base = name.split('[').next().unwrap_or(name);
+    base.rsplit('.').next().unwrap_or(base)
 }

@@ -175,7 +175,7 @@ impl Space<'_> {
                         if shown.is_empty() { name.clone() } else { format!("{name}({})", shown.join(", ")) }
                     }
                     (Ctor::Struct, Type::Struct(id)) => {
-                        let name = self.structs[*id].name.rsplit('.').next().unwrap_or_default().to_string();
+                        let name = crate::types::short_name(&self.structs[*id].name).to_string();
                         format!("{name}({})", shown.join(", "))
                     }
                     (Ctor::Some, _) => shown.into_iter().next().unwrap_or_else(|| "_".into()),
@@ -225,6 +225,7 @@ mod tests {
                 name: "Shape".into(),
                 fields: vec![],
                 variants: Some(vec![variant("Circle", vec![Type::Float]), variant("Rect", vec![Type::Float, Type::Float]), variant("Empty", vec![])]),
+                generic: false,
             },
             TStruct {
                 name: "Expr".into(),
@@ -234,6 +235,7 @@ mod tests {
                     variant("Neg", vec![Type::Enum(1, true)]),
                     variant("Add", vec![Type::Enum(1, true), Type::Enum(1, true)]),
                 ]),
+                generic: false,
             },
         ]
     }

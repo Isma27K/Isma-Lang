@@ -58,6 +58,7 @@ impl<'a> Lower<'a> {
             blocks,
             exported: f.exported,
             track_caller: f.track_caller,
+            generic: f.generic,
         }
     }
 
