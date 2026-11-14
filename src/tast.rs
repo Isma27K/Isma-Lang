@@ -73,6 +73,7 @@ pub struct TExpr {
 pub enum Builtin {
     Print,
     Input,
+    Args,
     Panic,
     Assert,
     Sqrt,

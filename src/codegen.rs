@@ -87,6 +87,7 @@ declare ptr @isma_int_to_str(i64) #0
 declare ptr @isma_float_to_str(double) #0
 declare ptr @isma_bool_to_str(i64) #0
 declare ptr @isma_input() #0
+declare ptr @isma_args() #0
 declare i64 @isma_str_to_int(ptr, i32, i32) #0
 declare double @isma_str_to_float(ptr, i32, i32) #0
 declare ptr @isma_list_new(i64, i64) #0
@@ -839,6 +840,7 @@ impl<'a> Codegen<'a> {
                 return String::new();
             }
             Builtin::Input => self.emit(format!("{r} = call ptr @isma_input()")),
+            Builtin::Args => self.emit(format!("{r} = call ptr @isma_args()")),
             Builtin::Panic => {
                 self.emit(format!("call void @isma_panic_msg(ptr {}, {loc})", vals[0]));
                 self.emit_term("unreachable");

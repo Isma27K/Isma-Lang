@@ -8,7 +8,7 @@ use crate::tast::*;
 use crate::types::*;
 use std::collections::HashMap;
 
-const BUILTINS: &[&str] = &["print", "input", "panic", "assert", "sqrt", "exit"];
+const BUILTINS: &[&str] = &["print", "input", "args", "panic", "assert", "sqrt", "exit"];
 const RESERVED_TYPES: &[&str] = &["Int", "Float", "Bool", "String", "List", "Unit"];
 
 struct FuncSig {
@@ -1133,6 +1133,7 @@ impl Checker {
         let (n, param, ret, b) = match name {
             "print" => (1, None, Type::Unit, Builtin::Print),
             "input" => (0, None, Type::Str, Builtin::Input),
+            "args" => (0, None, Type::List(Box::new(Type::Str)), Builtin::Args),
             "panic" => (1, Some(Type::Str), Type::Unit, Builtin::Panic),
             "assert" => (1, Some(Type::Bool), Type::Unit, Builtin::Assert),
             "sqrt" => (1, Some(Type::Float), Type::Float, Builtin::Sqrt),

@@ -21,8 +21,20 @@ fn cases(dir: &str) -> Vec<PathBuf> {
     files
 }
 
+/// A cache private to this test process, so every test run really compiles.
+fn cache_dir() -> PathBuf {
+    std::env::temp_dir().join(format!("isma-test-cache-{}", std::process::id()))
+}
+
 fn isma(args: &[&str]) -> Output {
-    Command::new(ISMA).args(args).env("NO_COLOR", "1").output().expect("failed to run isma")
+    Command::new(ISMA).args(args).env("NO_COLOR", "1").env("ISMA_CACHE_DIR", cache_dir()).output().expect("failed to run isma")
+}
+
+fn scratch(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("isma-test-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
 }
 
 fn directive(path: &Path, key: &str) -> String {
@@ -108,5 +120,66 @@ fn build_produces_native_executable() {
     assert!(String::from_utf8_lossy(&run.stdout).contains("fib(30) = 832040"));
     let ir = std::fs::read_to_string(&ll).unwrap();
     assert!(ir.contains("define internal i64 @isma_fn_fib(i64 %a0)"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn python_style_invocation_with_args() {
+    let dir = scratch("args");
+    let script = dir.join("echo.isma");
+    std::fs::write(
+        &script,
+        "fn main():\n    val a = args()\n    print(a.len())\n    for x in a:\n        print(x)\n",
+    )
+    .unwrap();
+    // `isma file.isma ...`: everything after the script goes to the script,
+    // including things that look like isma flags.
+    let out = isma(&[script.to_str().unwrap(), "hello", "--debug", "two words"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "3\nhello\n--debug\ntwo words\n");
+    // `isma run file.isma -- x` still works.
+    let out = isma(&["run", script.to_str().unwrap(), "--", "x"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "1\nx\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn cache_reuses_and_invalidates() {
+    let dir = scratch("cache");
+    let cache = dir.join("cache");
+    let script = dir.join("prog.isma");
+    let run = || {
+        Command::new(ISMA).arg(&script).env("ISMA_CACHE_DIR", &cache).output().unwrap()
+    };
+    std::fs::write(&script, "fn main():\n    print(1)\n").unwrap();
+    assert_eq!(String::from_utf8_lossy(&run().stdout), "1\n");
+    assert_eq!(String::from_utf8_lossy(&run().stdout), "1\n"); // cache hit
+    // Editing the script must trigger a rebuild, and the old build is pruned.
+    std::fs::write(&script, "fn main():\n    print(2)\n").unwrap();
+    assert_eq!(String::from_utf8_lossy(&run().stdout), "2\n");
+    let bins = std::fs::read_dir(cache.join("bin")).unwrap().count();
+    assert_eq!(bins, 1, "stale cached binaries should be removed");
+    // Compile errors are still reported (and never cached).
+    std::fs::write(&script, "fn main():\n    val x: Int = \"no\"\n").unwrap();
+    let out = run();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("mismatched types"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn shebang_scripts_run_directly() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = scratch("shebang");
+    // Put the freshly built isma first on PATH so `#!/usr/bin/env isma` finds it.
+    let bin = Path::new(ISMA).parent().unwrap();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+    let script = dir.join("hello.isma");
+    std::fs::write(&script, "#!/usr/bin/env isma\nfn main():\n    print(f\"hi {args().len()}\")\n").unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let out = Command::new(&script).arg("a").env("PATH", path).env("ISMA_CACHE_DIR", cache_dir()).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "hi 1\n");
     let _ = std::fs::remove_dir_all(&dir);
 }

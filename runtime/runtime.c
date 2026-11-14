@@ -280,7 +280,22 @@ void *isma_list_pop_slot(IsmaList *l, int64_t elem_size, int line, int col) {
 
 // ---------------------------------------------------------------- entry
 
-int main(void) {
+static int saved_argc;
+static char **saved_argv;
+
+// Command-line arguments after the program name, as List[String].
+IsmaList *isma_args(void) {
+    IsmaList *l = isma_list_new((int64_t)sizeof(IsmaStr *), saved_argc > 1 ? saved_argc - 1 : 0);
+    for (int i = 1; i < saved_argc; i++) {
+        IsmaStr **slot = isma_list_push_slot(l, (int64_t)sizeof(IsmaStr *));
+        *slot = str_from(saved_argv[i], (int64_t)strlen(saved_argv[i]));
+    }
+    return l;
+}
+
+int main(int argc, char **argv) {
+    saved_argc = argc;
+    saved_argv = argv;
     isma_main();
     fflush(stdout);
     return 0;

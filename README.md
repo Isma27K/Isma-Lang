@@ -30,18 +30,44 @@ $ isma run demo.isma
 |v| = 5.0, fib(9) = 34
 ```
 
-## Quick start
+## Install
 
-You need Rust (cargo) and clang. Any recent clang works; the compiler looks in `$ISMA_CC`, then `PATH`, then `/usr/lib/llvm-*/bin`.
+You need Rust (to build the compiler) and clang. Isma uses clang to produce native code, and looks for it in `$ISMA_CC`, then `PATH`, then `/usr/lib/llvm-*/bin`.
 
 ```bash
-cargo build --release
-./target/release/isma run examples/hello.isma          # compile and run
-./target/release/isma build examples/fib.isma -o fib   # standalone native binary
-./fib
-./target/release/isma check examples/structs.isma      # type-check only
-./target/release/isma build x.isma --emit-llvm         # also write x.ll
-./target/release/isma build x.isma --debug             # -O0 -g instead of -O3
+./install.sh                         # builds and installs to ~/.local/bin/isma
+PREFIX=/usr/local sudo -E ./install.sh   # or system-wide
+./install.sh --uninstall             # removes the binary and the cache
+```
+`cargo install --path .` also works; that puts `isma` in `~/.cargo/bin`.
+
+## Usage: just like Python
+
+```bash
+isma hello.isma                  # compile + run, like `python hello.py`
+isma greet.isma Ana Budi         # everything after the script goes to the script
+```
+
+Scripts can carry a shebang line and run directly:
+```python
+#!/usr/bin/env isma
+fn main():
+    for name in args():
+        print(f"Hello, {name}!")
+```
+```bash
+chmod +x greet.isma
+./greet.isma Ana                 # Hello, Ana!
+```
+
+The first run of a script compiles it to native code (about 80 ms). Later runs of the unchanged script reuse the cached binary and start in about **2 ms**, faster than Python's own startup. Editing the script, or upgrading Isma, triggers a recompile automatically. The cache lives in `~/.cache/isma` (override it with `ISMA_CACHE_DIR`), and `isma clean` empties it.
+
+Other commands:
+```bash
+isma build fib.isma -o fib       # standalone native binary; ship it without Isma
+isma check app.isma              # type-check only
+isma build x.isma --emit-llvm    # also write the LLVM IR (x.ll)
+isma run --debug x.isma          # -O0 -g instead of -O3
 ```
 
 ## Language tour
@@ -172,6 +198,7 @@ val s = f"pi is about {3.14159}, 2 + 2 = {2 + 2}, ok = {true}"
 |---|---|
 | `print(x)` | Print any `Int`, `Float`, `Bool` or `String`, followed by a newline |
 | `input() -> String` | Read one line from stdin (without the newline) |
+| `args() -> List[String]` | Command-line arguments passed to the program |
 | `sqrt(x: Float) -> Float` | Square root |
 | `assert(cond: Bool)` | Panic if `cond` is false |
 | `panic(msg: String)` | Abort with a message |
@@ -223,6 +250,7 @@ The pieces in more detail:
 src/            compiler (lexer, parser, checker, codegen, driver, CLI)
 runtime/        C runtime linked into every program
 examples/       hello, fib, fizzbuzz, structs, primes_sieve, sort, collatz, guess, calc
+install.sh      installs `isma` onto your PATH
 tests/run/      programs + expected stdout
 tests/fail/     programs that must not compile (`# expect-error: ...`)
 tests/panic/    programs that must panic (`# expect-panic: ...`)
