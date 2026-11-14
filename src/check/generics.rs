@@ -229,9 +229,12 @@ impl Checker {
                         .with_label(prev, "declared here")
                         .with_note(format!("methods of `{of}` can use `{name}` directly")),
                 );
+                // From here on, `T` means the outer one.
+                continue;
             } else if let Some(&q) = out.iter().find(|q: &&ParamId| self.type_params[**q].name == *name) {
                 let prev = self.type_params[q].span;
                 self.err(Diagnostic::error(format!("type parameter `{name}` is declared twice"), p.span).with_label(prev, "first declared here"));
+                continue;
             }
             let id = self.type_params.len();
             self.type_params.push(ParamInfo { name: name.clone(), span: p.span, owner: owner.to_string() });
