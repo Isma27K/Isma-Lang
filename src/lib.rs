@@ -164,9 +164,36 @@ pub fn analyze(src: &str) -> check::Analysis {
     analyze_project(&load_source(src))
 }
 
+/// Building or running needs an entry point. Checking doesn't: a file
+/// without `main` is a module (and the editor checks it like any other file).
+pub fn missing_main(project: &Project) -> Option<Diagnostic> {
+    let root = &project.files[0];
+    let has_main = root.program.items.iter().any(|i| matches!(i, ast::Item::Fn(f) if f.name.name == "main"));
+    if has_main {
+        return None;
+    }
+    let file = Path::new(&root.display).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| root.display.clone());
+    Some(
+        Diagnostic::error("no `main` function found", Span::default())
+            .with_note(format!("`{file}` has no `main`, so it can only be imported as a module: run the file that imports it"))
+            .with_help("or give it an entry point:\n\nfn main():\n    print(\"hello\")"),
+    )
+}
+
 /// The back end's view of a program: MIR after the memory-management passes.
 pub fn compile_project_to_mir(project: &Project) -> Result<(mir::Program, Checked), Vec<Diagnostic>> {
-    let checked = check_project(project)?;
+    let checked = match check_project(project) {
+        Ok(c) => c,
+        Err(mut d) => {
+            d.extend(missing_main(project));
+            return Err(d);
+        }
+    };
+    if let Some(d) = missing_main(project) {
+        let mut all = checked.warnings;
+        all.push(d);
+        return Err(all);
+    }
     let mut program = lower::lower(&checked.program);
     arc::run(&mut program);
     Ok((program, checked))

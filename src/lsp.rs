@@ -1021,6 +1021,12 @@ mod tests {
     }
 
     #[test]
+    fn module_files_need_no_main() {
+        let a = crate::analyze("fn square(x: Int) -> Int:\n    return x * x\n");
+        assert!(a.diagnostics.is_empty(), "{:#?}", a.diagnostics);
+    }
+
+    #[test]
     fn stdlib_is_warning_free() {
         let a = crate::analyze("import time\nfn main():\n    print(time.now().to_iso())\n");
         assert!(a.diagnostics.is_empty(), "{:#?}", a.diagnostics);

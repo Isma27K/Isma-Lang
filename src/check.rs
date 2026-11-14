@@ -756,18 +756,13 @@ impl Checker {
         self.resolve_name_imports(&mut pending, true);
         self.import_conflicts();
 
-        // `main` checks.
-        match self.func_index.get(&(0, "main".to_string())) {
-            None => self.err(
-                Diagnostic::error("no `main` function found", Span::default())
-                    .with_help("add an entry point:\n\nfn main():\n    print(\"hello\")"),
-            ),
-            Some(&id) => {
-                let f = &self.funcs[id];
-                if !f.params.is_empty() || f.ret != Type::Unit {
-                    let span = f.span;
-                    self.err(Diagnostic::error("`main` must take no parameters and return nothing", span));
-                }
+        // `main` checks. A file without `main` is fine here: it's a module.
+        // (Building or running one is refused by the driver, see `crate::missing_main`.)
+        if let Some(&id) = self.func_index.get(&(0, "main".to_string())) {
+            let f = &self.funcs[id];
+            if !f.params.is_empty() || f.ret != Type::Unit {
+                let span = f.span;
+                self.err(Diagnostic::error("`main` must take no parameters and return nothing", span));
             }
         }
 

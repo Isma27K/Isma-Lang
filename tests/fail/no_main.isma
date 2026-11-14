@@ -1,3 +1,0 @@
-# expect-error: no `main` function found
-fn helper():
-    pass

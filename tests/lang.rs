@@ -285,6 +285,27 @@ fn cache_rebuilds_when_an_imported_file_changes() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn modules_need_no_main_until_run() {
+    let dir = scratch("no-main");
+    std::fs::create_dir_all(dir.join("function")).unwrap();
+    let math = dir.join("function/math.isma");
+    std::fs::write(&math, "fn square(x: Int) -> Int:\n    return x * x\n").unwrap();
+    std::fs::write(dir.join("main.isma"), "import function.math\nfn main():\n    print(math.square(7))\n").unwrap();
+    // Checking a module is fine (this is also what the editor does)...
+    let out = isma(&["check", math.to_str().unwrap()]);
+    assert!(out.status.success() && out.stderr.is_empty(), "{}", String::from_utf8_lossy(&out.stderr));
+    // ...running it is not: it has no entry point.
+    let out = isma(&["run", math.to_str().unwrap()]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr.contains("no `main` function found") && stderr.contains("can only be imported as a module"), "{stderr}");
+    // The program that imports it runs.
+    let out = isma(&["run", dir.join("main.isma").to_str().unwrap()]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "49\n", "{}", String::from_utf8_lossy(&out.stderr));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[cfg(unix)]
 #[test]
 fn shebang_scripts_run_directly() {

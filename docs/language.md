@@ -462,7 +462,7 @@ from . import util                       # `.` is this file's folder
 
 - **Where modules are found.** `import a.b` reads `a/b.isma`, starting from the folder of the file that contains the `import`; every file finds its imports the same way, whichever file you run. `from .x` and `from ..x` (`from .. import x`) start from this folder or the one above.
 - **What a plain `import` binds.** The last part of the path: `import shapes.registry` gives you `registry.count()`. With `as`, the name you choose.
-- **What a module contains.** Functions, structs and enums. Its `fn main()`, if any, only runs when you run that file itself, so a module can carry its own demo or tests.
+- **What a module contains.** Functions, structs and enums. It doesn't need a `main`: `isma check` and the editor check it like any other file, and only `isma run` / `isma build` ask for an entry point. If it has a `fn main()`, that only runs when you run the file itself, so a module can carry its own demo or tests.
 - **Privacy.** Names starting with `_` are private to their module: functions, types, methods and fields. A struct with private fields can only be created inside its module, so a module can guarantee its structs are valid.
 - **Cycles are fine.** Two modules may import each other, and a module may import the file you run. Modules contain only declarations, so there is no order of initialization to get wrong.
 - **Your files come first.** A `time.isma` next to your file is imported instead of the standard library's `time`.
