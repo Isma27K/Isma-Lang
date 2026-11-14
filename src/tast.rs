@@ -33,6 +33,9 @@ pub struct TFunc {
     pub locals: Vec<TLocal>,
     pub body: Vec<TStmt>,
     pub exported: bool,
+    /// Standard-library functions report panics at their caller's location
+    /// (like Rust's `#[track_caller]`): they take it as hidden arguments.
+    pub track_caller: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -82,6 +85,14 @@ pub enum Builtin {
     FloatToInt,
     StrToInt,
     StrToFloat,
+    StrChars,
+    StrSubstring,
+    StrContains,
+    StrStartsWith,
+    StrEndsWith,
+    RealtimeNs,
+    MonotonicNs,
+    SleepNs,
     ToStr,
     StrLen,
     ListLen,

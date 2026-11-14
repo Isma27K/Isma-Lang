@@ -1,0 +1,4 @@
+# expect-error: method `_format_code` of `time.DateTime` is private
+import time
+fn main():
+    print(time.now()._format_code("Y"))

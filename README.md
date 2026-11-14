@@ -212,6 +212,77 @@ val s = f"pi is about {3.14159}, 2 + 2 = {2 + 2}, ok = {true}"
 "2.5".to_float()
 ```
 
+| String method | |
+|---|---|
+| `len() -> Int` | Length in bytes |
+| `chars() -> List[String]` | Each character as a one-character string: `for c in s.chars():` |
+| `substring(start, end) -> String` | Bytes `start..end`; panics if out of range or splitting a character |
+| `contains(s)`, `starts_with(s)`, `ends_with(s)` | `-> Bool` |
+| `to_int()`, `to_float()`, `to_string()` | Conversions (parsing panics on bad input) |
+
+### Modules: `import`
+```python
+import time
+
+fn main():
+    val now = time.now()        # call module functions as module.function(...)
+    val t: time.DateTime = now  # module types are written module.Type
+```
+- **Standard-library modules are written in Isma** (see [`stdlib/`](stdlib)). They're compiled together with your program, so they're as fast as your own code.
+- **Privacy.** Names starting with `_` are private to their module.
+- **Construction.** A module's structs can only be created through its functions, which validate the values. You can't build a `DateTime` for February 30.
+- **Panic locations.** A panic inside a standard-library function is reported at *your* line that called it, like Rust's `#[track_caller]`:
+  ```
+  panic at app.isma:4:11: invalid date 2023-02-29: February 2023 has 28 days
+  ```
+- **Lint.** An `import` you never use is a warning.
+
+## The `time` module (UTC)
+
+Everything is UTC; there are no time zones. A `DateTime` is immutable, and methods like `add_days` return a new value.
+
+```python
+import time
+
+val now = time.now()
+print(now.to_iso())                               # 2026-11-14T16:05:09.123Z
+print(now.format("%A, %d %B %Y %H:%M"))           # Saturday, 14 November 2026 16:05
+val deadline = time.parse_iso("2026-12-25T00:00:00+07:00")   # offsets are converted to UTC
+print(deadline.seconds_since(now) / 86400)        # whole days left
+```
+
+| Create a `DateTime` | |
+|---|---|
+| `time.now()` | The current UTC date and time (nanosecond precision) |
+| `time.utc(year, month, day, hour, minute, second)` | Validated; panics on e.g. February 30 |
+| `time.date(year, month, day)` | Midnight UTC |
+| `time.from_unix(seconds)` / `time.from_unix_ms(ms)` | From a Unix timestamp |
+| `time.parse_iso(text)` | `"2026-11-14"`, `"2026-11-14T16:05:09Z"`, `"... 16:05:09.25+02:00"`. Panics if invalid; check first with `time.is_valid_iso(text)` |
+
+| `DateTime` | |
+|---|---|
+| fields | `year`, `month`, `day`, `hour`, `minute`, `second`, `nanosecond` (read-only) |
+| `to_iso()`, `date_string()`, `time_string()` | `"2026-11-14T16:05:09Z"`, `"2026-11-14"`, `"16:05:09"` |
+| `format(pattern)` | `%Y %y %m %d %H %I %p %M %S %L %f %j %A %a %B %b %s %%` (strftime-style) |
+| `unix()`, `unix_ms()`, `millisecond()` | Timestamps and the millisecond part |
+| `weekday()`, `weekday_name()`, `month_name()`, `day_of_year()` | `0` = Monday … `6` = Sunday |
+| `add_seconds/minutes/hours/days(n)` | Exact arithmetic (negative `n` goes back) |
+| `add_months(n)`, `add_years(n)` | Calendar arithmetic; Jan 31 + 1 month = Feb 28/29 |
+| `seconds_since(other)`, `millis_since(other)` | Differences, rounded toward zero |
+| `compare(other)`, `is_before(other)`, `is_after(other)`, `equals(other)` | Ordering (`==` doesn't apply to structs) |
+| `start_of_day()` | Midnight of the same day |
+
+| Clocks and helpers | |
+|---|---|
+| `time.unix()`, `time.unix_ms()` | Current Unix time |
+| `time.monotonic_ms()`, `time.monotonic_ns()` | A clock that only moves forward, for measuring durations |
+| `time.sleep_ms(ms)` | Pause the program |
+| `time.is_leap_year(year)`, `time.days_in_month(year, month)` | Calendar facts |
+
+How it's verified:
+- `tests/run/time_utc.isma` checks every function against values computed with Python's `datetime`.
+- During development, the module was cross-checked against Python on 3,000 random timestamps between years 2 and 9998, covering every format code, the weekday, `add_months` clamping and parse round-trips.
+
 ### Built-ins
 | Function | Description |
 |---|---|
@@ -268,7 +339,8 @@ The pieces in more detail:
 ```
 src/            compiler (lexer, parser, checker, codegen, driver, CLI)
 runtime/        C runtime linked into every program
-examples/       hello, fib, fizzbuzz, structs, primes_sieve, sort, collatz, guess, calc
+stdlib/         the standard library, written in Isma (time.isma)
+examples/       hello, fib, fizzbuzz, structs, primes_sieve, sort, collatz, guess, calc, clock
 install.sh      installs `isma` (default or custom)
 uninstall.sh    removes it again (wipe all or pick targets)
 tests/run/      programs + expected stdout
@@ -280,9 +352,9 @@ bench/          Isma vs Rust vs Python
 
 ## Known limitations (v0.1)
 - **Memory is never freed.** Allocation uses a bump arena, which is fine for short programs. ARC is next on the list.
-- Programs are a single file: no modules or imports yet.
+- Your own code is still a single file: you can `import` standard-library modules, but not your own files yet.
 - No top-level constants. Everything lives inside functions.
-- `String.len()` counts bytes, and strings can't be indexed yet.
+- `String.len()` and `substring()` count bytes, and strings can't be indexed with `s[i]` (use `chars()`).
 - No negative indexing (`xs[-1]` panics).
 
 ## Roadmap
@@ -290,7 +362,8 @@ bench/          Isma vs Rust vs Python
 - [ ] Memory management through automatic reference counting
 - [ ] `enum` + `match` with exhaustiveness checking
 - [ ] Generics for user code (`fn max[T](a: T, b: T) -> T`)
-- [ ] Modules and imports
+- [x] Modules and imports for the standard library (`import time`)
+- [ ] Importing your own `.isma` files
 - [ ] Closures and lambdas
 - [ ] Top-level `val` constants
-- [ ] A larger standard library (maps, string methods, file IO)
+- [ ] A larger standard library (`math`, `fs`, maps, more string methods)

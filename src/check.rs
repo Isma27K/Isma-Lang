@@ -21,6 +21,24 @@ struct FuncSig {
     span: Span,
 }
 
+/// A standard-library module checked together with the user's program.
+pub struct ModuleInput<'a> {
+    pub name: &'a str,
+    pub program: &'a Program,
+    pub source: &'a str,
+    pub base: u32,
+}
+
+struct ImportInfo {
+    module_ns: usize,
+    span: Span,
+    used: bool,
+}
+
+fn is_private(name: &str) -> bool {
+    name.starts_with('_')
+}
+
 struct LocalBinding {
     id: LocalId,
     mutable: bool,
@@ -47,9 +65,18 @@ pub struct Analysis {
 pub struct Checker {
     structs: Vec<TStruct>,
     struct_spans: Vec<Span>,
-    struct_index: HashMap<String, StructId>,
+    struct_ns: Vec<usize>,
+    /// (namespace, name) -> struct. Namespace 0 is the user's file, k > 0 the k-th module.
+    struct_index: HashMap<(usize, String), StructId>,
     funcs: Vec<FuncSig>,
-    func_index: HashMap<String, FuncId>,
+    func_index: HashMap<(usize, String), FuncId>,
+    /// The namespace currently being checked.
+    ns: usize,
+    ns_names: Vec<String>,
+    /// (span base, source text) per namespace, for doc comments.
+    ns_sources: Vec<(u32, String)>,
+    module_ns: HashMap<String, usize>,
+    imports: HashMap<(usize, String), ImportInfo>,
     methods: HashMap<(StructId, String), FuncId>,
     diags: Vec<Diagnostic>,
     // per-function state
@@ -65,8 +92,8 @@ pub struct Checker {
 }
 
 /// Type-check: `Ok((program, warnings))` or `Err(errors and warnings)`.
-pub fn check(program: &Program) -> Result<(TProgram, Vec<Diagnostic>), Vec<Diagnostic>> {
-    let a = analyze(program);
+pub fn check(program: &Program, source: &str, modules: &[ModuleInput]) -> Result<(TProgram, Vec<Diagnostic>), Vec<Diagnostic>> {
+    let a = analyze(program, source, modules);
     match a.program {
         Some(p) => Ok((p, a.diagnostics)),
         None => Err(a.diagnostics),
@@ -74,13 +101,19 @@ pub fn check(program: &Program) -> Result<(TProgram, Vec<Diagnostic>), Vec<Diagn
 }
 
 /// Type-check and collect everything an editor needs, even when there are errors.
-pub fn analyze(program: &Program) -> Analysis {
+pub fn analyze(program: &Program, source: &str, modules: &[ModuleInput]) -> Analysis {
     let mut c = Checker {
         structs: Vec::new(),
         struct_spans: Vec::new(),
+        struct_ns: Vec::new(),
         struct_index: HashMap::new(),
         funcs: Vec::new(),
         func_index: HashMap::new(),
+        ns: 0,
+        ns_names: std::iter::once(String::new()).chain(modules.iter().map(|m| m.name.to_string())).collect(),
+        ns_sources: std::iter::once((0, source.to_string())).chain(modules.iter().map(|m| (m.base, m.source.to_string()))).collect(),
+        module_ns: modules.iter().enumerate().map(|(i, m)| (m.name.to_string(), i + 1)).collect(),
+        imports: HashMap::new(),
         methods: HashMap::new(),
         diags: Vec::new(),
         locals: Vec::new(),
@@ -92,7 +125,13 @@ pub fn analyze(program: &Program) -> Analysis {
         field_spans: Vec::new(),
         pending_struct_hovers: Vec::new(),
     };
-    let funcs = c.program(program);
+    for (i, m) in modules.iter().enumerate() {
+        let doc = c.leading_comment(i + 1);
+        c.ide.modules.push(ModuleSymbol { name: m.name.to_string(), ns: i + 1, doc });
+    }
+    let mut units: Vec<(usize, &Program)> = modules.iter().enumerate().map(|(i, m)| (i + 1, m.program)).collect();
+    units.push((0, program));
+    let funcs = c.program(&units);
     c.finish_ide();
     let has_errors = c.diags.iter().any(|d| d.is_error());
     let program = if has_errors { None } else { Some(TProgram { structs: c.structs, funcs }) };
@@ -118,6 +157,46 @@ fn local_doc(kind: LocalKind) -> Option<String> {
         LocalKind::LoopVar => Some("loop variable".into()),
         _ => None,
     }
+}
+
+/// Turn `#` comment lines into Markdown: prose stays prose, indented lines
+/// (examples, tables) become code blocks.
+fn format_doc(lines: &[&str]) -> Option<String> {
+    let bodies: Vec<&str> = lines
+        .iter()
+        .map(|l| {
+            let b = l.trim_start_matches('#');
+            b.strip_prefix(' ').unwrap_or(b)
+        })
+        .collect();
+    if bodies.iter().all(|b| b.trim().is_empty()) {
+        return None;
+    }
+    let mut out = String::new();
+    let mut i = 0;
+    while i < bodies.len() {
+        if bodies[i].starts_with("  ") {
+            let start = i;
+            while i < bodies.len() && (bodies[i].starts_with("  ") || bodies[i].trim().is_empty() && i + 1 < bodies.len() && bodies[i + 1].starts_with("  ")) {
+                i += 1;
+            }
+            let block = &bodies[start..i];
+            let indent = block.iter().filter(|l| !l.trim().is_empty()).map(|l| l.len() - l.trim_start().len()).min().unwrap_or(0);
+            let first = block[0].trim_start();
+            let lang = if ["import ", "val ", "var ", "fn ", "print("].iter().any(|k| first.starts_with(k)) { "isma" } else { "text" };
+            out.push_str(&format!("\n```{lang}\n"));
+            for l in block {
+                out.push_str(l.get(indent..).unwrap_or("").trim_end());
+                out.push('\n');
+            }
+            out.push_str("```\n");
+        } else {
+            out.push_str(bodies[i]);
+            out.push('\n');
+            i += 1;
+        }
+    }
+    Some(out.trim().to_string())
 }
 
 /// Edit distance for "did you mean" suggestions.
@@ -156,6 +235,76 @@ impl Checker {
 
     fn tn(&self, t: &Type) -> String {
         t.display(&self.struct_names())
+    }
+
+    /// The `#` comment block directly above the line containing `offset`.
+    fn doc_comment(&self, offset: u32) -> Option<String> {
+        let (base, src) = self.ns_sources.iter().rev().find(|(b, _)| *b <= offset)?;
+        let off = ((offset - base) as usize).min(src.len());
+        let line_start = src[..off].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let mut lines: Vec<&str> = Vec::new();
+        let mut end = line_start;
+        while end > 0 {
+            let prev_start = src[..end - 1].rfind('\n').map(|i| i + 1).unwrap_or(0);
+            let line = src[prev_start..end - 1].trim();
+            if !line.starts_with('#') || line.starts_with("#!") {
+                break;
+            }
+            lines.push(line);
+            end = prev_start;
+        }
+        lines.reverse();
+        format_doc(&lines)
+    }
+
+    /// The comment block at the very top of a namespace's file (module docs).
+    fn leading_comment(&self, ns: usize) -> Option<String> {
+        let src = &self.ns_sources[ns].1;
+        let lines: Vec<&str> = src.lines().map(str::trim).take_while(|l| l.starts_with('#')).filter(|l| !l.starts_with("#!")).collect();
+        format_doc(&lines)
+    }
+
+    fn display_struct(&self, ns: usize, name: &str) -> String {
+        if ns == 0 { name.to_string() } else { format!("{}.{name}", self.ns_names[ns]) }
+    }
+
+    /// Resolve `module` as imported in the current namespace (marking it used).
+    fn imported_module(&mut self, module: &str) -> Option<usize> {
+        let info = self.imports.get_mut(&(self.ns, module.to_string()))?;
+        info.used = true;
+        Some(info.module_ns)
+    }
+
+    fn module_hover(&mut self, module_ns: usize, span: Span) {
+        let doc = self.ide.modules.iter().find(|m| m.ns == module_ns).and_then(|m| m.doc.clone());
+        self.hover(span, format!("import {}", self.ns_names[module_ns]), doc);
+    }
+
+    /// Hint for a name that exists in a module but was used unqualified.
+    fn module_hint(&self, name: &str) -> Option<String> {
+        if self.ns != 0 {
+            return None;
+        }
+        for (mname, &mns) in &self.module_ns {
+            let has = self.func_index.contains_key(&(mns, name.to_string())) || self.struct_index.contains_key(&(mns, name.to_string()));
+            if has && !is_private(name) {
+                return Some(if self.imports.contains_key(&(0, mname.clone())) {
+                    format!("did you mean `{mname}.{name}`?")
+                } else {
+                    format!("it lives in the `{mname}` module: add `import {mname}` and write `{mname}.{name}`")
+                });
+            }
+        }
+        for m in crate::stdlib::MODULES {
+            if self.module_ns.contains_key(m.name) {
+                continue;
+            }
+            let needle = format!("\nfn {name}(");
+            if m.source.contains(&needle) && !is_private(name) {
+                return Some(format!("it lives in the `{}` module: add `import {}` and write `{}.{name}`", m.name, m.name, m.name));
+            }
+        }
+        None
     }
 
     fn hover(&mut self, span: Span, code: String, doc: Option<String>) {
@@ -217,16 +366,50 @@ impl Checker {
 
     // ---------- declarations ----------
 
-    fn program(&mut self, program: &Program) -> Vec<TFunc> {
+    fn program(&mut self, units: &[(usize, &Program)]) -> Vec<TFunc> {
+        // Pass 0: imports.
+        for &(ns, program) in units {
+            for item in &program.items {
+                let Item::Import(m) = item else { continue };
+                if let Some(prev) = self.imports.get(&(ns, m.name.clone())) {
+                    let prev_span = prev.span;
+                    self.err(
+                        Diagnostic::error(format!("`{}` is imported more than once", m.name), m.span)
+                            .with_label(prev_span, "first imported here"),
+                    );
+                    continue;
+                }
+                match self.module_ns.get(&m.name) {
+                    Some(&module_ns) => {
+                        self.imports.insert((ns, m.name.clone()), ImportInfo { module_ns, span: m.span, used: false });
+                        self.module_hover(module_ns, m.span);
+                        self.ide.imports.push((m.name.clone(), m.span));
+                    }
+                    None => {
+                        let names: Vec<&str> = crate::stdlib::MODULES.iter().map(|m| m.name).collect();
+                        let mut d = Diagnostic::error(format!("no module named `{}`", m.name), m.span)
+                            .with_primary("unknown module")
+                            .with_note(format!("available modules: {}", names.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", ")));
+                        if let Some(sugg) = suggest(&m.name, names.iter().copied()) {
+                            d = d.with_help(format!("did you mean `{sugg}`?"));
+                        }
+                        self.err(d);
+                    }
+                }
+            }
+        }
+
         // Pass 1: struct names.
-        for item in &program.items {
-            if let Item::Struct(s) = item {
+        for &(ns, program) in units {
+            self.ns = ns;
+            for item in &program.items {
+                let Item::Struct(s) = item else { continue };
                 let name = &s.name.name;
                 if RESERVED_TYPES.contains(&name.as_str()) {
                     self.err(Diagnostic::error(format!("`{name}` is a built-in type name"), s.name.span));
                     continue;
                 }
-                if let Some(&prev) = self.struct_index.get(name) {
+                if let Some(&prev) = self.struct_index.get(&(ns, name.clone())) {
                     let prev_span = self.struct_spans[prev];
                     self.err(
                         Diagnostic::error(format!("struct `{name}` is defined more than once"), s.name.span)
@@ -235,9 +418,11 @@ impl Checker {
                     continue;
                 }
                 let id = self.structs.len();
-                self.structs.push(TStruct { name: name.clone(), fields: Vec::new() });
+                let display = self.display_struct(ns, name);
+                self.structs.push(TStruct { name: display.clone(), fields: Vec::new() });
                 self.struct_spans.push(s.name.span);
-                self.struct_index.insert(name.clone(), id);
+                self.struct_ns.push(ns);
+                self.struct_index.insert((ns, name.clone()), id);
                 let end = s
                     .fields
                     .iter()
@@ -245,12 +430,15 @@ impl Checker {
                     .chain(s.methods.iter().map(|m| fn_full_span(m).end))
                     .max()
                     .unwrap_or(s.name.span.end);
+                let doc = self.doc_comment(s.name.span.start);
                 self.ide.structs.push(StructSymbol {
-                    name: name.clone(),
+                    name: display,
                     name_span: s.name.span,
                     full: Span { start: s.name.span.start, end },
                     fields: Vec::new(),
                     methods: Vec::new(),
+                    ns,
+                    doc,
                 });
                 self.field_spans.push(Vec::new());
                 self.pending_struct_hovers.push((s.name.span, id));
@@ -258,99 +446,104 @@ impl Checker {
         }
 
         // Pass 2: struct fields, function + method signatures.
-        let mut bodies: Vec<(&FnDecl, Option<StructId>)> = Vec::new();
-        for item in &program.items {
-            match item {
-                Item::Struct(s) => {
-                    let Some(&sid) = self.struct_index.get(&s.name.name) else { continue };
-                    if self.structs[sid].name != s.name.name || self.struct_spans[sid] != s.name.span {
-                        continue; // duplicate definition already reported
+        let mut bodies: Vec<(&FnDecl, Option<StructId>, usize)> = Vec::new();
+        for &(ns, program) in units {
+            self.ns = ns;
+            for item in &program.items {
+                match item {
+                    Item::Import(_) => {}
+                    Item::Struct(s) => {
+                        let Some(&sid) = self.struct_index.get(&(ns, s.name.name.clone())) else { continue };
+                        if self.struct_spans[sid] != s.name.span {
+                            continue; // duplicate definition already reported
+                        }
+                        let mut seen: HashMap<&str, Span> = HashMap::new();
+                        let mut fields = Vec::new();
+                        for f in &s.fields {
+                            if let Some(prev) = seen.get(f.name.name.as_str()) {
+                                self.err(
+                                    Diagnostic::error(format!("field `{}` is declared more than once", f.name.name), f.name.span)
+                                        .with_label(*prev, "first declared here"),
+                                );
+                                continue;
+                            }
+                            seen.insert(&f.name.name, f.name.span);
+                            let ty = self.resolve_type(&f.ty);
+                            let tn = self.tn(&ty);
+                            self.ide.structs[sid].fields.push(FieldSymbol {
+                                name: f.name.name.clone(),
+                                ty: tn.clone(),
+                                mutable: f.mutable,
+                                span: f.name.span,
+                            });
+                            self.field_spans[sid].push(f.name.span);
+                            let kw = if f.mutable { "var" } else { "val" };
+                            let sname = self.structs[sid].name.clone();
+                            self.hover(f.name.span, format!("{kw} {}: {tn}", f.name.name), Some(format!("field of `{sname}`")));
+                            fields.push(TField { name: f.name.name.clone(), ty, mutable: f.mutable });
+                        }
+                        self.structs[sid].fields = fields;
+                        for m in &s.methods {
+                            if seen.contains_key(m.name.name.as_str()) {
+                                self.err(Diagnostic::error(
+                                    format!("`{}` is both a field and a method of `{}`", m.name.name, s.name.name),
+                                    m.name.span,
+                                ));
+                                continue;
+                            }
+                            if m.self_param.is_none() {
+                                self.err(
+                                    Diagnostic::error(format!("method `{}` must take `self` as its first parameter", m.name.name), m.sig_span)
+                                        .with_note("static methods are not supported yet; use a top-level function"),
+                                );
+                                continue;
+                            }
+                            if let Some(&prev) = self.methods.get(&(sid, m.name.name.clone())) {
+                                let prev_span = self.funcs[prev].span;
+                                self.err(
+                                    Diagnostic::error(format!("method `{}` is defined more than once", m.name.name), m.name.span)
+                                        .with_label(prev_span, "first defined here"),
+                                );
+                                continue;
+                            }
+                            let fid = self.declare_fn(m, Some(sid));
+                            self.methods.insert((sid, m.name.name.clone()), fid);
+                            self.ide.structs[sid].methods.push(fid);
+                            bodies.push((m, Some(sid), ns));
+                        }
                     }
-                    let mut seen: HashMap<&str, Span> = HashMap::new();
-                    let mut fields = Vec::new();
-                    for f in &s.fields {
-                        if let Some(prev) = seen.get(f.name.name.as_str()) {
-                            self.err(
-                                Diagnostic::error(format!("field `{}` is declared more than once", f.name.name), f.name.span)
-                                    .with_label(*prev, "first declared here"),
-                            );
+                    Item::Fn(f) => {
+                        let name = &f.name.name;
+                        if let Some(self_span) = f.self_param {
+                            self.err(Diagnostic::error("`self` is only allowed in methods inside a `struct`", self_span));
+                        }
+                        if BUILTINS.contains(&name.as_str()) {
+                            self.err(Diagnostic::error(format!("`{name}` is a built-in function and cannot be redefined"), f.name.span));
                             continue;
                         }
-                        seen.insert(&f.name.name, f.name.span);
-                        let ty = self.resolve_type(&f.ty);
-                        let tn = self.tn(&ty);
-                        self.ide.structs[sid].fields.push(FieldSymbol {
-                            name: f.name.name.clone(),
-                            ty: tn.clone(),
-                            mutable: f.mutable,
-                            span: f.name.span,
-                        });
-                        self.field_spans[sid].push(f.name.span);
-                        let kw = if f.mutable { "var" } else { "val" };
-                        self.hover(f.name.span, format!("{kw} {}: {tn}", f.name.name), Some(format!("field of `{}`", s.name.name)));
-                        fields.push(TField { name: f.name.name.clone(), ty, mutable: f.mutable });
-                    }
-                    self.structs[sid].fields = fields;
-                    for m in &s.methods {
-                        if seen.contains_key(m.name.name.as_str()) {
-                            self.err(Diagnostic::error(
-                                format!("`{}` is both a field and a method of `{}`", m.name.name, s.name.name),
-                                m.name.span,
-                            ));
+                        if self.struct_index.contains_key(&(ns, name.clone())) {
+                            self.err(Diagnostic::error(format!("`{name}` is already the name of a struct"), f.name.span));
                             continue;
                         }
-                        if m.self_param.is_none() {
-                            self.err(
-                                Diagnostic::error(format!("method `{}` must take `self` as its first parameter", m.name.name), m.sig_span)
-                                    .with_note("static methods are not supported yet; use a top-level function"),
-                            );
-                            continue;
-                        }
-                        if let Some(&prev) = self.methods.get(&(sid, m.name.name.clone())) {
+                        if let Some(&prev) = self.func_index.get(&(ns, name.clone())) {
                             let prev_span = self.funcs[prev].span;
                             self.err(
-                                Diagnostic::error(format!("method `{}` is defined more than once", m.name.name), m.name.span)
-                                    .with_label(prev_span, "first defined here"),
+                                Diagnostic::error(format!("function `{name}` is defined more than once"), f.name.span)
+                                    .with_label(prev_span, "first defined here")
+                                    .with_note("Isma has no function overloading"),
                             );
                             continue;
                         }
-                        let fid = self.declare_fn(m, Some(sid));
-                        self.methods.insert((sid, m.name.name.clone()), fid);
-                        self.ide.structs[sid].methods.push(fid);
-                        bodies.push((m, Some(sid)));
+                        let fid = self.declare_fn(f, None);
+                        self.func_index.insert((ns, name.clone()), fid);
+                        bodies.push((f, None, ns));
                     }
-                }
-                Item::Fn(f) => {
-                    let name = &f.name.name;
-                    if let Some(self_span) = f.self_param {
-                        self.err(Diagnostic::error("`self` is only allowed in methods inside a `struct`", self_span));
-                    }
-                    if BUILTINS.contains(&name.as_str()) {
-                        self.err(Diagnostic::error(format!("`{name}` is a built-in function and cannot be redefined"), f.name.span));
-                        continue;
-                    }
-                    if self.struct_index.contains_key(name) {
-                        self.err(Diagnostic::error(format!("`{name}` is already the name of a struct"), f.name.span));
-                        continue;
-                    }
-                    if let Some(&prev) = self.func_index.get(name) {
-                        let prev_span = self.funcs[prev].span;
-                        self.err(
-                            Diagnostic::error(format!("function `{name}` is defined more than once"), f.name.span)
-                                .with_label(prev_span, "first defined here")
-                                .with_note("Isma has no function overloading"),
-                        );
-                        continue;
-                    }
-                    let fid = self.declare_fn(f, None);
-                    self.func_index.insert(name.clone(), fid);
-                    bodies.push((f, None));
                 }
             }
         }
 
         // `main` checks.
-        match self.func_index.get("main") {
+        match self.func_index.get(&(0, "main".to_string())) {
             None => self.err(
                 Diagnostic::error("no `main` function found", Span::default())
                     .with_help("add an entry point:\n\nfn main():\n    print(\"hello\")"),
@@ -366,8 +559,22 @@ impl Checker {
 
         // Pass 3: bodies.
         let mut out = Vec::new();
-        for (decl, owner) in bodies {
+        for (decl, owner, ns) in bodies {
+            self.ns = ns;
             out.push(self.fn_body(decl, owner, out.len()));
+        }
+        self.ns = 0;
+
+        // Lint: unused imports.
+        let mut unused: Vec<(String, Span)> =
+            self.imports.iter().filter(|((ns, _), i)| *ns == 0 && !i.used).map(|((_, n), i)| (n.clone(), i.span)).collect();
+        unused.sort_by_key(|(_, s)| s.start);
+        for (name, span) in unused {
+            self.diags.push(
+                Diagnostic::warning(format!("unused import `{name}`"), span)
+                    .with_primary("never used")
+                    .with_help("remove this line"),
+            );
         }
         out
     }
@@ -396,23 +603,33 @@ impl Checker {
             Some(t) => self.resolve_type(t),
             None => Type::Unit,
         };
+        let module = &self.ns_names[self.ns];
         let (name, symbol) = match owner {
             Some(sid) => {
                 let sname = &self.structs[sid].name;
-                (format!("{sname}.{}", f.name.name), format!("isma_m_{sname}_{}", f.name.name))
+                (format!("{sname}.{}", f.name.name), format!("isma_m_{}_{}", sname.replace('.', "__"), f.name.name))
             }
-            None if f.name.name == "main" => ("main".into(), "isma_main".into()),
-            None => (f.name.name.clone(), format!("isma_fn_{}", f.name.name)),
+            None if self.ns == 0 && f.name.name == "main" => ("main".into(), "isma_main".into()),
+            None if self.ns == 0 => (f.name.name.clone(), format!("isma_fn_{}", f.name.name)),
+            None => (format!("{module}.{}", f.name.name), format!("isma_{module}__{}", f.name.name)),
         };
         let sig = self.signature(&f.name.name, &params, &ret, owner.is_some());
-        let doc = owner.map(|sid| format!("method of `{}`", self.structs[sid].name));
-        self.hover(f.name.span, sig.clone(), doc);
+        let comment = self.doc_comment(f.sig_span.start);
+        let hover_doc = match (owner, &comment) {
+            (Some(sid), Some(c)) => Some(format!("method of `{}`\n\n{c}", self.structs[sid].name)),
+            (Some(sid), None) => Some(format!("method of `{}`", self.structs[sid].name)),
+            (None, c) if self.ns != 0 => Some(format!("in module `{module}`{}", c.as_ref().map(|c| format!("\n\n{c}")).unwrap_or_default())),
+            (None, c) => c.clone(),
+        };
+        self.hover(f.name.span, sig.clone(), hover_doc);
         self.ide.functions.push(FnSymbol {
             name: f.name.name.clone(),
             signature: sig,
             name_span: f.name.span,
             full: fn_full_span(f),
             owner,
+            ns: self.ns,
+            doc: comment,
         });
         let id = self.funcs.len();
         self.funcs.push(FuncSig { name, symbol, params, ret, span: f.name.span });
@@ -421,6 +638,9 @@ impl Checker {
 
     fn resolve_type(&mut self, t: &TypeExpr) -> Type {
         let name = t.name.name.as_str();
+        if let Some(m) = &t.module {
+            return self.resolve_module_type(m, t);
+        }
         let expect_args = |c: &mut Checker, n: usize| -> bool {
             if t.args.len() != n {
                 let msg = if n == 0 {
@@ -457,7 +677,7 @@ impl Checker {
                 Type::List(Box::new(inner))
             }
             _ => {
-                if let Some(&sid) = self.struct_index.get(name) {
+                if let Some(&sid) = self.struct_index.get(&(self.ns, name.to_string())) {
                     self.ide.definitions.push((t.name.span, self.struct_spans[sid]));
                     self.pending_struct_hovers.push((t.name.span, sid));
                     if !expect_args(self, 0) {
@@ -474,9 +694,58 @@ impl Checker {
                     "list" | "Vec" | "Array" => Some("List"),
                     _ => None,
                 };
-                let names: Vec<String> = RESERVED_TYPES.iter().map(|s| s.to_string()).chain(self.struct_index.keys().cloned()).collect();
-                if let Some(h) = hint.map(String::from).or_else(|| suggest(name, names.iter().map(|s| s.as_str()))) {
+                let ns = self.ns;
+                let names: Vec<String> = RESERVED_TYPES
+                    .iter()
+                    .map(|s| s.to_string())
+                    .chain(self.struct_index.keys().filter(|(n, _)| *n == ns).map(|(_, s)| s.clone()))
+                    .collect();
+                if let Some(h) = self.module_hint(name) {
+                    d = d.with_help(h);
+                } else if let Some(h) = hint.map(String::from).or_else(|| suggest(name, names.iter().map(|s| s.as_str()))) {
                     d = d.with_help(format!("did you mean `{h}`?"));
+                }
+                self.err(d);
+                Type::Error
+            }
+        }
+    }
+
+    /// `time.DateTime` in a type annotation.
+    fn resolve_module_type(&mut self, m: &Ident, t: &TypeExpr) -> Type {
+        let Some(module_ns) = self.imported_module(&m.name) else {
+            let mut d = Diagnostic::error(format!("`{}` is not an imported module", m.name), m.span);
+            if crate::stdlib::find(&m.name).is_some() {
+                d = d.with_help(format!("add `import {}` at the top of the file", m.name));
+            }
+            self.err(d);
+            return Type::Error;
+        };
+        self.module_hover(module_ns, m.span);
+        let name = &t.name.name;
+        match self.struct_index.get(&(module_ns, name.clone())) {
+            Some(&sid) if !is_private(name) || module_ns == self.ns => {
+                self.pending_struct_hovers.push((t.name.span, sid));
+                if !t.args.is_empty() {
+                    self.err(Diagnostic::error(format!("type `{}.{name}` does not take type arguments", m.name), t.span));
+                    return Type::Error;
+                }
+                Type::Struct(sid)
+            }
+            Some(_) => {
+                self.err(Diagnostic::error(format!("`{}.{name}` is private to the `{}` module", m.name, m.name), t.name.span));
+                Type::Error
+            }
+            None => {
+                let candidates: Vec<String> = self
+                    .struct_index
+                    .keys()
+                    .filter(|(ns, n)| *ns == module_ns && !is_private(n))
+                    .map(|(_, n)| n.clone())
+                    .collect();
+                let mut d = Diagnostic::error(format!("module `{}` has no type `{name}`", m.name), t.name.span).with_primary("not found");
+                if let Some(sugg) = suggest(name, candidates.iter().map(|s| s.as_str())) {
+                    d = d.with_help(format!("did you mean `{}.{sugg}`?", m.name));
                 }
                 self.err(d);
                 Type::Error
@@ -524,6 +793,7 @@ impl Checker {
             locals: std::mem::take(&mut self.locals),
             body,
             exported: sig.symbol == "isma_main",
+            track_caller: self.ns != 0,
         }
     }
 
@@ -990,11 +1260,19 @@ impl Checker {
                     self.local_meta[id].used = true;
                     return Self::mk(TExprKind::Local(id), self.locals[id].ty.clone(), span);
                 }
-                let d = if self.func_index.contains_key(name) || BUILTINS.contains(&name.as_str()) {
+                if let Some(module_ns) = self.imported_module(name) {
+                    self.module_hover(module_ns, span);
+                    self.err(
+                        Diagnostic::error(format!("`{name}` is a module, not a value"), span)
+                            .with_help(format!("use one of its functions, e.g. `{name}.{}(...)`", self.first_module_fn(module_ns))),
+                    );
+                    return Self::error_expr(span);
+                }
+                let d = if self.func_index.contains_key(&(self.ns, name.clone())) || BUILTINS.contains(&name.as_str()) {
                     Diagnostic::error(format!("`{name}` is a function, not a value"), span)
                         .with_help(format!("call it: `{name}(...)`"))
                         .with_note("functions are not first-class values yet")
-                } else if self.struct_index.contains_key(name) {
+                } else if self.struct_index.contains_key(&(self.ns, name.clone())) {
                     Diagnostic::error(format!("`{name}` is a struct, not a value"), span)
                         .with_help(format!("construct one with `{name}(...)`"))
                 } else {
@@ -1003,6 +1281,10 @@ impl Checker {
                     let hint = match name.as_str() {
                         "True" => Some("true".to_string()),
                         "False" => Some("false".to_string()),
+                        _ if crate::stdlib::find(name).is_some() => {
+                            d = d.with_help(format!("`{name}` is a standard-library module: add `import {name}` at the top of the file"));
+                            None
+                        }
                         "None" | "null" | "nil" => {
                             d = d.with_note("Isma has no null; every value is always initialized");
                             None
@@ -1188,6 +1470,16 @@ impl Checker {
                 (Type::Str, Type::Int | Type::Float | Type::Bool) | (Type::Int | Type::Float | Type::Bool, Type::Str) if op == BinOp::Add => {
                     d.with_help("use an f-string like f\"{a}{b}\" or call `.to_string()`")
                 }
+                (Type::Struct(sid), _) | (_, Type::Struct(sid)) if self.structs[*sid].name == "time.DateTime" => {
+                    let help = match op {
+                        BinOp::Sub => "to get the time between two moments use `a.millis_since(b)` or `a.seconds_since(b)`",
+                        BinOp::Add => "to move a moment use `.add_seconds(n)`, `.add_minutes(n)`, `.add_days(n)`, `.add_months(n)`...",
+                        BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => "to compare moments use `a.is_before(b)`, `a.is_after(b)` or `a.compare(b)`",
+                        BinOp::Eq | BinOp::Ne => "to check for the same moment use `a.equals(b)`",
+                        _ => "use the methods of `time.DateTime` (e.g. `millis_since`, `add_seconds`)",
+                    };
+                    d.with_help(help).with_note("Isma has no operator overloading: operators work on numbers, `Bool` and `String`")
+                }
                 (Type::Struct(_) | Type::List(_), _) if op.is_comparison() => {
                     d.with_note("`==` is only defined for `Int`, `Float`, `Bool` and `String`")
                 }
@@ -1286,7 +1578,7 @@ impl Checker {
                     }
                     return Self::error_expr(span);
                 }
-                if let Some(&fid) = self.func_index.get(name) {
+                if let Some(&fid) = self.func_index.get(&(self.ns, name.clone())) {
                     let code = self.ide.functions[fid].signature.clone();
                     self.hover(callee.span, code, None);
                     self.ide.definitions.push((callee.span, self.funcs[fid].span));
@@ -1298,7 +1590,7 @@ impl Checker {
                         None => Self::mk(TExprKind::Int(0), if ret == Type::Unit { Type::Unit } else { Type::Error }, span),
                     };
                 }
-                if let Some(&sid) = self.struct_index.get(name) {
+                if let Some(&sid) = self.struct_index.get(&(self.ns, name.clone())) {
                     self.pending_struct_hovers.push((callee.span, sid));
                     self.ide.definitions.push((callee.span, self.struct_spans[sid]));
                     let params: Vec<(String, Type)> = self.structs[sid].fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect();
@@ -1308,6 +1600,9 @@ impl Checker {
                         None => Self::mk(TExprKind::Int(0), Type::Struct(sid), span),
                     };
                 }
+                if self.ns != 0 && crate::stdlib::INTRINSICS.iter().any(|(n, _, _)| n == name) {
+                    return self.intrinsic_call(name, args, span);
+                }
                 if BUILTINS.contains(&name.as_str()) {
                     if let Some((code, doc)) = builtin_function(name) {
                         self.hover(callee.span, code.to_string(), Some(doc.to_string()));
@@ -1315,13 +1610,22 @@ impl Checker {
                     return self.builtin_call(name, args, span);
                 }
                 let mut d = Diagnostic::error(format!("cannot find function `{name}` in this scope"), callee.span).with_primary("not found");
+                let ns = self.ns;
                 let names: Vec<String> = self
                     .func_index
                     .keys()
-                    .cloned()
+                    .filter(|(n, _)| *n == ns)
+                    .map(|(_, s)| s.clone())
                     .chain(BUILTINS.iter().map(|s| s.to_string()))
-                    .chain(self.struct_index.keys().cloned())
+                    .chain(self.struct_index.keys().filter(|(n, _)| *n == ns).map(|(_, s)| s.clone()))
                     .collect();
+                if let Some(h) = self.module_hint(name) {
+                    self.err(d.with_help(h));
+                    for a in args {
+                        let _ = self.expr(&a.value, None);
+                    }
+                    return Self::error_expr(span);
+                }
                 let hint = match name.as_str() {
                     "println" | "printf" | "echo" => Some("print".to_string()),
                     "len" => {
@@ -1344,6 +1648,13 @@ impl Checker {
                 Self::error_expr(span)
             }
             ExprKind::Field(obj, method) => {
+                if let ExprKind::Name(m) = &obj.kind
+                    && self.lookup(m).is_none()
+                    && let Some(module_ns) = self.imported_module(m)
+                {
+                    self.module_hover(module_ns, obj.span);
+                    return self.module_call(module_ns, m, method, args, span);
+                }
                 let recv = self.expr(obj, None);
                 self.method_call(recv, method, args, span)
             }
@@ -1353,6 +1664,121 @@ impl Checker {
                 Self::error_expr(span)
             }
         }
+    }
+
+    fn first_module_fn(&self, module_ns: usize) -> String {
+        let mut names: Vec<&String> = self
+            .func_index
+            .iter()
+            .filter(|((ns, n), fid)| *ns == module_ns && !is_private(n) && self.ide.functions[**fid].owner.is_none())
+            .map(|((_, n), _)| n)
+            .collect();
+        names.sort();
+        names.first().map(|s| s.to_string()).unwrap_or_else(|| "...".into())
+    }
+
+    /// `time.now()`: a call to a function in an imported module.
+    fn module_call(&mut self, module_ns: usize, module: &str, func: &Ident, args: &[Arg], span: Span) -> TExpr {
+        let key = (module_ns, func.name.clone());
+        if let Some(&fid) = self.func_index.get(&key) {
+            if is_private(&func.name) && module_ns != self.ns {
+                self.err(
+                    Diagnostic::error(format!("`{module}.{}` is private to the `{module}` module", func.name), func.span)
+                        .with_note("names starting with `_` are internal to their module"),
+                );
+                for a in args {
+                    let _ = self.expr(&a.value, None);
+                }
+                return Self::error_expr(span);
+            }
+            let f = &self.ide.functions[fid];
+            let code = f.signature.clone();
+            let doc = Some(format!("in module `{module}`{}", f.doc.as_ref().map(|d| format!("\n\n{d}")).unwrap_or_default()));
+            self.hover(func.span, code, doc);
+            let params = self.funcs[fid].params.clone();
+            let ret = self.funcs[fid].ret.clone();
+            let what = format!("function `{module}.{}`", func.name);
+            return match self.match_args(&what, &params, args, span) {
+                Some(targs) => Self::mk(TExprKind::Call(fid, targs), ret, span),
+                None => Self::mk(TExprKind::Int(0), if ret == Type::Unit { Type::Unit } else { Type::Error }, span),
+            };
+        }
+        if let Some(&sid) = self.struct_index.get(&key) {
+            self.pending_struct_hovers.push((func.span, sid));
+            let ctor_fns: Vec<String> = self
+                .ide
+                .functions
+                .iter()
+                .filter(|f| f.ns == module_ns && f.owner.is_none() && !is_private(&f.name) && f.signature.ends_with(&format!("-> {}", self.structs[sid].name)))
+                .map(|f| if f.signature.contains("()") { format!("`{module}.{}()`", f.name) } else { format!("`{module}.{}(...)`", f.name) })
+                .collect();
+            let mut d = Diagnostic::error(format!("`{module}.{}` cannot be constructed directly", func.name), func.span)
+                .with_note(format!("structs from the `{module}` module are created by its functions, which validate the values"));
+            if !ctor_fns.is_empty() {
+                d = d.with_help(format!("use {}", ctor_fns.join(", ")));
+            }
+            self.err(d);
+            for a in args {
+                let _ = self.expr(&a.value, None);
+            }
+            return Self::error_expr(span);
+        }
+        let candidates: Vec<String> = self
+            .func_index
+            .iter()
+            .filter(|((ns, n), fid)| *ns == module_ns && !is_private(n) && self.ide.functions[**fid].owner.is_none())
+            .map(|((_, n), _)| n.clone())
+            .collect();
+        let mut d = Diagnostic::error(format!("module `{module}` has no function `{}`", func.name), func.span).with_primary("not found");
+        if let Some(sugg) = suggest(&func.name, candidates.iter().map(|s| s.as_str())) {
+            d = d.with_help(format!("did you mean `{module}.{sugg}`?"));
+        }
+        self.err(d);
+        for a in args {
+            let _ = self.expr(&a.value, None);
+        }
+        Self::error_expr(span)
+    }
+
+    /// Hooks into the runtime that only standard-library modules may call.
+    fn intrinsic_call(&mut self, name: &str, args: &[Arg], span: Span) -> TExpr {
+        let (_, params, ret) = crate::stdlib::INTRINSICS.iter().find(|(n, _, _)| *n == name).unwrap();
+        let ty_of = |t: &str| match t {
+            "Int" => Type::Int,
+            _ => Type::Unit,
+        };
+        if !self.arity(args, params.len(), &format!("`{name}`"), span) {
+            return Self::error_expr(span);
+        }
+        let mut targs = Vec::new();
+        for (a, p) in args.iter().zip(params.iter()) {
+            let pt = ty_of(p);
+            let t = self.expr(&a.value, Some(&pt));
+            self.expect_type(&t, &pt, None);
+            targs.push(t);
+        }
+        let b = match name {
+            "__realtime_ns" => Builtin::RealtimeNs,
+            "__monotonic_ns" => Builtin::MonotonicNs,
+            _ => Builtin::SleepNs,
+        };
+        Self::mk(TExprKind::Builtin(b, targs), ty_of(ret), span)
+    }
+
+    /// A built-in method that takes arguments of fixed types.
+    #[allow(clippy::too_many_arguments)]
+    fn builtin_method(&mut self, recv: TExpr, b: Builtin, params: &[Type], ret: Type, method: &Ident, args: &[Arg], span: Span) -> TExpr {
+        let what = format!("method `{}`", method.name);
+        if !self.arity(args, params.len(), &what, span) {
+            return Self::error_expr(span);
+        }
+        let mut targs = vec![recv];
+        for (a, p) in args.iter().zip(params) {
+            let t = self.expr(&a.value, Some(p));
+            self.expect_type(&t, p, None);
+            targs.push(t);
+        }
+        Self::mk(TExprKind::Builtin(b, targs), ret, span)
     }
 
     fn reject_named(&mut self, args: &[Arg], what: &str) -> bool {
@@ -1455,6 +1881,11 @@ impl Checker {
             }
             (Type::Str, "len") => simple(self, recv, Builtin::StrLen, Type::Int, args),
             (Type::Str, "to_int") => simple(self, recv, Builtin::StrToInt, Type::Int, args),
+            (Type::Str, "chars") => simple(self, recv, Builtin::StrChars, Type::List(Box::new(Type::Str)), args),
+            (Type::Str, "substring") => self.builtin_method(recv, Builtin::StrSubstring, &[Type::Int, Type::Int], Type::Str, method, args, span),
+            (Type::Str, "contains") => self.builtin_method(recv, Builtin::StrContains, &[Type::Str], Type::Bool, method, args, span),
+            (Type::Str, "starts_with") => self.builtin_method(recv, Builtin::StrStartsWith, &[Type::Str], Type::Bool, method, args, span),
+            (Type::Str, "ends_with") => self.builtin_method(recv, Builtin::StrEndsWith, &[Type::Str], Type::Bool, method, args, span),
             (Type::Str, "to_float") => simple(self, recv, Builtin::StrToFloat, Type::Float, args),
             (Type::List(_), "len") => simple(self, recv, Builtin::ListLen, Type::Int, args),
             (Type::List(elem), "pop") => {
@@ -1473,9 +1904,19 @@ impl Checker {
             (Type::Struct(sid), _) => {
                 let sid = *sid;
                 match self.methods.get(&(sid, m.to_string())) {
+                    Some(&fid) if is_private(m) && self.struct_ns[sid] != self.ns => {
+                        let _ = fid;
+                        let sname = self.structs[sid].name.clone();
+                        self.err(Diagnostic::error(format!("method `{m}` of `{sname}` is private"), method.span));
+                        for a in args {
+                            let _ = self.expr(&a.value, None);
+                        }
+                        Self::error_expr(span)
+                    }
                     Some(&fid) => {
                         let code = self.ide.functions[fid].signature.clone();
-                        let doc = Some(format!("method of `{}`", self.structs[sid].name));
+                        let comment = self.ide.functions[fid].doc.clone();
+                        let doc = Some(format!("method of `{}`{}", self.structs[sid].name, comment.map(|c| format!("\n\n{c}")).unwrap_or_default()));
                         self.hover(method.span, code, doc);
                         self.ide.definitions.push((method.span, self.funcs[fid].span));
                         let params = self.funcs[fid].params[1..].to_vec();
@@ -1514,7 +1955,7 @@ impl Checker {
                     Type::Int => "`to_string()`, `to_float()`",
                     Type::Float => "`to_string()`, `to_int()`",
                     Type::Bool => "`to_string()`",
-                    Type::Str => "`len()`, `to_int()`, `to_float()`, `to_string()`",
+                    Type::Str => "`len()`, `chars()`, `substring(start, end)`, `contains(s)`, `starts_with(s)`, `ends_with(s)`, `to_int()`, `to_float()`, `to_string()`",
                     Type::List(_) => "`len()`, `push(x)`, `pop()`",
                     _ => "none",
                 };

@@ -1,0 +1,46 @@
+import time
+
+fn main():
+    val t = time.utc(2024, 2, 29, 13, 5, 9)
+    print(t.to_iso())
+    print(t.unix())
+    print(t.weekday_name())
+    print(t.format("%a %d %b %Y, %I:%M %p (day %j)"))
+    print(t.add_years(1).date_string())
+    print(t.add_months(-1).date_string())
+    print(t.add_days(1).to_iso())
+    print(t.add_hours(-14).to_iso())
+    print(t.add_minutes(55).time_string())
+    print(t.start_of_day().to_iso())
+
+    val a = time.parse_iso("2026-11-14T16:05:09.250Z")
+    val b = time.parse_iso("2026-11-14 18:05:09+02:00")
+    print(a.millis_since(b))
+    print(b.millis_since(a))
+    print(a.seconds_since(time.date(2026, 1, 1)))
+    print(a.is_after(b))
+    print(b.is_before(a))
+    print(a.equals(b))
+    print(a.compare(b))
+    print(a.millisecond())
+
+    print(time.from_unix(-1).to_iso())
+    print(time.from_unix_ms(1_700_000_000_123).to_iso())
+    print(time.from_unix(0).weekday())
+    print(time.is_leap_year(1900))
+    print(time.is_leap_year(2000))
+    print(time.days_in_month(2023, 2))
+
+    val samples = ["2026-02-30", "2026-13-01", "2026-01-01T24:00:00Z", "not a date", "ü2026-01-01", "2026-01-01T00:00:00Zjunk", "2026-01-01T00:00:00.123456789Z", "2026-01-01T00:00Z", "2026-01-01T00:00:00+0530", "2026-01-01"]
+    for s in samples:
+        print(f"{s} -> {time.is_valid_iso(s)}")
+    print(time.parse_iso("2026-01-01T00:00:00.123456789Z").nanosecond)
+    print(time.parse_iso("2026-01-01T05:30:00+05:30").to_iso())
+    print(time.parse_iso("1999-12-31T23:59:59-00:01").to_iso())
+
+    val word = "héllo wörld"
+    print(word.chars().len())
+    print(word.substring(0, 1) + word.substring(7, 13))
+    print(word.contains("wör"))
+    print(word.starts_with("hé"))
+    print(word.ends_with("x"))

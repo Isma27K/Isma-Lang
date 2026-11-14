@@ -1,0 +1,5 @@
+# expect-error: cannot assign to immutable field `year` of `time.DateTime`
+import time
+fn main():
+    val d = time.now()
+    d.year = 2000

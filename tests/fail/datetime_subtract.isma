@@ -1,0 +1,5 @@
+# expect-error: use `a.millis_since(b)` or `a.seconds_since(b)`
+import time
+fn main():
+    val start = time.now()
+    print(time.now() - start)

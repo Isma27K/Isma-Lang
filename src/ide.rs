@@ -19,6 +19,18 @@ pub struct IdeInfo {
     pub functions: Vec<FnSymbol>,
     /// Indexed by struct id.
     pub structs: Vec<StructSymbol>,
+    /// Standard-library modules loaded for this file.
+    pub modules: Vec<ModuleSymbol>,
+    /// `import` lines of the user's file: (module name, span).
+    pub imports: Vec<(String, Span)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ModuleSymbol {
+    pub name: String,
+    /// Namespace index (functions and structs carry the same `ns`).
+    pub ns: usize,
+    pub doc: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -53,6 +65,10 @@ pub struct FnSymbol {
     /// From `fn` to the end of the body.
     pub full: Span,
     pub owner: Option<usize>,
+    /// 0 for the user's file, otherwise the module's namespace.
+    pub ns: usize,
+    /// The `#` comment block above the declaration.
+    pub doc: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -63,6 +79,8 @@ pub struct StructSymbol {
     pub fields: Vec<FieldSymbol>,
     /// Function ids of the methods.
     pub methods: Vec<usize>,
+    pub ns: usize,
+    pub doc: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -79,29 +97,38 @@ impl IdeInfo {
         t.display(&names)
     }
 
-    /// Fields + methods available on a value of type `t`.
+    /// Fields + methods available on a value of type `t` (as seen from the user's file).
     pub fn members(&self, t: &Type) -> Vec<Member> {
         match t {
             Type::Struct(sid) => {
                 let Some(s) = self.structs.get(*sid) else { return Vec::new() };
+                let hide_private = s.ns != 0;
                 let mut out: Vec<Member> = s
                     .fields
                     .iter()
+                    .filter(|f| !(hide_private && f.name.starts_with('_')))
                     .map(|f| Member {
                         name: f.name.clone(),
                         signature: format!("{} {}: {}", if f.mutable { "var" } else { "val" }, f.name, f.ty),
                         doc: format!("field of `{}`", s.name),
-                        is_method: false,
+                        kind: MemberKind::Field,
                         takes_args: false,
                     })
                     .collect();
                 for &fid in &s.methods {
                     let f = &self.functions[fid];
+                    if hide_private && f.name.starts_with('_') {
+                        continue;
+                    }
+                    let doc = match &f.doc {
+                        Some(d) => format!("method of `{}`\n\n{d}", s.name),
+                        None => format!("method of `{}`", s.name),
+                    };
                     out.push(Member {
                         name: f.name.clone(),
                         signature: f.signature.clone(),
-                        doc: format!("method of `{}`", s.name),
-                        is_method: true,
+                        doc,
+                        kind: MemberKind::Method,
                         takes_args: !f.signature.contains("(self)"),
                     });
                 }
@@ -110,6 +137,46 @@ impl IdeInfo {
             _ => builtin_methods(t, &self.type_name(t), &|t| self.type_name(t)),
         }
     }
+
+    /// Public functions and types of an imported module, for `time.` completion.
+    pub fn module_members(&self, module: &str) -> Vec<Member> {
+        let Some(m) = self.modules.iter().find(|m| m.name == module) else { return Vec::new() };
+        let mut out: Vec<Member> = self
+            .functions
+            .iter()
+            .filter(|f| f.ns == m.ns && f.owner.is_none() && !f.name.starts_with('_'))
+            .map(|f| Member {
+                name: f.name.clone(),
+                signature: f.signature.clone(),
+                doc: f.doc.clone().unwrap_or_default(),
+                kind: MemberKind::Function,
+                takes_args: !f.signature.contains("()"),
+            })
+            .collect();
+        for s in self.structs.iter().filter(|s| s.ns == m.ns) {
+            let short = s.name.rsplit('.').next().unwrap_or(&s.name).to_string();
+            if short.starts_with('_') {
+                continue;
+            }
+            out.push(Member {
+                name: short,
+                signature: format!("struct {}", s.name),
+                doc: s.doc.clone().unwrap_or_default(),
+                kind: MemberKind::Struct,
+                takes_args: false,
+            });
+        }
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        out
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberKind {
+    Field,
+    Method,
+    Function,
+    Struct,
 }
 
 #[derive(Debug, Clone)]
@@ -117,12 +184,12 @@ pub struct Member {
     pub name: String,
     pub signature: String,
     pub doc: String,
-    pub is_method: bool,
+    pub kind: MemberKind,
     pub takes_args: bool,
 }
 
 fn method(name: &str, signature: String, doc: &str, takes_args: bool) -> Member {
-    Member { name: name.into(), signature, doc: doc.into(), is_method: true, takes_args }
+    Member { name: name.into(), signature, doc: doc.into(), kind: MemberKind::Method, takes_args }
 }
 
 /// The built-in methods of primitive and list types.
@@ -140,6 +207,16 @@ pub fn builtin_methods(t: &Type, tn: &str, type_name: &dyn Fn(&Type) -> String) 
         Type::Bool => vec![to_string],
         Type::Str => vec![
             method("len", "fn len() -> Int".into(), "Length in bytes.", false),
+            method("chars", "fn chars() -> List[String]".into(), "The characters of the string, each as a one-character `String`.", false),
+            method(
+                "substring",
+                "fn substring(start: Int, end: Int) -> String".into(),
+                "The bytes from `start` up to (not including) `end`. Panics if out of range or not on a character boundary.",
+                true,
+            ),
+            method("contains", "fn contains(text: String) -> Bool".into(), "Does the string contain `text`?", true),
+            method("starts_with", "fn starts_with(prefix: String) -> Bool".into(), "Does the string start with `prefix`?", true),
+            method("ends_with", "fn ends_with(suffix: String) -> Bool".into(), "Does the string end with `suffix`?", true),
             method("to_int", "fn to_int() -> Int".into(), "Parse as an `Int`. Panics if the string is not a valid integer.", false),
             method("to_float", "fn to_float() -> Float".into(), "Parse as a `Float`. Panics if the string is not a valid number.", false),
             to_string,
@@ -176,8 +253,8 @@ pub fn builtin_function(name: &str) -> Option<(&'static str, &'static str)> {
 pub const BUILTIN_FUNCTIONS: &[&str] = &["print", "input", "args", "panic", "assert", "sqrt", "exit"];
 
 pub const KEYWORDS: &[&str] = &[
-    "fn", "val", "var", "if", "elif", "else", "while", "for", "in", "break", "continue", "return", "pass", "struct", "true",
-    "false", "and", "or", "not",
+    "fn", "val", "var", "if", "elif", "else", "while", "for", "in", "break", "continue", "return", "pass", "struct", "import",
+    "true", "false", "and", "or", "not",
 ];
 
 pub const BUILTIN_TYPES: &[(&str, &str)] = &[

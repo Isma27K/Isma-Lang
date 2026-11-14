@@ -18,7 +18,12 @@ pub struct Parser {
 
 /// Parse a whole source file.
 pub fn parse(src: &str) -> (Program, Vec<Diagnostic>) {
-    let (tokens, mut diags) = lexer::lex(src);
+    parse_at(src, 0)
+}
+
+/// Parse a file whose spans start at `base` (standard-library modules).
+pub fn parse_at(src: &str, base: usize) -> (Program, Vec<Diagnostic>) {
+    let (tokens, mut diags) = lexer::lex_at(src, base);
     let mut p = Parser::new(tokens);
     let program = p.program();
     diags.append(&mut p.diags);
@@ -170,6 +175,26 @@ impl Parser {
                     Ok(s) => items.push(Item::Struct(s)),
                     Err(()) => self.synchronize(),
                 },
+                Tok::Import => {
+                    self.bump();
+                    match self.expect_ident("a module name, e.g. `import time`") {
+                        Ok(name) => {
+                            if self.at(&Tok::Dot) || self.at(&Tok::Comma) {
+                                let span = self.span();
+                                self.diags.push(
+                                    Diagnostic::error("import one module per line", span)
+                                        .with_help("write `import time` on its own line"),
+                                );
+                                self.synchronize();
+                            } else if self.expect_newline().is_ok() {
+                                items.push(Item::Import(name));
+                            } else {
+                                self.synchronize();
+                            }
+                        }
+                        Err(()) => self.synchronize(),
+                    }
+                }
                 Tok::Indent => {
                     let span = self.span();
                     self.diags.push(Diagnostic::error("unexpected indentation", span));
@@ -309,7 +334,14 @@ impl Parser {
     }
 
     fn type_expr(&mut self) -> PResult<TypeExpr> {
-        let name = self.expect_ident("a type")?;
+        let mut name = self.expect_ident("a type")?;
+        let mut module = None;
+        if self.at(&Tok::Dot) {
+            // `time.DateTime`
+            self.bump();
+            let inner = self.expect_ident("a type name after `.`")?;
+            module = Some(std::mem::replace(&mut name, inner));
+        }
         let mut args = Vec::new();
         if self.eat(&Tok::LBracket) {
             loop {
@@ -320,8 +352,9 @@ impl Parser {
             }
             self.expect(Tok::RBracket)?;
         }
-        let span = name.span.merge(self.prev_span);
-        Ok(TypeExpr { name, args, span })
+        let start = module.as_ref().map(|m| m.span).unwrap_or(name.span);
+        let span = start.merge(self.prev_span);
+        Ok(TypeExpr { module, name, args, span })
     }
 
     // ---------- statements ----------
@@ -370,6 +403,13 @@ impl Parser {
             Tok::Struct => {
                 let span = self.span();
                 self.error("structs must be declared at the top level", span)
+            }
+            Tok::Import => {
+                let span = self.span();
+                self.error_diag(
+                    Diagnostic::error("`import` must be at the top level of the file", span)
+                        .with_help("move it to the top of the file, above your functions"),
+                )
             }
             Tok::Indent => {
                 let span = self.span();

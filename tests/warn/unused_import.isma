@@ -1,0 +1,4 @@
+# expect-warning: unused import `time`
+import time
+fn main():
+    print(1)

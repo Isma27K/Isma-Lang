@@ -1,0 +1,6 @@
+# expect-error: did you mean `time.DateTime`?
+import time
+fn later(d: DateTime) -> Bool:
+    return true
+fn main():
+    print(later(time.now()))

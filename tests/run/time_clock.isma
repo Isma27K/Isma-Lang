@@ -1,0 +1,15 @@
+# The real clocks: only properties that hold on any machine are printed.
+import time
+
+fn main():
+    val start = time.monotonic_ms()
+    val wall = time.now()
+    time.sleep_ms(30)
+    val elapsed = time.monotonic_ms() - start
+    print(elapsed >= 30 and elapsed < 5000)
+    print(wall.year >= 2025)
+    val drift = time.unix() - wall.unix()
+    print(drift >= 0 and drift <= 5)
+    print(time.now().is_after(wall))
+    print(time.unix_ms() / 1000 >= wall.unix())
+    print(time.monotonic_ns() > 0)

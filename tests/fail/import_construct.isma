@@ -1,0 +1,4 @@
+# expect-error: `time.DateTime` cannot be constructed directly
+import time
+fn main():
+    val d = time.DateTime(2026, 1, 1, 0, 0, 0, 0)

@@ -1,0 +1,3 @@
+# expect-panic: substring(2, 10) out of range for a string of length 5
+fn main():
+    print("hello".substring(2, 10))

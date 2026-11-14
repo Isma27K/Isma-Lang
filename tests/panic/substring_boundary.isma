@@ -1,0 +1,3 @@
+# expect-panic: would split a multi-byte character
+fn main():
+    print("héllo".substring(0, 2))

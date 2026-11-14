@@ -1,0 +1,4 @@
+# expect-error: `time._pad` is private to the `time` module
+import time
+fn main():
+    print(time._pad(1, 2))

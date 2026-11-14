@@ -22,7 +22,12 @@ pub struct Lexer<'a> {
 
 /// Lex a whole file.
 pub fn lex(src: &str) -> (Vec<Token>, Vec<Diagnostic>) {
-    let lx = Lexer::new(src, 0, false);
+    lex_at(src, 0)
+}
+
+/// Lex a whole file whose spans start at `base` (standard-library modules).
+pub fn lex_at(src: &str, base: usize) -> (Vec<Token>, Vec<Diagnostic>) {
+    let lx = Lexer::new(src, base, false);
     lx.run()
 }
 

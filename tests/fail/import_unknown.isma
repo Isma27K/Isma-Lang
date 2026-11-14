@@ -1,0 +1,4 @@
+# expect-error: no module named `tiem`
+import tiem
+fn main():
+    pass

@@ -1,0 +1,3 @@
+# expect-error: add `import time` at the top of the file
+fn main():
+    print(time.unix())

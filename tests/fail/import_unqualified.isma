@@ -1,0 +1,4 @@
+# expect-error: did you mean `time.now`?
+import time
+fn main():
+    print(now().to_iso())

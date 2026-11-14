@@ -1,0 +1,462 @@
+# UTC dates and times.
+#
+#     import time
+#
+#     val now = time.now()
+#     print(now.to_iso())                     # 2026-11-14T16:05:09.123Z
+#     print(now.format("%Y-%m-%d %H:%M"))     # 2026-11-14 16:05
+#
+# Everything is UTC; there are no time zones. A DateTime is immutable:
+# methods such as `add_days` return a new value.
+
+# A moment in UTC with nanosecond precision. Create one with `time.now()`,
+# `time.utc(...)`, `time.date(...)`, `time.from_unix(...)` or `time.parse_iso(...)`.
+struct DateTime:
+    year: Int
+    month: Int
+    day: Int
+    hour: Int
+    minute: Int
+    second: Int
+    nanosecond: Int
+
+    # Seconds since 1970-01-01T00:00:00Z (negative before that).
+    fn unix(self) -> Int:
+        val days = _days_from_civil(self.year, self.month, self.day)
+        return days * 86400 + self.hour * 3600 + self.minute * 60 + self.second
+
+    # Milliseconds since 1970-01-01T00:00:00Z.
+    fn unix_ms(self) -> Int:
+        return self.unix() * 1000 + self.nanosecond / 1_000_000
+
+    # The millisecond part of the time (0-999).
+    fn millisecond(self) -> Int:
+        return self.nanosecond / 1_000_000
+
+    # Day of the week: 0 = Monday ... 6 = Sunday.
+    fn weekday(self) -> Int:
+        return _floor_mod(_days_from_civil(self.year, self.month, self.day) + 3, 7)
+
+    # "Monday" ... "Sunday".
+    fn weekday_name(self) -> String:
+        return _weekday_names()[self.weekday()]
+
+    # "January" ... "December".
+    fn month_name(self) -> String:
+        return _month_names()[self.month - 1]
+
+    # Day of the year: 1 ... 366.
+    fn day_of_year(self) -> Int:
+        return _days_from_civil(self.year, self.month, self.day) - _days_from_civil(self.year, 1, 1) + 1
+
+    # The date part, e.g. "2026-11-14".
+    fn date_string(self) -> String:
+        return f"{_pad(self.year, 4)}-{_pad(self.month, 2)}-{_pad(self.day, 2)}"
+
+    # The time part, e.g. "16:05:09".
+    fn time_string(self) -> String:
+        return f"{_pad(self.hour, 2)}:{_pad(self.minute, 2)}:{_pad(self.second, 2)}"
+
+    # ISO 8601 / RFC 3339, e.g. "2026-11-14T16:05:09Z" or "2026-11-14T16:05:09.123Z".
+    # Fractional seconds are only included when they are not zero.
+    fn to_iso(self) -> String:
+        return f"{self.date_string()}T{self.time_string()}{_fraction(self.nanosecond)}Z"
+
+    # Format with strftime-style codes:
+    #   %Y year (2026)       %y year, 2 digits (26)     %m month (01-12)
+    #   %d day (01-31)       %H hour (00-23)            %I hour (01-12)
+    #   %p AM or PM          %M minute (00-59)          %S second (00-59)
+    #   %L milliseconds      %f microseconds            %j day of year (001-366)
+    #   %A Monday            %a Mon                     %B January
+    #   %b Jan               %s Unix seconds            %% a literal %
+    fn format(self, pattern: String) -> String:
+        var out = ""
+        var after_percent = false
+        for c in pattern.chars():
+            if after_percent:
+                out += self._format_code(c)
+                after_percent = false
+            elif c == "%":
+                after_percent = true
+            else:
+                out += c
+        if after_percent:
+            panic("format pattern ends with a lone `%` (use `%%` for a literal percent sign)")
+        return out
+
+    fn _format_code(self, code: String) -> String:
+        if code == "Y":
+            return _pad(self.year, 4)
+        elif code == "y":
+            return _pad(_floor_mod(self.year, 100), 2)
+        elif code == "m":
+            return _pad(self.month, 2)
+        elif code == "d":
+            return _pad(self.day, 2)
+        elif code == "H":
+            return _pad(self.hour, 2)
+        elif code == "I":
+            var h = self.hour % 12
+            if h == 0:
+                h = 12
+            return _pad(h, 2)
+        elif code == "p":
+            if self.hour < 12:
+                return "AM"
+            return "PM"
+        elif code == "M":
+            return _pad(self.minute, 2)
+        elif code == "S":
+            return _pad(self.second, 2)
+        elif code == "L":
+            return _pad(self.millisecond(), 3)
+        elif code == "f":
+            return _pad(self.nanosecond / 1000, 6)
+        elif code == "j":
+            return _pad(self.day_of_year(), 3)
+        elif code == "s":
+            return self.unix().to_string()
+        elif code == "A":
+            return self.weekday_name()
+        elif code == "a":
+            return self.weekday_name().substring(0, 3)
+        elif code == "B":
+            return self.month_name()
+        elif code == "b":
+            return self.month_name().substring(0, 3)
+        elif code == "%":
+            return "%"
+        panic(f"unknown format code `%{code}`")
+
+    # This moment plus `seconds` (minus, if negative).
+    fn add_seconds(self, seconds: Int) -> DateTime:
+        return _from_unix_parts(self.unix() + seconds, self.nanosecond)
+
+    # This moment plus `minutes`.
+    fn add_minutes(self, minutes: Int) -> DateTime:
+        return self.add_seconds(minutes * 60)
+
+    # This moment plus `hours`.
+    fn add_hours(self, hours: Int) -> DateTime:
+        return self.add_seconds(hours * 3600)
+
+    # This moment plus `days` (exactly 24 hours each; UTC has no DST).
+    fn add_days(self, days: Int) -> DateTime:
+        return self.add_seconds(days * 86400)
+
+    # The same time `months` calendar months later. The day is clamped to the
+    # end of the month: Jan 31 + 1 month = Feb 28 (or 29 in a leap year).
+    fn add_months(self, months: Int) -> DateTime:
+        val total = self.year * 12 + (self.month - 1) + months
+        val year = _floor_div(total, 12)
+        val month = _floor_mod(total, 12) + 1
+        val day = _min(self.day, days_in_month(year, month))
+        return DateTime(year, month, day, self.hour, self.minute, self.second, self.nanosecond)
+
+    # The same time `years` later (Feb 29 becomes Feb 28 in non-leap years).
+    fn add_years(self, years: Int) -> DateTime:
+        return self.add_months(years * 12)
+
+    # Whole seconds from `other` to this moment, rounded toward zero
+    # (negative if this moment is earlier).
+    fn seconds_since(self, other: DateTime) -> Int:
+        return _diff_ns(self, other, 1_000_000_000)
+
+    # Whole milliseconds from `other` to this moment, rounded toward zero.
+    fn millis_since(self, other: DateTime) -> Int:
+        return _diff_ns(self, other, 1_000_000)
+
+    # -1 if this moment is earlier than `other`, 0 if equal, 1 if later.
+    fn compare(self, other: DateTime) -> Int:
+        val a = self.unix()
+        val b = other.unix()
+        if a < b:
+            return -1
+        elif a > b:
+            return 1
+        elif self.nanosecond < other.nanosecond:
+            return -1
+        elif self.nanosecond > other.nanosecond:
+            return 1
+        return 0
+
+    # Is this moment earlier than `other`?
+    fn is_before(self, other: DateTime) -> Bool:
+        return self.compare(other) < 0
+
+    # Is this moment later than `other`?
+    fn is_after(self, other: DateTime) -> Bool:
+        return self.compare(other) > 0
+
+    # Is this exactly the same moment as `other`?
+    fn equals(self, other: DateTime) -> Bool:
+        return self.compare(other) == 0
+
+    # Midnight at the start of this day.
+    fn start_of_day(self) -> DateTime:
+        return DateTime(self.year, self.month, self.day, 0, 0, 0, 0)
+
+# The current date and time in UTC.
+fn now() -> DateTime:
+    val ns = __realtime_ns()
+    return _from_unix_parts(_floor_div(ns, 1_000_000_000), _floor_mod(ns, 1_000_000_000))
+
+# The current Unix time in seconds.
+fn unix() -> Int:
+    return _floor_div(__realtime_ns(), 1_000_000_000)
+
+# The current Unix time in milliseconds.
+fn unix_ms() -> Int:
+    return _floor_div(__realtime_ns(), 1_000_000)
+
+# A clock that only moves forward, in milliseconds. Use it to measure how long
+# something takes; it has nothing to do with the calendar.
+fn monotonic_ms() -> Int:
+    return __monotonic_ns() / 1_000_000
+
+# Like `monotonic_ms`, in nanoseconds.
+fn monotonic_ns() -> Int:
+    return __monotonic_ns()
+
+# Pause the program for `ms` milliseconds.
+fn sleep_ms(ms: Int):
+    if ms > 0:
+        __sleep_ns(ms * 1_000_000)
+
+# The moment `seconds` after 1970-01-01T00:00:00Z (before it, if negative).
+fn from_unix(seconds: Int) -> DateTime:
+    return _from_unix_parts(seconds, 0)
+
+# The moment `ms` milliseconds after 1970-01-01T00:00:00Z.
+fn from_unix_ms(ms: Int) -> DateTime:
+    return _from_unix_parts(_floor_div(ms, 1000), _floor_mod(ms, 1000) * 1_000_000)
+
+# A UTC date and time. Panics if a part is out of range (e.g. February 30).
+fn utc(year: Int, month: Int, day: Int, hour: Int, minute: Int, second: Int) -> DateTime:
+    _check_date(year, month, day)
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59 or second < 0 or second > 59:
+        panic(f"invalid time {_pad(hour, 2)}:{_pad(minute, 2)}:{_pad(second, 2)} (hour 0-23, minute 0-59, second 0-59)")
+    return DateTime(year, month, day, hour, minute, second, 0)
+
+# Midnight UTC on the given date. Panics if the date does not exist.
+fn date(year: Int, month: Int, day: Int) -> DateTime:
+    return utc(year, month, day, 0, 0, 0)
+
+# Parse an ISO 8601 / RFC 3339 date or date-time, for example
+# "2026-11-14", "2026-11-14T16:05:09Z", "2026-11-14 16:05:09.250Z" or
+# "2026-11-14T18:05:09+02:00" (offsets are converted to UTC).
+# Panics if the text is not valid; check it with `is_valid_iso` first if unsure.
+fn parse_iso(text: String) -> DateTime:
+    val p = _Iso(text.chars(), 0, true)
+    val result = _parse(p)
+    if not p.ok:
+        panic(f"invalid ISO 8601 date-time: \"{text}\"")
+    return result
+
+# Can `text` be read by `parse_iso`?
+fn is_valid_iso(text: String) -> Bool:
+    val p = _Iso(text.chars(), 0, true)
+    _parse(p)
+    return p.ok
+
+# Is `year` a leap year (366 days)?
+fn is_leap_year(year: Int) -> Bool:
+    return (year % 4 == 0 and year % 100 != 0) or year % 400 == 0
+
+# Number of days in `month` (1-12) of `year`.
+fn days_in_month(year: Int, month: Int) -> Int:
+    if month < 1 or month > 12:
+        panic(f"invalid month {month} (must be 1-12)")
+    if month == 2:
+        if is_leap_year(year):
+            return 29
+        return 28
+    if month == 4 or month == 6 or month == 9 or month == 11:
+        return 30
+    return 31
+
+# ------------------------------------------------------------- internals
+
+# Days since 1970-01-01 -> calendar date (Howard Hinnant's algorithm).
+fn _from_unix_parts(seconds: Int, nanos: Int) -> DateTime:
+    val days = _floor_div(seconds, 86400)
+    val rem = seconds - days * 86400
+    val z = days + 719468
+    val era = _floor_div(z, 146097)
+    val doe = z - era * 146097
+    val yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    val doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    val mp = (5 * doy + 2) / 153
+    val day = doy - (153 * mp + 2) / 5 + 1
+    var month = mp + 3
+    if mp >= 10:
+        month = mp - 9
+    var year = yoe + era * 400
+    if month <= 2:
+        year += 1
+    return DateTime(year, month, day, rem / 3600, rem % 3600 / 60, rem % 60, nanos)
+
+# Calendar date -> days since 1970-01-01 (Howard Hinnant's algorithm).
+fn _days_from_civil(year: Int, month: Int, day: Int) -> Int:
+    var y = year
+    if month <= 2:
+        y -= 1
+    val era = _floor_div(y, 400)
+    val yoe = y - era * 400
+    var mp = month + 9
+    if month > 2:
+        mp = month - 3
+    val doy = (153 * mp + 2) / 5 + day - 1
+    val doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+    return era * 146097 + doe - 719468
+
+# (a - b) in units of `unit` nanoseconds, rounded toward zero, without
+# overflowing for far-apart dates.
+fn _diff_ns(a: DateTime, b: DateTime, unit: Int) -> Int:
+    var secs = a.unix() - b.unix()
+    var nanos = a.nanosecond - b.nanosecond
+    if secs > 0 and nanos < 0:
+        secs -= 1
+        nanos += 1_000_000_000
+    elif secs < 0 and nanos > 0:
+        secs += 1
+        nanos -= 1_000_000_000
+    return secs * (1_000_000_000 / unit) + nanos / unit
+
+fn _floor_div(a: Int, b: Int) -> Int:
+    val q = a / b
+    if a % b != 0 and (a < 0) != (b < 0):
+        return q - 1
+    return q
+
+fn _floor_mod(a: Int, b: Int) -> Int:
+    return a - _floor_div(a, b) * b
+
+fn _min(a: Int, b: Int) -> Int:
+    if a < b:
+        return a
+    return b
+
+fn _pad(n: Int, width: Int) -> String:
+    if n < 0:
+        return "-" + _pad(-n, width - 1)
+    var s = n.to_string()
+    while s.len() < width:
+        s = "0" + s
+    return s
+
+fn _fraction(nanos: Int) -> String:
+    if nanos == 0:
+        return ""
+    elif nanos % 1_000_000 == 0:
+        return "." + _pad(nanos / 1_000_000, 3)
+    elif nanos % 1000 == 0:
+        return "." + _pad(nanos / 1000, 6)
+    return "." + _pad(nanos, 9)
+
+fn _check_date(year: Int, month: Int, day: Int):
+    if month < 1 or month > 12:
+        panic(f"invalid month {month} (must be 1-12)")
+    val last = days_in_month(year, month)
+    if day < 1 or day > last:
+        panic(f"invalid date {_pad(year, 4)}-{_pad(month, 2)}-{_pad(day, 2)}: {_month_names()[month - 1]} {year} has {last} days")
+
+fn _weekday_names() -> List[String]:
+    return ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+fn _month_names() -> List[String]:
+    return ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
+
+# A tiny cursor over the characters of an ISO 8601 string.
+struct _Iso:
+    chars: List[String]
+    var pos: Int
+    var ok: Bool
+
+    fn at_end(self) -> Bool:
+        return self.pos >= self.chars.len()
+
+    fn peek(self) -> String:
+        if self.at_end():
+            return ""
+        return self.chars[self.pos]
+
+    fn is_digit_next(self) -> Bool:
+        val c = self.peek()
+        return c.len() == 1 and c >= "0" and c <= "9"
+
+    fn accept(self, c: String) -> Bool:
+        if self.peek() == c:
+            self.pos += 1
+            return true
+        return false
+
+    fn expect(self, c: String):
+        if not self.accept(c):
+            self.ok = false
+
+    # Exactly `n` digits as a number.
+    fn digits(self, n: Int) -> Int:
+        var value = 0
+        for _ in 0..n:
+            if not self.is_digit_next():
+                self.ok = false
+                return 0
+            value = value * 10 + self.peek().to_int()
+            self.pos += 1
+        return value
+
+fn _epoch() -> DateTime:
+    return DateTime(1970, 1, 1, 0, 0, 0, 0)
+
+fn _parse(p: _Iso) -> DateTime:
+    val year = p.digits(4)
+    p.expect("-")
+    val month = p.digits(2)
+    p.expect("-")
+    val day = p.digits(2)
+    if not p.ok or month < 1 or month > 12 or day < 1 or day > days_in_month(year, month):
+        p.ok = false
+        return _epoch()
+    if p.at_end():
+        return DateTime(year, month, day, 0, 0, 0, 0)
+    if not p.accept("T") and not p.accept("t") and not p.accept(" "):
+        p.ok = false
+        return _epoch()
+    val hour = p.digits(2)
+    p.expect(":")
+    val minute = p.digits(2)
+    var second = 0
+    if p.accept(":"):
+        second = p.digits(2)
+    var nanos = 0
+    if p.accept(".") or p.accept(","):
+        var count = 0
+        while p.is_digit_next():
+            if count < 9:
+                nanos = nanos * 10 + p.peek().to_int()
+                count += 1
+            p.pos += 1
+        if count == 0:
+            p.ok = false
+        while count < 9:
+            nanos *= 10
+            count += 1
+    var offset = 0
+    if p.accept("Z") or p.accept("z"):
+        pass
+    elif p.peek() == "+" or p.peek() == "-":
+        var sign = 1
+        if p.peek() == "-":
+            sign = -1
+        p.pos += 1
+        val oh = p.digits(2)
+        p.accept(":")
+        val om = p.digits(2)
+        if oh > 23 or om > 59:
+            p.ok = false
+        offset = sign * (oh * 3600 + om * 60)
+    if not p.at_end() or not p.ok or hour > 23 or minute > 59 or second > 59:
+        p.ok = false
+        return _epoch()
+    return DateTime(year, month, day, hour, minute, second, nanos).add_seconds(-offset)

@@ -17,6 +17,8 @@ pub struct Program {
 pub enum Item {
     Fn(FnDecl),
     Struct(StructDecl),
+    /// `import time`
+    Import(Ident),
 }
 
 #[derive(Debug)]
@@ -53,6 +55,8 @@ pub struct FieldDecl {
 
 #[derive(Debug, Clone)]
 pub struct TypeExpr {
+    /// `time` in `time.DateTime`.
+    pub module: Option<Ident>,
     pub name: Ident,
     pub args: Vec<TypeExpr>,
     pub span: Span,

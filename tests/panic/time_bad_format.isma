@@ -1,0 +1,4 @@
+# expect-panic: unknown format code `%Q`
+import time
+fn main():
+    print(time.now().format("%Q"))

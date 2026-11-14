@@ -126,8 +126,8 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
 
     if cli.command == "check" {
         return match isma::check_source(&src) {
-            Ok((_, warnings)) => {
-                report_warnings(&warnings, &display_path, &src);
+            Ok(checked) => {
+                report_warnings(&checked.warnings, &display_path, &src);
                 Ok(ExitCode::SUCCESS)
             }
             Err(d) => Ok(report(&d, &display_path, &src)),

@@ -181,6 +181,26 @@ impl Server {
         if in_comment_or_string(&doc.text, off) {
             return None;
         }
+        // `import ti|` -> standard-library modules
+        let line_start = doc.text[..word_start].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        if doc.text[line_start..word_start].trim() == "import" {
+            let items = crate::stdlib::MODULES
+                .iter()
+                .map(|m| lt::CompletionItem {
+                    label: m.name.to_string(),
+                    kind: Some(lt::CompletionItemKind::MODULE),
+                    detail: Some(format!("import {}", m.name)),
+                    documentation: crate::analyze(&format!("import {}\nfn main():\n    pass\n", m.name))
+                        .ide
+                        .modules
+                        .first()
+                        .and_then(|m| m.doc.clone())
+                        .map(|d| markdown(&d)),
+                    ..Default::default()
+                })
+                .collect();
+            return Some(lt::CompletionResponse::Array(items));
+        }
         let items = if word_start > 0 && bytes[word_start - 1] == b'.' {
             self.member_completion(doc, word_start - 1, off)?
         } else {
@@ -193,6 +213,12 @@ impl Server {
     /// analyzing a patched copy of the file in which the dangling `.` is gone.
     fn member_completion(&self, doc: &Document, dot: usize, off: usize) -> Option<Vec<lt::CompletionItem>> {
         let text = &doc.text;
+        // `time.` -> the module's functions and types
+        let recv_start = receiver_start(text, dot);
+        let receiver = &text[recv_start..dot];
+        if doc.ide.imports.iter().any(|(m, _)| m == receiver) {
+            return Some(doc.ide.module_members(receiver).into_iter().map(member_item).collect());
+        }
         let mut word_end = off;
         while word_end < text.len() && is_ident(text.as_bytes()[word_end]) {
             word_end += 1;
@@ -229,27 +255,7 @@ impl Server {
             }
         }
         let (ty, ide) = found?;
-        let items = ide
-            .members(&ty)
-            .into_iter()
-            .map(|m| {
-                let (insert, format) = match (m.is_method, m.takes_args) {
-                    (false, _) => (m.name.clone(), lt::InsertTextFormat::PLAIN_TEXT),
-                    (true, false) => (format!("{}()", m.name), lt::InsertTextFormat::PLAIN_TEXT),
-                    (true, true) => (format!("{}($1)", m.name), lt::InsertTextFormat::SNIPPET),
-                };
-                lt::CompletionItem {
-                    label: m.name.clone(),
-                    kind: Some(if m.is_method { lt::CompletionItemKind::METHOD } else { lt::CompletionItemKind::FIELD }),
-                    detail: Some(m.signature.clone()),
-                    documentation: Some(markdown(&m.doc)),
-                    insert_text: Some(insert),
-                    insert_text_format: Some(format),
-                    ..Default::default()
-                }
-            })
-            .collect();
-        Some(items)
+        Some(ide.members(&ty).into_iter().map(member_item).collect())
     }
 
     fn scope_completion(&self, doc: &Document, off: usize) -> Vec<lt::CompletionItem> {
@@ -273,10 +279,14 @@ impl Server {
             };
             add(&l.name, lt::CompletionItemKind::VARIABLE, Some(format!("{}: {}", l.name, l.ty)), Some(kind.into()), "0");
         }
-        for f in doc.ide.functions.iter().filter(|f| f.owner.is_none()) {
-            add(&f.name, lt::CompletionItemKind::FUNCTION, Some(f.signature.clone()), None, "1");
+        for (m, _) in &doc.ide.imports {
+            let d = doc.ide.modules.iter().find(|x| &x.name == m).and_then(|x| x.doc.clone());
+            add(m, lt::CompletionItemKind::MODULE, Some(format!("import {m}")), d, "1");
         }
-        for s in &doc.ide.structs {
+        for f in doc.ide.functions.iter().filter(|f| f.owner.is_none() && f.ns == 0) {
+            add(&f.name, lt::CompletionItemKind::FUNCTION, Some(f.signature.clone()), f.doc.clone(), "1");
+        }
+        for s in doc.ide.structs.iter().filter(|s| s.ns == 0) {
             let fields: Vec<String> = s.fields.iter().map(|f| format!("{}: {}", f.name, f.ty)).collect();
             add(&s.name, lt::CompletionItemKind::STRUCT, Some(format!("struct {}({})", s.name, fields.join(", "))), None, "1");
         }
@@ -310,7 +320,7 @@ impl Server {
             children,
         };
         let mut out: Vec<(u32, lt::DocumentSymbol)> = Vec::new();
-        for s in &ide.structs {
+        for s in ide.structs.iter().filter(|s| s.ns == 0) {
             let mut children: Vec<lt::DocumentSymbol> = s
                 .fields
                 .iter()
@@ -322,7 +332,7 @@ impl Server {
             }
             out.push((s.name_span.start, sym(&s.name, None, lt::SymbolKind::STRUCT, s.full, s.name_span, Some(children))));
         }
-        for f in ide.functions.iter().filter(|f| f.owner.is_none()) {
+        for f in ide.functions.iter().filter(|f| f.owner.is_none() && f.ns == 0) {
             out.push((f.full.start, sym(&f.name, Some(f.signature.clone()), lt::SymbolKind::FUNCTION, f.full, f.name_span, None)));
         }
         out.sort_by_key(|(start, _)| *start);
@@ -355,6 +365,29 @@ impl Server {
 }
 
 // ---------------------------------------------------------------- helpers
+
+fn member_item(m: Member) -> lt::CompletionItem {
+    let (insert, format) = match (m.kind, m.takes_args) {
+        (MemberKind::Field | MemberKind::Struct, _) => (m.name.clone(), lt::InsertTextFormat::PLAIN_TEXT),
+        (_, false) => (format!("{}()", m.name), lt::InsertTextFormat::PLAIN_TEXT),
+        (_, true) => (format!("{}($1)", m.name), lt::InsertTextFormat::SNIPPET),
+    };
+    let kind = match m.kind {
+        MemberKind::Field => lt::CompletionItemKind::FIELD,
+        MemberKind::Method => lt::CompletionItemKind::METHOD,
+        MemberKind::Function => lt::CompletionItemKind::FUNCTION,
+        MemberKind::Struct => lt::CompletionItemKind::STRUCT,
+    };
+    lt::CompletionItem {
+        label: m.name.clone(),
+        kind: Some(kind),
+        detail: Some(m.signature.clone()),
+        documentation: if m.doc.is_empty() { None } else { Some(markdown(&m.doc)) },
+        insert_text: Some(insert),
+        insert_text_format: Some(format),
+        ..Default::default()
+    }
+}
 
 fn json<T: serde::Serialize>(v: T) -> serde_json::Value {
     serde_json::to_value(v).unwrap_or(serde_json::Value::Null)
@@ -431,7 +464,7 @@ fn receiver_start(text: &str, dot: usize) -> usize {
 /// inside a block that was already closed (judged by indentation).
 fn visible_locals(doc: &Document, off: usize) -> Vec<&LocalSymbol> {
     let ide = &doc.ide;
-    let mut starts: Vec<u32> = ide.functions.iter().map(|f| f.full.start).collect();
+    let mut starts: Vec<u32> = ide.functions.iter().filter(|f| f.ns == 0).map(|f| f.full.start).collect();
     starts.sort();
     let Some(&fn_start) = starts.iter().rfind(|s| (**s as usize) <= off) else { return Vec::new() };
     let fn_end = starts.iter().find(|s| **s > fn_start).map(|s| *s as usize).unwrap_or(doc.text.len());
@@ -649,6 +682,84 @@ mod tests {
         let items = s.scope_completion(&s.docs[&uri], src.find("pri\n").unwrap());
         let names: Vec<_> = items.iter().filter(|i| i.kind == Some(lt::CompletionItemKind::VARIABLE)).map(|i| i.label.as_str()).collect();
         assert_eq!(names, ["a"]);
+    }
+
+    const TIME_SRC: &str = "import time\n\nfn main():\n    val now = time.now()\n    print(now.to_iso())\n    time.\n";
+
+    fn complete(s: &Server, uri: &lt::Uri, pos: lt::Position) -> Vec<lt::CompletionItem> {
+        let r = s
+            .completion(lt::CompletionParams {
+                text_document_position: tdp(uri, pos),
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+                context: None,
+            })
+            .unwrap();
+        let lt::CompletionResponse::Array(items) = r else { panic!() };
+        items
+    }
+
+    #[test]
+    fn stdlib_is_warning_free() {
+        let a = crate::analyze("import time\nfn main():\n    print(time.now().to_iso())\n");
+        assert!(a.diagnostics.is_empty(), "{:#?}", a.diagnostics);
+        assert!(a.program.is_some());
+    }
+
+    #[test]
+    fn module_member_completion() {
+        let (s, uri) = server_with(TIME_SRC);
+        let items = complete(&s, &uri, at(TIME_SRC, "    time.\n", 9));
+        let labels: Vec<_> = items.iter().map(|i| i.label.as_str()).collect();
+        for want in ["now", "utc", "parse_iso", "from_unix", "DateTime"] {
+            assert!(labels.contains(&want), "{labels:?}");
+        }
+        assert!(!labels.iter().any(|l| l.starts_with('_')), "private names leaked: {labels:?}");
+        let now = items.iter().find(|i| i.label == "now").unwrap();
+        assert_eq!(now.insert_text.as_deref(), Some("now()"));
+    }
+
+    #[test]
+    fn datetime_member_completion_hides_private() {
+        let src = "import time\n\nfn main():\n    val d = time.now()\n    d.\n";
+        let (s, uri) = server_with(src);
+        let items = complete(&s, &uri, at(src, "    d.\n", 6));
+        let labels: Vec<_> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.contains(&"year") && labels.contains(&"format") && labels.contains(&"add_days"), "{labels:?}");
+        assert!(!labels.contains(&"_format_code"), "{labels:?}");
+    }
+
+    #[test]
+    fn import_completion_lists_modules() {
+        let src = "import \nfn main():\n    pass\n";
+        let (s, uri) = server_with(src);
+        let items = complete(&s, &uri, at(src, "import ", 7));
+        assert!(items.iter().any(|i| i.label == "time"));
+    }
+
+    #[test]
+    fn hover_on_module_function_shows_docs() {
+        let (s, uri) = server_with(TIME_SRC);
+        let h = s
+            .hover(lt::HoverParams { text_document_position_params: tdp(&uri, at(TIME_SRC, "now()", 1)), work_done_progress_params: Default::default() })
+            .unwrap();
+        let lt::HoverContents::Markup(m) = h.contents else { panic!() };
+        assert!(m.value.contains("fn now() -> time.DateTime"), "{}", m.value);
+        assert!(m.value.contains("current date and time in UTC"), "{}", m.value);
+    }
+
+    #[test]
+    fn outline_excludes_stdlib() {
+        let (s, uri) = server_with(TIME_SRC);
+        let Some(lt::DocumentSymbolResponse::Nested(syms)) = s.symbols(lt::DocumentSymbolParams {
+            text_document: lt::TextDocumentIdentifier { uri },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        }) else {
+            panic!()
+        };
+        let names: Vec<_> = syms.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["main"]);
     }
 
     #[test]

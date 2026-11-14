@@ -1,0 +1,3 @@
+# expect-error: `import` must be at the top level of the file
+fn main():
+    import time

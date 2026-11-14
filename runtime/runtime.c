@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 typedef struct {
     int64_t len;
@@ -19,31 +20,32 @@ typedef struct {
     char *data;
 } IsmaList;
 
-extern const char isma_source_file[];
 extern void isma_main(void);
 
 // ---------------------------------------------------------------- panics
 
-static void isma_die(int line, int col, const char *msg) {
+// Every panic carries the source file (the user's file or a standard
+// library module such as <std>/time.isma), line and column.
+static void isma_die(const char *file, int line, int col, const char *msg) {
     fflush(stdout);
-    fprintf(stderr, "panic at %s:%d:%d: %s\n", isma_source_file, line, col, msg);
+    fprintf(stderr, "panic at %s:%d:%d: %s\n", file, line, col, msg);
     exit(101);
 }
 
-void isma_panic_msg(IsmaStr *msg, int line, int col) {
+void isma_panic_msg(IsmaStr *msg, const char *file, int line, int col) {
     fflush(stdout);
-    fprintf(stderr, "panic at %s:%d:%d: %.*s\n", isma_source_file, line, col, (int)msg->len, msg->data);
+    fprintf(stderr, "panic at %s:%d:%d: %.*s\n", file, line, col, (int)msg->len, msg->data);
     exit(101);
 }
 
-void isma_panic_overflow(int line, int col) { isma_die(line, col, "integer overflow"); }
-void isma_panic_divzero(int line, int col) { isma_die(line, col, "division by zero"); }
-void isma_assert_fail(int line, int col) { isma_die(line, col, "assertion failed"); }
+void isma_panic_overflow(const char *file, int line, int col) { isma_die(file, line, col, "integer overflow"); }
+void isma_panic_divzero(const char *file, int line, int col) { isma_die(file, line, col, "division by zero"); }
+void isma_assert_fail(const char *file, int line, int col) { isma_die(file, line, col, "assertion failed"); }
 
-void isma_panic_bounds(int64_t idx, int64_t len, int line, int col) {
+void isma_panic_bounds(int64_t idx, int64_t len, const char *file, int line, int col) {
     char buf[128];
     snprintf(buf, sizeof buf, "index %lld out of bounds for list of length %lld", (long long)idx, (long long)len);
-    isma_die(line, col, buf);
+    isma_die(file, line, col, buf);
 }
 
 void isma_exit(int64_t code) {
@@ -206,27 +208,102 @@ static int str_to_cbuf(IsmaStr *s, char *buf, size_t cap) {
     return 1;
 }
 
-static void bad_number(IsmaStr *s, const char *ty, int line, int col) {
+static void bad_number(IsmaStr *s, const char *ty, const char *file, int line, int col) {
     char buf[160];
     snprintf(buf, sizeof buf, "cannot parse \"%.*s\" as %s", s->len > 64 ? 64 : (int)s->len, s->data, ty);
-    isma_die(line, col, buf);
+    isma_die(file, line, col, buf);
 }
 
-int64_t isma_str_to_int(IsmaStr *s, int line, int col) {
+int64_t isma_str_to_int(IsmaStr *s, const char *file, int line, int col) {
     char buf[64], *end;
-    if (!str_to_cbuf(s, buf, sizeof buf)) bad_number(s, "Int", line, col);
+    if (!str_to_cbuf(s, buf, sizeof buf)) bad_number(s, "Int", file, line, col);
     errno = 0;
     long long v = strtoll(buf, &end, 10);
-    if (*end != 0 || errno == ERANGE) bad_number(s, "Int", line, col);
+    if (*end != 0 || errno == ERANGE) bad_number(s, "Int", file, line, col);
     return (int64_t)v;
 }
 
-double isma_str_to_float(IsmaStr *s, int line, int col) {
+double isma_str_to_float(IsmaStr *s, const char *file, int line, int col) {
     char buf[128], *end;
-    if (!str_to_cbuf(s, buf, sizeof buf)) bad_number(s, "Float", line, col);
+    if (!str_to_cbuf(s, buf, sizeof buf)) bad_number(s, "Float", file, line, col);
     double v = strtod(buf, &end);
-    if (*end != 0) bad_number(s, "Float", line, col);
+    if (*end != 0) bad_number(s, "Float", file, line, col);
     return v;
+}
+
+// ---------------------------------------------------------------- string utilities
+
+static int is_char_boundary(IsmaStr *s, int64_t i) {
+    return i == 0 || i == s->len || (i > 0 && i < s->len && ((unsigned char)s->data[i] & 0xC0) != 0x80);
+}
+
+IsmaStr *isma_str_substring(IsmaStr *s, int64_t start, int64_t end, const char *file, int line, int col) {
+    char buf[200];
+    if (start < 0 || end < start || end > s->len) {
+        snprintf(buf, sizeof buf, "substring(%lld, %lld) out of range for a string of length %lld", (long long)start, (long long)end, (long long)s->len);
+        isma_die(file, line, col, buf);
+    }
+    if (!is_char_boundary(s, start) || !is_char_boundary(s, end)) {
+        snprintf(buf, sizeof buf, "substring(%lld, %lld) would split a multi-byte character", (long long)start, (long long)end);
+        isma_die(file, line, col, buf);
+    }
+    if (start == 0 && end == s->len) return s;
+    return str_from(s->data + start, end - start);
+}
+
+static int64_t find_bytes(IsmaStr *h, IsmaStr *n) {
+    if (n->len == 0) return 0;
+    for (int64_t i = 0; i + n->len <= h->len; i++)
+        if (h->data[i] == n->data[0] && memcmp(h->data + i, n->data, (size_t)n->len) == 0) return i;
+    return -1;
+}
+
+int64_t isma_str_contains(IsmaStr *h, IsmaStr *n) { return find_bytes(h, n) >= 0; }
+
+int64_t isma_str_starts_with(IsmaStr *s, IsmaStr *p) {
+    return p->len <= s->len && memcmp(s->data, p->data, (size_t)p->len) == 0;
+}
+
+int64_t isma_str_ends_with(IsmaStr *s, IsmaStr *p) {
+    return p->len <= s->len && memcmp(s->data + s->len - p->len, p->data, (size_t)p->len) == 0;
+}
+
+IsmaList *isma_list_new(int64_t elem_size, int64_t cap);
+void *isma_list_push_slot(IsmaList *l, int64_t elem_size);
+
+// Each UTF-8 character as its own string.
+IsmaList *isma_str_chars(IsmaStr *s) {
+    IsmaList *l = isma_list_new((int64_t)sizeof(IsmaStr *), s->len);
+    int64_t i = 0;
+    while (i < s->len) {
+        unsigned char c = (unsigned char)s->data[i];
+        int64_t n = c < 0x80 ? 1 : (c >> 5) == 0x6 ? 2 : (c >> 4) == 0xE ? 3 : (c >> 3) == 0x1E ? 4 : 1;
+        if (i + n > s->len) n = s->len - i;
+        IsmaStr **slot = isma_list_push_slot(l, (int64_t)sizeof(IsmaStr *));
+        *slot = str_from(s->data + i, n);
+        i += n;
+    }
+    return l;
+}
+
+// ---------------------------------------------------------------- clocks (for the time module)
+
+int64_t isma_time_realtime_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec;
+}
+
+int64_t isma_time_monotonic_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec;
+}
+
+void isma_time_sleep_ns(int64_t ns) {
+    fflush(stdout);
+    struct timespec req = {(time_t)(ns / 1000000000), (long)(ns % 1000000000)}, rem;
+    while (nanosleep(&req, &rem) != 0 && errno == EINTR) req = rem;
 }
 
 // ---------------------------------------------------------------- printing
@@ -272,8 +349,8 @@ void *isma_list_push_slot(IsmaList *l, int64_t elem_size) {
     return l->data + (l->len++) * elem_size;
 }
 
-void *isma_list_pop_slot(IsmaList *l, int64_t elem_size, int line, int col) {
-    if (l->len == 0) isma_die(line, col, "pop from empty list");
+void *isma_list_pop_slot(IsmaList *l, int64_t elem_size, const char *file, int line, int col) {
+    if (l->len == 0) isma_die(file, line, col, "pop from empty list");
     l->len--;
     return l->data + l->len * elem_size;
 }

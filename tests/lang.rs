@@ -178,7 +178,17 @@ fn shebang_scripts_run_directly() {
     let script = dir.join("hello.isma");
     std::fs::write(&script, "#!/usr/bin/env isma\nfn main():\n    print(f\"hi {args().len()}\")\n").unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let out = Command::new(&script).arg("a").env("PATH", path).env("ISMA_CACHE_DIR", cache_dir()).output().unwrap();
+    // Other test threads spawning processes can briefly inherit our write
+    // handle to the script, making exec fail with ETXTBSY: retry that case.
+    let out = (0..100)
+        .find_map(|_| match Command::new(&script).arg("a").env("PATH", &path).env("ISMA_CACHE_DIR", cache_dir()).output() {
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                None
+            }
+            other => Some(other.unwrap()),
+        })
+        .expect("script stayed busy");
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(String::from_utf8_lossy(&out.stdout), "hi 1\n");
     let _ = std::fs::remove_dir_all(&dir);

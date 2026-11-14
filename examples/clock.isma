@@ -1,0 +1,22 @@
+# A tour of the time module.
+import time
+
+fn main():
+    val now = time.now()
+    print(f"UTC now:      {now.to_iso()}")
+    print(f"Pretty:       {now.format("%A, %d %B %Y at %H:%M")}")
+    print(f"Unix seconds: {now.unix()}")
+
+    val new_year = time.date(now.year + 1, 1, 1)
+    val left = new_year.seconds_since(now)
+    print(f"New year in {left / 86400} days and {left % 86400 / 3600} hours")
+
+    val landing = time.parse_iso("1969-07-20T20:17:40Z")
+    print(f"Moon landing: {landing.format("%d %b %Y, %H:%M")} UTC, a {landing.weekday_name()}")
+    print(f"That was {now.seconds_since(landing) / (365 * 86400)} years ago")
+
+    val start = time.monotonic_ms()
+    var total = 0
+    for i in 0..5_000_000:
+        total += i % 7
+    print(f"Summed to {total} in {time.monotonic_ms() - start} ms")

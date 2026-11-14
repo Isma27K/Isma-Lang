@@ -1,0 +1,5 @@
+# expect-error: `time` is a module, not a value
+import time
+fn main():
+    val t = time
+    print(1)
