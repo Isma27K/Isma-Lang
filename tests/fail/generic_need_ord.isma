@@ -1,0 +1,11 @@
+# expect-error: `max` needs `T` to support `<` and `>`, but `Point` doesn't
+fn max[T](a: T, b: T) -> T:
+    if a > b:
+        return a
+    return b
+
+struct Point:
+    x: Int
+
+fn main():
+    print(max(Point(1), Point(2)).x)

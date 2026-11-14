@@ -1,0 +1,6 @@
+# expect-error: function `double` isn't generic, so it takes no type arguments
+fn double(x: Int) -> Int:
+    return x * 2
+
+fn main():
+    print(double[Int](1))

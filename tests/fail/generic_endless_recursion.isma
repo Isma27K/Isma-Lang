@@ -1,0 +1,8 @@
+# expect-error: `nest` calls itself with `T` = `List[T]`
+fn nest[T](x: T, n: Int) -> Int:
+    if n == 0:
+        return 0
+    return nest([x], n - 1)
+
+fn main():
+    print(nest(1, 3))

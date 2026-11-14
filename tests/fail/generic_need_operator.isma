@@ -1,0 +1,9 @@
+# expect-error: `Vec.+` needs `T` to support `+`, but `Bool` doesn't
+struct Vec[T]:
+    x: T
+
+    fn +(self, o: Vec[T]) -> Vec[T]:
+        return Vec(self.x + o.x)
+
+fn main():
+    print((Vec(true) + Vec(false)).x)

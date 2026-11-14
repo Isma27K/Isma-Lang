@@ -1,0 +1,227 @@
+# Generic functions, structs and enums: type arguments are inferred from the
+# arguments (or a type annotation, or given as `f[Int](...)`), and what the
+# code does with a `T` decides which types it works with.
+
+fn max[T](a: T, b: T) -> T:
+    if a > b:
+        return a
+    return b
+
+# Generic code calling generic code.
+fn max3[T](a: T, b: T, c: T) -> T:
+    return max(max(a, b), c)
+
+fn sum[T](xs: List[T], zero: T) -> T:
+    var total = zero
+    for x in xs:
+        total += x
+    return total
+
+fn count[T](xs: List[T], x: T) -> Int:
+    var n = 0
+    for y in xs:
+        if y == x:
+            n += 1
+    return n
+
+fn first[T](xs: List[T]) -> T?:
+    if xs.len() == 0:
+        return null
+    return xs[0]
+
+fn or_else[T](x: T?, fallback: T) -> T:
+    return x ?: fallback
+
+fn describe[T](x: T) -> String:
+    return "value " + x.to_string()
+
+fn show[T](x: T) -> String:
+    return f"<{x}>"
+
+fn fill[T](n: Int, v: T) -> List[T]:
+    val out: List[T] = []
+    for _ in 0..n:
+        out.push(v)
+    return out
+
+fn empty[T]() -> List[T]:
+    return []
+
+fn negate_all[T](xs: List[T]) -> List[T]:
+    val out: List[T] = []
+    for x in xs:
+        out.push(-x)
+    return out
+
+struct Box[T]:
+    var value: T
+
+    fn get(self) -> T:
+        return self.value
+
+    fn set(self, v: T):
+        self.value = v
+
+    fn to_string(self) -> String:
+        return f"Box({self.value})"
+
+struct Pair[A, B]:
+    first: A
+    second: B
+
+    fn swap(self) -> Pair[B, A]:
+        return Pair(self.second, self.first)
+
+    # A method with a type parameter of its own.
+    fn with_first[C](self, c: C) -> Pair[C, B]:
+        return Pair(c, self.second)
+
+    fn to_string(self) -> String:
+        return f"({self.first}, {self.second})"
+
+struct Vec2[T]:
+    x: T
+    y: T
+
+    fn +(self, o: Vec2[T]) -> Vec2[T]:
+        return Vec2(self.x + o.x, self.y + o.y)
+
+    fn ==(self, o: Vec2[T]) -> Bool:
+        return self.x == o.x and self.y == o.y
+
+    fn <=>(self, o: Vec2[T]) -> Int:
+        if self.x == o.x:
+            return self.y <=> o.y
+        return self.x <=> o.x
+
+    fn to_string(self) -> String:
+        return f"<{self.x}, {self.y}>"
+
+struct Stack[T]:
+    var items: List[T]
+
+    fn push(self, x: T):
+        self.items.push(x)
+
+    fn pop(self) -> T?:
+        if self.items.len() == 0:
+            return null
+        return self.items.pop()
+
+    fn len(self) -> Int:
+        return self.items.len()
+
+fn stack[T]() -> Stack[T]:
+    return Stack([])
+
+struct Grid[T]:
+    var cells: List[T]
+
+    fn [](self, i: Int) -> T:
+        return self.cells[i]
+
+    fn []=(self, i: Int, v: T):
+        self.cells[i] = v
+
+enum Tree[T]:
+    Leaf
+    Node(left: Tree[T], value: T, right: Tree[T])
+
+    fn size(self) -> Int:
+        match self:
+            case Leaf:
+                return 0
+            case Node(l, _, r):
+                return l.size() + 1 + r.size()
+
+    fn to_string(self) -> String:
+        match self:
+            case Leaf:
+                return "."
+            case Node(l, v, r):
+                return f"({l} {v} {r})"
+
+fn insert[T](t: Tree[T], v: T) -> Tree[T]:
+    match t:
+        case Leaf:
+            return Tree.Node(Tree.Leaf, v, Tree.Leaf)
+        case Node(l, x, r):
+            if v < x:
+                return Tree.Node(insert(l, v), x, r)
+            return Tree.Node(l, x, insert(r, v))
+
+fn tree_of[T](xs: List[T]) -> Tree[T]:
+    var t: Tree[T] = Tree.Leaf
+    for x in xs:
+        t = insert(t, x)
+    return t
+
+enum Shape:
+    Circle
+    Square
+
+struct Node[T]:
+    value: T
+    var children: List[Node[T]]
+
+fn main():
+    print("-- functions")
+    print(max(3, 7))
+    print(max("pear", "apple"))
+    print(max3(2.5, 9.5, 1.5))
+    print(max(Vec2(1, 5), Vec2(1, 2)))
+    print(sum([1, 2, 3, 4], 0))
+    print(sum(["a", "b", "c"], ""))
+    print(sum([Vec2(1, 1), Vec2(2, 2)], Vec2(0, 0)))
+    print(count([1, 2, 1, 3, 1], 1))
+    print(count([Shape.Circle, Shape.Square, Shape.Circle], Shape.Circle))
+    print(count([1, null, 3, null], null))
+    print(first([7, 8]) ?: -1)
+    val ys: List[Int?] = [null, 2]
+    print(first(ys) ?: -1)
+    val maybe = "x".to_int_or_null()
+    print(or_else(maybe, 7))
+    print(or_else[Int](5, 7))
+    print(describe(3.25))
+    print(describe(Shape.Square))
+    print(show(maybe))
+    print(fill(3, "ab").len())
+    val none: List[Float] = empty()
+    print(none.len())
+    print(negate_all([1, -2])[1])
+
+    print("-- types")
+    val b = Box(41)
+    b.set(b.get() + 1)
+    print(b)
+    print(Box[String]("hi"))
+    val nested = Box(Box(1.5))
+    print(nested.get().get())
+    val p = Pair(1, "one")
+    print(p)
+    print(p.swap())
+    print(p.with_first(2.5))
+    print(Vec2(1, 2) + Vec2(10, 20) == Vec2(11, 22))
+    val s: Stack[String] = stack()
+    s.push("a")
+    s.push("b")
+    print(s.pop() ?: "?")
+    print(s.len())
+    val g = Grid(fill(4, 0))
+    g[1] = 5
+    g[1] += 10
+    print(g[1])
+
+    print("-- enums")
+    val t = tree_of([5, 2, 8, 1, 9])
+    print(t.size())
+    print(t)
+    print(tree_of(["m", "a", "z"]))
+    val leaf = Tree[Int].Leaf
+    print(leaf.size())
+
+    print("-- cycles")
+    val n = Node(1, [])
+    n.children.push(n)
+    n.children.push(Node(2, []))
+    print(n.children.len())

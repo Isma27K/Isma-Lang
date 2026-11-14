@@ -1,4 +1,5 @@
-# Insertion sort and a tiny pseudo-random generator.
+# A generic insertion sort (for anything with `<` and `>`), and a tiny
+# pseudo-random generator.
 struct Rng:
     var state: Int
 
@@ -7,7 +8,7 @@ struct Rng:
         self.state = (self.state * 1103515245 + 12345) % 2147483648
         return self.state % bound
 
-fn insertion_sort(xs: List[Int]):
+fn insertion_sort[T](xs: List[T]):
     for i in 1..xs.len():
         val key = xs[i]
         var j = i - 1
@@ -16,13 +17,13 @@ fn insertion_sort(xs: List[Int]):
             j -= 1
         xs[j + 1] = key
 
-fn is_sorted(xs: List[Int]) -> Bool:
+fn is_sorted[T](xs: List[T]) -> Bool:
     for i in 1..xs.len():
         if xs[i - 1] > xs[i]:
             return false
     return true
 
-fn show(xs: List[Int]) -> String:
+fn show[T](xs: List[T]) -> String:
     var s = "["
     for i in 0..xs.len():
         if i > 0:
@@ -39,3 +40,8 @@ fn main():
     insertion_sort(xs)
     print(f"after:  {show(xs)}")
     print(f"sorted? {is_sorted(xs)}")
+
+    # The same functions, compiled again for `String`.
+    val words = ["pear", "fig", "apple", "kiwi"]
+    insertion_sort(words)
+    print(f"words:  {show(words)}")

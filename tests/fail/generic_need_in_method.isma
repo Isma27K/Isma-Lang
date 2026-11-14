@@ -1,0 +1,12 @@
+# expect-error: `Box.show` needs `T` to support printing, but `P` doesn't
+struct Box[T]:
+    value: T
+
+    fn show(self) -> String:
+        return f"[{self.value}]"
+
+struct P:
+    x: Int
+
+fn main():
+    print(Box(P(1)).show())

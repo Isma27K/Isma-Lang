@@ -1057,7 +1057,7 @@ impl Checker {
                         cands.into_iter().find(|&f| self.funcs[f].params[1].1 == *t && self.funcs[f].ret == *t)
                     }
                     Need::Neg => self.ops(sid, OpKind::Neg).into_iter().find(|&f| self.funcs[f].ret == *t),
-                    Need::Format | Need::ToStr => self.to_string_method(t),
+                    Need::Format | Need::ToStr => self.user_to_string(t),
                 };
                 let Some(fid) = fid else { return fail(t) };
                 // A method of a generic type needs what its code needs.
@@ -1132,7 +1132,7 @@ impl Checker {
         let shown = self.tn(t);
         match t {
             Type::Nullable(_) => d
-                .with_note(format!("a `{shown}` might be `null`, and generic code can't use `null` that way"))
+                .with_note(format!("{} might be `null`, and generic code can't use `null` that way", a_type(&shown)))
                 .with_help("use a non-null type, or handle `null` before calling (e.g. with `?:`)"),
             Type::Struct(sid) | Type::Enum(sid, _) if self.can_extend(*sid) && need != Need::EqNullable => {
                 let sid = *sid;

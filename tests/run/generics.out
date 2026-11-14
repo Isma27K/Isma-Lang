@@ -1,0 +1,39 @@
+-- functions
+7
+pear
+9.5
+<1, 5>
+10
+abc
+<3, 3>
+3
+2
+2
+7
+-1
+7
+5
+value 3.25
+value Square
+<null>
+3
+0
+2
+-- types
+Box(42)
+Box(hi)
+1.5
+(1, one)
+(one, 1)
+(2.5, one)
+true
+b
+1
+15
+-- enums
+5
+(((. 1 .) 2 .) 5 (. 8 (. 9 .)))
+((. a .) m (. z .))
+0
+-- cycles
+2

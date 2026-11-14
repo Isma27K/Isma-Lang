@@ -1,0 +1,7 @@
+# expect-error: `Box` needs type arguments
+struct Box[T]:
+    value: T
+
+fn main():
+    val b: Box = Box(1)
+    print(b.value)

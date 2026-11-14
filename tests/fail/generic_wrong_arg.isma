@@ -1,0 +1,8 @@
+# expect-error: mismatched types: expected `Int`, found `String`
+fn max[T](a: T, b: T) -> T:
+    if a > b:
+        return a
+    return b
+
+fn main():
+    print(max(1, "a"))

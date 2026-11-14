@@ -1,0 +1,6 @@
+# expect-error: the only method generic code can call on it is `to_string()`
+fn size[T](x: T) -> Int:
+    return x.len()
+
+fn main():
+    print(size("abc"))

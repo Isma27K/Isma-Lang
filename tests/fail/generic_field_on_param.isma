@@ -1,0 +1,6 @@
+# expect-error: no field `x` on type `T`
+fn get_x[T](p: T) -> Int:
+    return p.x
+
+fn main():
+    print(get_x(1))

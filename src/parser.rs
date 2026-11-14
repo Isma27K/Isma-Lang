@@ -1396,6 +1396,10 @@ mod tests {
             ExprKind::NotNull(e) => format!("{}!!", show(e)),
             ExprKind::Elvis(a, b) => format!("({} ?: {})", show(a), show(b)),
             ExprKind::Index(e, i) => format!("{}[{}]", show(e), show(i)),
+            ExprKind::TypeApply(e, ts) => {
+                let ts: Vec<String> = ts.iter().map(|t| if t.args.is_empty() { t.name.name.clone() } else { format!("{}[..]", t.name.name) }).collect();
+                format!("{}<{}>", show(e), ts.join(", "))
+            }
             other => format!("{other:?}"),
         }
     }
@@ -1514,6 +1518,24 @@ mod tests {
         // `match` is still usable as a name
         assert!(matches!(f.body[1].kind, StmtKind::Let { .. }));
         assert!(matches!(f.body[2].kind, StmtKind::Assign { .. }));
+    }
+
+    #[test]
+    fn generics_syntax() {
+        let p = parse_ok("struct Pair[A, B]:\n    a: A\n    b: B\n\nfn max[T](a: T, b: T) -> T:\n    return a\n");
+        let Item::Struct(st) = &p.items[0] else { panic!() };
+        assert_eq!(st.type_params.iter().map(|i| i.name.as_str()).collect::<Vec<_>>(), ["A", "B"]);
+        let Item::Fn(f) = &p.items[1] else { panic!() };
+        assert_eq!(f.type_params[0].name, "T");
+        // `[...]` is a type argument list before `(`, or before `.` after a type name; an index otherwise.
+        assert_eq!(expr_of("max[Int](a, b)"), "max<Int>(a, b)");
+        assert_eq!(expr_of("geo.Pair[Int, List[String]](a, b)"), "geo.Pair<Int, List[..]>(a, b)");
+        assert_eq!(expr_of("Tree[Int].Leaf"), "Tree<Int>.Leaf");
+        assert_eq!(expr_of("xs[i].name"), "xs[i].name");
+        assert_eq!(expr_of("xs[i + 1]"), "xs[(i + 1)]");
+        assert_eq!(expr_of("grid[0]"), "grid[0]");
+        let (_, d) = parse("fn f[T: Ord](x: T) -> T:\n    return x\n");
+        assert!(d[0].message.contains("don't take bounds"), "{d:?}");
     }
 
     #[test]

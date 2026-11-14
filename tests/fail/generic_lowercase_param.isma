@@ -1,0 +1,6 @@
+# expect-error: type parameter `t` must start with an uppercase letter
+fn id[t](x: t) -> t:
+    return x
+
+fn main():
+    print(id(1))

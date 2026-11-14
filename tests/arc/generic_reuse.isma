@@ -1,4 +1,4 @@
-# expect-max-allocs: 12
+# expect-max-allocs: 10
 # Copies of generic code for concrete types are ordinary functions to the
 # memory passes: `acc = acc + v` on a `Vec2[Float]` reuses `acc`'s memory,
 # and a generic `sum` over a list allocates nothing per element.

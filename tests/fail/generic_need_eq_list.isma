@@ -1,0 +1,6 @@
+# expect-error: lists can't be compared, added or printed directly
+fn same[T](a: T, b: T) -> Bool:
+    return a == b
+
+fn main():
+    print(same([1], [2]))

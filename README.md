@@ -81,7 +81,7 @@ Indentation instead of braces. `for x in list`, `and` / `or` / `not`, f-strings.
 
 ### 🛡️ Checks like Kotlin
 
-`val` vs `var`. Null safety: only a `T?` can be `null`, and smart casts know when it isn't. Enums with data, and a `match` that must handle every case. No implicit conversions, no "truthy" values, and every path must `return`. Mistakes are caught before the program runs, with messages that tell you the fix.
+`val` vs `var`. Null safety: only a `T?` can be `null`, and smart casts know when it isn't. Enums with data, and a `match` that must handle every case. Generics, with no bounds to write. No implicit conversions, no "truthy" values, and every path must `return`. Mistakes are caught before the program runs, with messages that tell you the fix.
 
 </td>
 <td width="33%" valign="top">
@@ -151,7 +151,7 @@ struct Point:                                # structs with typed fields
     fn +(self, other: Point) -> Point:       # operator functions: `p + q`
         return Point(self.x + other.x, self.y + other.y)
 
-fn clamp(x: Int, low: Int, high: Int) -> Int:
+fn clamp[T](x: T, low: T, high: T) -> T:     # generics: any `T` that has `<` and `>`
     if x < low:
         return low
     elif x > high:
@@ -216,7 +216,7 @@ fn main():
     print(dist(Point(0.0, 0.0), Point(3.0, 4.0)))
 ```
 
-The [**language guide**](docs/language.md) covers everything: types, strictness rules, lints, structs, enums and `match`, lists, strings, null safety, modules, built-ins and panics.
+The [**language guide**](docs/language.md) covers everything: types, strictness rules, lints, structs, enums and `match`, operator functions, generics, lists, strings, null safety, modules, built-ins and panics.
 
 <a id="time"></a>
 ## 🕰️ Batteries included: `time`
@@ -291,6 +291,7 @@ These are the best of 3 runs on an AMD Ryzen 5 5500. Reproduce them with `./benc
 - **The standard library is Isma code** ([`stdlib/time.isma`](stdlib/time.isma)), compiled together with your program, so it's as fast as your own functions. A panic inside it reports *your* calling line, like Rust's `#[track_caller]`.
 - **Memory management happens on a mid-level IR.** The typed program is lowered to a control-flow graph in which every intermediate value has a name ([`src/mir.rs`](src/mir.rs)). [`src/arc.rs`](src/arc.rs) then adds reference counting in the style of Perceus (Koka, Lean 4). It drops each value right after its last use. Parameters are borrowed unless consumed, and projections stay borrowed while interprocedural write-effect summaries prove their slot can't change. A unique struct's memory is reused for the next one, and unique strings are appended to in place. Types that can form cycles get a trial-deletion cycle collector. [`src/cycles.rs`](src/cycles.rs) decides which, from the type graph: a cycle needs a reference that can be replaced after construction, so immutable trees never pay for it.
 - **Operators on your types are method calls.** `a + b` on a struct type-checks to a direct call of its `fn +`, picked by the right operand's type when there are several, and `a < b` to `fn <=>`. The optimizer and the reference counting see an ordinary call: `acc = acc + v` reuses `acc`'s memory, and the particle benchmark runs as fast as with `pos.add(vel)`.
+- **Generics are checked once and compiled per use.** A generic function is type-checked a single time with `T` left abstract ([`src/check/generics.rs`](src/check/generics.rs)). What the code does with a `T` (compare it, add it, print it) becomes what `T` must support, passed along through calls between generic functions and settled for recursion as a fixed point. Each use with concrete types is checked against that list. Then the body is checked again for every set of types it's used with, producing ordinary functions and structs (`max[Int]`, `Box[String]`). Nothing generic reaches the back end, so generic code is exactly as fast as code written out by hand, and reference counting and memory reuse work on it unchanged.
 - **`match` is checked with Maranget's usefulness algorithm** ([`src/patterns.rs`](src/patterns.rs)), as in Rust and OCaml. The same pass that proves a `match` exhaustive produces the missing cases for the error message and finds unreachable ones. Cases compile to chains of tag tests, which LLVM merges into a `switch`. Enums without data are plain integers, and data-less variants of other enums are shared constants.
 - **Codegen writes LLVM IR as text** and hands it to `clang -O3`, together with a ~780-line C runtime: the allocator, the cycle collector, strings, lists, printing and clocks.
 - **Null safety is checked by flow typing.** The checker tracks which locals and `val` field chains are known to be non-null at each point (through `if`, `and`/`or`, loops, early `return`s and `?:`), which is what makes smart casts work. At run time it costs nothing: `User?` is a nullable pointer, and `Int?` is a flag-plus-value pair that stays in registers.
@@ -298,7 +299,7 @@ These are the best of 3 runs on an AMD Ryzen 5 5500. Reproduce them with `./benc
   - Integer `+ - *` use LLVM's overflow-checking intrinsics.
   - Panic paths are marked cold.
   - List indexing is bounds-checked inline.
-- **About 13,800 lines of Rust.** The only dependencies are `ariadne` (error rendering) and `lsp-server` / `lsp-types` (the language server).
+- **About 15,400 lines of Rust.** The only dependencies are `ariadne` (error rendering) and `lsp-server` / `lsp-types` (the language server).
 
 <a id="roadmap"></a>
 ## 🗺️ Roadmap
@@ -312,7 +313,7 @@ These are the best of 3 runs on an AMD Ryzen 5 5500. Reproduce them with `./benc
 - [x] `enum` + `match` with exhaustiveness checking
 - [x] Importing your own `.isma` files: `import`, `from ... import`, `as`, folders and `..`
 - [x] Operator functions: `fn +(self, other: T)`, `==`, `<=>`, `[]`, so `time.now() - start` is a `Duration`
-- [ ] Generics for user code: `fn max[T](a: T, b: T) -> T`
+- [x] Generics for user code: `fn max[T](a: T, b: T) -> T`, `struct Box[T]`, `enum Tree[T]`
 - [ ] More modules: `math`, `fs`, maps, more string utilities
 
 <a id="development"></a>

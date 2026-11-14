@@ -1,0 +1,11 @@
+# expect-error: `T` goes to `max` here, which needs `<` and `>`
+fn max[T](a: T, b: T) -> T:
+    if a > b:
+        return a
+    return b
+
+fn max3[T](a: T, b: T, c: T) -> T:
+    return max(max(a, b), c)
+
+fn main():
+    print(max3(true, false, true))

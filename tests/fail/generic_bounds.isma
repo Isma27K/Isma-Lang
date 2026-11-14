@@ -1,0 +1,6 @@
+# expect-error: type parameters don't take bounds: write `T` alone
+fn max[T: Comparable](a: T, b: T) -> T:
+    return a
+
+fn main():
+    print(max(1, 2))

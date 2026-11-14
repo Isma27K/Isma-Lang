@@ -1,0 +1,6 @@
+# expect-warning: type parameter `U` is never used
+fn first[T, U](x: T) -> T:
+    return x
+
+fn main():
+    print(first[Int, String](1))

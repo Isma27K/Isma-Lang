@@ -1,0 +1,9 @@
+# expect-error: an `Int?` might be `null`, and generic code can't use `null` that way
+fn max[T](a: T, b: T) -> T:
+    if a > b:
+        return a
+    return b
+
+fn main():
+    val n = "5".to_int_or_null()
+    print(max(n, n) ?: 0)

@@ -14,6 +14,7 @@ Isma reads like Python, checks like Kotlin and compiles to native code. This gui
 - [Structs and methods](#structs-and-methods)
 - [Enums and `match`](#enums-and-match)
 - [Operator functions](#operator-functions)
+- [Generics](#generics)
 - [Lists](#lists)
 - [Strings and f-strings](#strings-and-f-strings)
 - [Null safety](#null-safety)
@@ -84,6 +85,7 @@ name = "other"           # error: cannot assign twice to immutable variable `nam
 | structs | User-defined. A reference type, like Python and Kotlin objects. |
 | enums | User-defined: one of several variants, which may carry data. See [Enums and `match`](#enums-and-match). |
 | `T?` | A `T` or `null`, e.g. `Int?`, `String?`, `User?`. See [Null safety](#null-safety). |
+| generic types | Your own structs and enums with type parameters, written like `Box[Int]` or `Pair[String, Float]`. See [Generics](#generics). |
 
 Lists and structs are references: `val b = a` makes `b` point at the same list as `a`. Memory is managed for you, see [Memory](#memory).
 
@@ -338,6 +340,94 @@ fn main():
 - **They're methods.** They live inside a struct or enum, take `self`, and are public. `a + b` compiles to a direct call of `fn +`, so it costs what a method call costs (usually nothing, once inlined), and `acc = acc + v` reuses `acc`'s memory like `acc = acc.add(v)` would.
 - **Not definable:** `and`, `or`, `not`, `!=` (the opposite of `==`) and `<`-style operators on their own (they all come from `<=>`).
 
+## Generics
+
+Functions, structs and enums can take type parameters, in brackets after their name:
+
+```python
+fn max[T](a: T, b: T) -> T:
+    if a > b:
+        return a
+    return b
+
+struct Stack[T]:
+    var items: List[T]
+
+    fn push(self, x: T):
+        self.items.push(x)
+
+    fn pop(self) -> T?:
+        if self.items.len() == 0:
+            return null
+        return self.items.pop()
+
+enum Tree[T]:
+    Leaf
+    Node(left: Tree[T], value: T, right: Tree[T])
+
+    fn contains(self, x: T) -> Bool:
+        match self:
+            case Leaf:
+                return false
+            case Node(left, value, right):
+                if x == value:
+                    return true
+                elif x < value:
+                    return left.contains(x)
+                return right.contains(x)
+
+fn main():
+    print(max(3, 7))                         # 7: here `T` is `Int`
+    print(max("pear", "apple"))              # pear
+    val s = Stack[String]([])                # or: val s: Stack[String] = Stack([])
+    s.push("a")
+    print(s.pop() ?: "empty")                # a
+    val t = Tree.Node(Tree.Leaf, 5, Tree.Node(Tree.Leaf, 8, Tree.Leaf))
+    print(t.contains(8))                     # true
+```
+
+### What a `T` can do
+
+There are no bounds to declare. The compiler works out what each type parameter must support from what the code does with it. `max` compares two `T`s with `>`, so `max` works for any type with `<=>`, and only those:
+
+| When generic code does | `T` must support | Which built-in types do |
+|---|---|---|
+| `a == b`, `a != b` | `==` | `Int`, `Float`, `Bool`, `String`, enums without data |
+| `a < b`, `<=`, `>`, `>=`, `a <=> b` | `<=>` | `Int`, `Float`, `String` |
+| `a + b`, `-`, `*`, `/`, `%` (also `total += x`) | that operator, giving a `T` | `Int`, `Float`; `String` for `+` |
+| `-a` | `-` | `Int`, `Float` |
+| `print(a)`, `f"{a}"`, `a.to_string()` | `to_string` | `Int`, `Float`, `Bool`, `String`, enums without data |
+
+Your own types qualify by defining the matching [operator functions](#operator-functions) or `fn to_string(self) -> String`; for arithmetic, it's the one that takes and returns the type itself (`fn +(self, other: Vec2) -> Vec2`). Generic code can also store a `T` in lists and fields, return it, compare it with `null`, and pass it to other generic code, which passes on what *that* code needs. What it can't do is read fields or call other methods on a `T`: it could be any type.
+
+Using a type that falls short is an error at the call, pointing at the line of generic code that needs more:
+
+```text
+Error: `max` needs `T` to support `<` and `>`, but `Point` doesn't
+    ╭─[ main.isma:11:11 ]
+ 11 │     print(max(Point(1.0, 2.0), Point(3.0, 4.0)).x)
+    │           ──────────────────┬──────────────────
+    │                             ╰──────────────────── here `T` is `Point`
+  2 │     if a > b:
+    │        ──┬──
+    │          ╰──── `T` values are compared here
+    │ Help: give `struct Point` a method `fn <=>(self, other: Point) -> Int`
+```
+
+Hovering a generic function in the editor shows what each of its type parameters must support.
+
+### Type arguments
+
+- **Inferred from the arguments** (`max(3, 7)`, `Stack(["a"])`), or else from the type the result must have: `val xs: List[Int] = empty()`, `val t: Tree[Int] = Tree.Leaf`.
+- **Or given explicitly**, in brackets: `max[Float](1.5, 2.5)`, `Stack[String]([])`, `Tree[Int].Leaf`, `geometry.Box[Int](5)`.
+- **A generic type is always written with its arguments**: `Box[Int]`, `Pair[String, Float]`, and `Box[T]` inside its own methods. A `Box[Int]` is not a `Box[Int?]`: write `Box[Int?](5)` to get the latter.
+- **Methods can have type parameters of their own**: `fn with_first[C](self, c: C) -> Pair[C, B]`.
+- **A type argument can be nullable.** `T?` with `T` = `Int?` is just `Int?` (as in Kotlin), so `first([null, 2])` returns `null` either way.
+
+### What it costs
+
+Nothing at run time. Generic code is compiled separately for every set of types it's used with (*monomorphization*, as in Rust and C++): `max[Int]` and `max[String]` are two functions in the program, each exactly what you'd get by writing it out by hand, and a `Box[Int]` stores its `Int` directly, with no boxing and no type information at run time. The price is paid at compile time, in code size, for each type actually used.
+
 ## Lists
 
 ```python
@@ -582,4 +672,4 @@ Panics cover:
 - **Operators look at the left operand.** `2.0 * v` can't use `Vec2`'s `fn *`; write `v * 2.0`.
 - **`==` from `fn ==` needs non-null values.** Check for `null` first (a smart cast then does the rest).
 - **`match` is a statement.** It doesn't produce a value; assign or `return` inside its cases.
-- **No generic enums yet.** You can't write `Option[T]` yourself (but `T?` covers the most common use).
+- **No interfaces yet.** Generic code can use operators and `to_string` on a `T`, but no fields or other methods.

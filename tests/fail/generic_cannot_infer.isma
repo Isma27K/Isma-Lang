@@ -1,0 +1,7 @@
+# expect-error: cannot infer the type `T` for function `empty`
+fn empty[T]() -> List[T]:
+    return []
+
+fn main():
+    val xs = empty()
+    print(xs.len())

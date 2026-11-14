@@ -1,0 +1,19 @@
+# Generic functions and types from another file: `module.f[T]`,
+# `module.Type[T]`, `from ... import`, and a module type used as `T`.
+import mylib.coll
+import mylib.geometry as geo
+from mylib.coll import Option, max as biggest
+
+fn main():
+    print(coll.max(1, 2))
+    print(biggest("a", "b"))
+    val b: coll.Box[Int] = coll.Box(5)
+    print(b.map_to_string().value)
+    val o: Option[Int] = Option.Empty
+    print(o.or_else(3))
+    print(Option.Some(9).or_else(0))
+    val e = coll.Option[String].Empty
+    print(e.or_else("default"))
+    print(coll.max[Float](1.5, 2.5))
+    val p = Option.Some(geo.Point(1.0, 2.0))
+    print(p)

@@ -1,0 +1,6 @@
+# expect-error: in generic code an operator works on two values of the same type parameter, like `T + T`
+fn inc[T](x: T) -> T:
+    return x + 1
+
+fn main():
+    print(inc(1))

@@ -1,0 +1,8 @@
+# expect-error: cannot infer the type `T` for `Tree.Leaf`
+enum Tree[T]:
+    Leaf
+    Node(left: Tree[T], value: T, right: Tree[T])
+
+fn main():
+    val t = Tree.Leaf
+    print(t == t)

@@ -1,0 +1,6 @@
+# expect-error: function `id` takes 1 type argument (`T`), found 2
+fn id[T](x: T) -> T:
+    return x
+
+fn main():
+    print(id[Int, String](1))

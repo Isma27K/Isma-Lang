@@ -1511,7 +1511,7 @@ impl Checker {
     }
 
     /// `fn to_string(self) -> String` of a struct or enum, which `print` and f-strings use.
-    fn to_string_method(&mut self, t: &Type) -> Option<FuncId> {
+    fn user_to_string(&mut self, t: &Type) -> Option<FuncId> {
         let sid = match t {
             Type::Struct(s) | Type::Enum(s, _) => *s,
             _ => return None,
@@ -3028,6 +3028,10 @@ impl Checker {
                 };
                 self.err(d);
             }
+            // `total += x` in generic code: `T + T` must give a `T`.
+            Some(op) if matches!(place_ty, Type::Param(_)) && place_ty == v.ty => {
+                self.require(&place_ty, Need::Arith(op), span);
+            }
             Some(op) => {
                 if !place_ty.is_error() && !v.ty.is_error() {
                     let ok = place_ty == v.ty
@@ -3674,7 +3678,7 @@ impl Checker {
             self.require(&t.ty, Need::Format, span);
             return Self::mk(TExprKind::Builtin(Builtin::ToStr, vec![t]), Type::Str, span);
         }
-        if let Some(fid) = self.to_string_method(&t.ty) {
+        if let Some(fid) = self.user_to_string(&t.ty) {
             return Self::mk(TExprKind::Call(fid, vec![t]), Type::Str, span);
         }
         match &t.ty {
@@ -3683,7 +3687,7 @@ impl Checker {
             Type::Error => t,
             Type::Null => Self::mk(TExprKind::Str("null".into()), Type::Str, span),
             // `x?.to_string() ?: "null"`
-            Type::Nullable(inner) if inner.is_primitive() || self.to_string_method(inner).is_some() => {
+            Type::Nullable(inner) if inner.is_primitive() || self.user_to_string(inner).is_some() => {
                 let inner = (**inner).clone();
                 let binder = self.hidden_local(inner.clone());
                 let it = Self::mk(TExprKind::Local(binder), inner, span);
@@ -4181,7 +4185,7 @@ impl Checker {
                     || t.ty.is_nullable() && t.ty.non_null().is_primitive()
                     || matches!(t.ty, Type::Enum(_, false))
                     || matches!(t.ty.non_null(), Type::Param(_))
-                    || self.to_string_method(t.ty.non_null()).is_some() =>
+                    || self.user_to_string(t.ty.non_null()).is_some() =>
                 {
                     t = self.stringify(t, a.value.span)
                 }

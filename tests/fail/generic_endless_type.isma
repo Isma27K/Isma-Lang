@@ -1,0 +1,7 @@
+# expect-error: `Bad` contains itself with ever-bigger type arguments
+struct Bad[T]:
+    next: Bad[List[T]]?
+
+fn main():
+    val b: Bad[Int]? = null
+    print(b == null)

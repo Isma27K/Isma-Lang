@@ -1,0 +1,31 @@
+# Small generic collections, used by `generics_modules.isma`.
+
+# The largest of two values.
+fn max[T](a: T, b: T) -> T:
+    if a > b:
+        return a
+    return b
+
+struct Box[T]:
+    value: T
+
+    fn map_to_string(self) -> Box[String]:
+        return Box(self.value.to_string())
+
+enum Option[T]:
+    Some(value: T)
+    Empty
+
+    fn or_else(self, d: T) -> T:
+        match self:
+            case Some(v):
+                return v
+            case Empty:
+                return d
+
+    fn to_string(self) -> String:
+        match self:
+            case Some(v):
+                return f"Some({v})"
+            case Empty:
+                return "Empty"
