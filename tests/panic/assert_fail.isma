@@ -1,0 +1,3 @@
+# expect-panic: assertion failed
+fn main():
+    assert(1 > 2)

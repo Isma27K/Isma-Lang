@@ -1,0 +1,17 @@
+struct Counter:
+    var n: Int
+
+fn side(c: Counter, v: Bool) -> Bool:
+    c.n += 1
+    return v
+
+fn main():
+    val c = Counter(0)
+    val a = side(c, false) and side(c, true)
+    print(f"{a} calls={c.n}")
+    val b = side(c, true) or side(c, true)
+    print(f"{b} calls={c.n}")
+    val d = not side(c, false) and (side(c, true) or side(c, false))
+    print(f"{d} calls={c.n}")
+    print(true == (not false))
+    print(1 < 2 and 2 < 3)

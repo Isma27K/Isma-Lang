@@ -1,0 +1,3 @@
+# expect-error: `x` must be initialized
+fn main():
+    var x: Int

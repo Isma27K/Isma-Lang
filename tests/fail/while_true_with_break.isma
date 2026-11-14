@@ -1,0 +1,6 @@
+# expect-error: function `f` might not return a value
+fn f() -> Int:
+    while true:
+        break
+fn main():
+    print(f())

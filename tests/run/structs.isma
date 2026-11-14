@@ -1,0 +1,39 @@
+# Structs are reference types with typed fields.
+# Fields are immutable unless declared with `var`.
+
+struct Vec2:
+    var x: Float
+    var y: Float
+
+    fn length(self) -> Float:
+        return sqrt(self.x * self.x + self.y * self.y)
+
+    fn add(self, other: Vec2) -> Vec2:
+        return Vec2(self.x + other.x, self.y + other.y)
+
+    fn scale(self, k: Float):
+        self.x *= k
+        self.y *= k
+
+    fn show(self) -> String:
+        return f"({self.x}, {self.y})"
+
+struct Particle:
+    name: String          # immutable
+    var pos: Vec2
+    var vel: Vec2
+
+fn main():
+    val a = Vec2(x=3.0, y=4.0)
+    print(f"|a| = {a.length()}")
+
+    val b = a.add(Vec2(1.0, -1.0))
+    print(f"a + (1, -1) = {b.show()}")
+
+    b.scale(0.5)
+    print(f"scaled = {b.show()}")
+
+    var p = Particle(name="dust", pos=Vec2(0.0, 0.0), vel=Vec2(1.5, 2.0))
+    for step in 1..=3:
+        p.pos = p.pos.add(p.vel)
+        print(f"{p.name} step {step}: {p.pos.show()}")

@@ -1,0 +1,4 @@
+# expect-error: cannot find value `cuont` in this scope
+fn main():
+    val count = 1
+    print(cuont)

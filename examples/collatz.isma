@@ -1,0 +1,21 @@
+# Which starting number below one million has the longest Collatz chain?
+fn chain_length(start: Int) -> Int:
+    var n = start
+    var steps = 1
+    while n != 1:
+        if n % 2 == 0:
+            n = n / 2
+        else:
+            n = 3 * n + 1
+        steps += 1
+    return steps
+
+fn main():
+    var best = 1
+    var best_len = 1
+    for i in 1..1_000_000:
+        val len = chain_length(i)
+        if len > best_len:
+            best = i
+            best_len = len
+    print(f"{best} has a chain of {best_len} numbers")

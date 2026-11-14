@@ -1,0 +1,23 @@
+# Reads numbers from stdin until an empty line, then prints stats.
+fn main():
+    var nums: List[Float] = []
+    print("Enter numbers, one per line (empty line to finish):")
+    while true:
+        val line = input()
+        if line == "":
+            break
+        nums.push(line.to_float())
+    if nums.len() == 0:
+        print("no numbers")
+        return
+    var total = 0.0
+    var smallest = nums[0]
+    var largest = nums[0]
+    for x in nums:
+        total += x
+        if x < smallest:
+            smallest = x
+        if x > largest:
+            largest = x
+    print(f"count={nums.len()} sum={total} mean={total / nums.len().to_float()}")
+    print(f"min={smallest} max={largest}")

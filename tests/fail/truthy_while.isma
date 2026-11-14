@@ -1,0 +1,5 @@
+# expect-error: `while` condition must be a `Bool`, found `List[Int]`
+fn main():
+    val xs = [1]
+    while xs:
+        pass

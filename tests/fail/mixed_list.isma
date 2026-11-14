@@ -1,0 +1,3 @@
+# expect-error: list elements must all have the same type
+fn main():
+    val xs = [1, "two"]

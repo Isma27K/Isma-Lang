@@ -1,0 +1,5 @@
+# expect-error: mismatched types: expected `String`, found `Int`
+fn name() -> String:
+    return 5
+fn main():
+    print(name())

@@ -1,0 +1,5 @@
+# expect-error: cannot bind a value of type `Unit`
+fn noop():
+    pass
+fn main():
+    val x = noop()

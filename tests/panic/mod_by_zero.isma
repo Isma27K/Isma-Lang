@@ -1,0 +1,4 @@
+# expect-panic: division by zero
+fn main():
+    val z = 0
+    print(10 % z)

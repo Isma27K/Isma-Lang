@@ -1,0 +1,4 @@
+# expect-error: expected `fn` or `struct`
+print("hi")
+fn main():
+    pass

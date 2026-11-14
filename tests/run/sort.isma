@@ -1,0 +1,41 @@
+# Insertion sort and a tiny pseudo-random generator.
+struct Rng:
+    var state: Int
+
+    fn next(self, bound: Int) -> Int:
+        # 31-bit LCG: small enough that it can never overflow an Int.
+        self.state = (self.state * 1103515245 + 12345) % 2147483648
+        return self.state % bound
+
+fn insertion_sort(xs: List[Int]):
+    for i in 1..xs.len():
+        val key = xs[i]
+        var j = i - 1
+        while j >= 0 and xs[j] > key:
+            xs[j + 1] = xs[j]
+            j -= 1
+        xs[j + 1] = key
+
+fn is_sorted(xs: List[Int]) -> Bool:
+    for i in 1..xs.len():
+        if xs[i - 1] > xs[i]:
+            return false
+    return true
+
+fn show(xs: List[Int]) -> String:
+    var s = "["
+    for i in 0..xs.len():
+        if i > 0:
+            s += ", "
+        s += xs[i].to_string()
+    return s + "]"
+
+fn main():
+    val rng = Rng(42)
+    var xs: List[Int] = []
+    for i in 0..12:
+        xs.push(rng.next(100))
+    print(f"before: {show(xs)}")
+    insertion_sort(xs)
+    print(f"after:  {show(xs)}")
+    print(f"sorted? {is_sorted(xs)}")

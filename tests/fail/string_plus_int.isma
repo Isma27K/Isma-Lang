@@ -1,0 +1,3 @@
+# expect-error: operator `+` cannot be applied to `String` and `Int`
+fn main():
+    print("n = " + 5)

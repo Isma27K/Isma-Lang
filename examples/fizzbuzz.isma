@@ -1,0 +1,13 @@
+fn fizzbuzz(n: Int) -> String:
+    if n % 15 == 0:
+        return "FizzBuzz"
+    elif n % 3 == 0:
+        return "Fizz"
+    elif n % 5 == 0:
+        return "Buzz"
+    else:
+        return n.to_string()
+
+fn main():
+    for i in 1..=15:
+        print(fizzbuzz(i))

@@ -1,0 +1,4 @@
+# The classic.
+fn main():
+    val name = "Isma"
+    print(f"Hello from {name}! 🚀")

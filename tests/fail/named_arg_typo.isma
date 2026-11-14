@@ -1,0 +1,6 @@
+# expect-error: struct `P` has no parameter named `z`
+struct P:
+    x: Int
+    y: Int
+fn main():
+    val p = P(x=1, z=2)

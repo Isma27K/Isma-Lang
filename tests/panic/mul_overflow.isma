@@ -1,0 +1,5 @@
+# expect-panic: integer overflow
+fn f(n: Int) -> Int:
+    return n * n
+fn main():
+    print(f(4294967296))

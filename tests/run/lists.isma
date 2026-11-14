@@ -1,0 +1,60 @@
+struct Item:
+    name: String
+    var qty: Int
+
+fn sum(xs: List[Int]) -> Int:
+    var total = 0
+    for x in xs:
+        total += x
+    return total
+
+fn reverse(xs: List[Int]) -> List[Int]:
+    var out: List[Int] = []
+    var i = xs.len() - 1
+    while i >= 0:
+        out.push(xs[i])
+        i -= 1
+    return out
+
+fn main():
+    var xs = [5, 3, 8]
+    xs.push(1)
+    xs[0] = 10
+    xs[1] += 4
+    print(f"len={xs.len()} sum={sum(xs)}")
+    val r = reverse(xs)
+    print(f"{r[0]} {r[1]} {r[2]} {r[3]}")
+    print(xs.pop())
+    print(xs.len())
+
+    # lists are references
+    val alias = xs
+    alias.push(99)
+    print(xs.len())
+
+    # nested lists
+    var grid: List[List[Int]] = []
+    for i in 0..3:
+        var row: List[Int] = []
+        for j in 0..3:
+            row.push(i * 3 + j)
+        grid.push(row)
+    grid[1][1] = -1
+    print(f"{grid[0][2]} {grid[1][1]} {grid[2][0]}")
+
+    # lists of structs
+    val items = [Item("apple", 3), Item("pear", 0)]
+    items[1].qty += 7
+    for it in items:
+        print(f"{it.name}: {it.qty}")
+
+    # growth
+    var big: List[Int] = []
+    for i in 0..100000:
+        big.push(i)
+    print(sum(big))
+
+    val flags = [true, false, true]
+    print(flags[2])
+    val words = ["x", "y"]
+    print(words[0] + words[1])

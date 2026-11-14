@@ -1,0 +1,5 @@
+# expect-error: `print` cannot print a value of type `P`
+struct P:
+    x: Int
+fn main():
+    print(P(1))

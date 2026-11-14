@@ -1,0 +1,4 @@
+# expect-error: expression result is unused
+fn main():
+    val x = 1
+    x == 2

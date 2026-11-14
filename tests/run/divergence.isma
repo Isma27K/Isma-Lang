@@ -1,0 +1,42 @@
+# Functions may end in `while true` (no break), `panic` or if/else that all return.
+fn index_of(xs: List[Int], v: Int) -> Int:
+    var i = 0
+    while true:
+        if xs[i] == v:
+            return i
+        i += 1
+
+fn must_be_positive(n: Int) -> Int:
+    if n > 0:
+        return n
+    panic("not positive")
+
+fn sign(n: Int) -> String:
+    if n < 0:
+        return "-"
+    elif n == 0:
+        return "0"
+    else:
+        return "+"
+
+fn early(n: Int):
+    if n > 1:
+        print("big")
+        return
+    print("small")
+
+fn main():
+    print(index_of([4, 8, 15, 16, 23, 42], 16))
+    print(must_be_positive(7))
+    print(sign(-3) + sign(0) + sign(9))
+    early(5)
+    early(0)
+    val parsed = " 42 ".to_int() + "-8".to_int()
+    print(parsed)
+    print("2.5".to_float() * 2.0)
+    # shadowing in an inner scope is allowed
+    val x = 1
+    if true:
+        val x = "inner"
+        print(x)
+    print(x)

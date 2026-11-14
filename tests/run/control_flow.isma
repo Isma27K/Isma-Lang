@@ -1,0 +1,54 @@
+fn classify(n: Int) -> String:
+    if n < 0:
+        return "negative"
+    elif n == 0:
+        return "zero"
+    elif n < 10:
+        return "small"
+    else:
+        return "large"
+
+fn first_multiple(xs: List[Int], k: Int) -> Int:
+    for x in xs:
+        if x % k == 0:
+            return x
+    return -1
+
+fn main():
+    for n in [-5, 0, 7, 42]:
+        print(f"{n} is {classify(n)}")
+
+    # break / continue in nested loops
+    var found = 0
+    for i in 0..10:
+        if i % 2 == 0:
+            continue
+        for j in 0..10:
+            if j > i:
+                break
+            found += 1
+    print(f"pairs = {found}")
+
+    # while with break
+    var k = 0
+    while true:
+        k += 1
+        if k * k > 50:
+            break
+    print(f"k = {k}")
+
+    # ranges: empty, inclusive, negative
+    var s = 0
+    for i in 5..5:
+        s += 100
+    for i in -3..=3:
+        s += i
+    for i in 3..0:
+        s += 1000
+    print(f"s = {s}")
+
+    print(first_multiple([3, 5, 14, 21], 7))
+    print(first_multiple([3, 5], 7))
+
+    # one-line blocks
+    if k > 0: print("one-liner")

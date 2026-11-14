@@ -1,0 +1,3 @@
+# expect-panic: cannot parse "12abc" as Int
+fn main():
+    print("12abc".to_int())

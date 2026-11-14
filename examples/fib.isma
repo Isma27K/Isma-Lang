@@ -1,0 +1,11 @@
+fn fib(n: Int) -> Int:
+    if n < 2:
+        return n
+    return fib(n - 1) + fib(n - 2)
+
+fn main():
+    var total = 0
+    for i in 0..20:
+        total += fib(i)
+    print(f"sum of fib(0..20) = {total}")
+    print(f"fib(30) = {fib(30)}")

@@ -1,0 +1,5 @@
+# expect-error: `if` condition must be a `Bool`, found `Int`
+fn main():
+    val n = 3
+    if n:
+        pass

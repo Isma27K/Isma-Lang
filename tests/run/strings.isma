@@ -1,0 +1,25 @@
+fn repeat(s: String, n: Int) -> String:
+    var out = ""
+    for i in 0..n:
+        out += s
+    return out
+
+fn main():
+    val greeting = "Hello" + ", " + "world"
+    print(greeting)
+    print(greeting.len())
+    print(repeat("ab", 3))
+    print("abc" == "abc")
+    print("abc" != "abd")
+    print("apple" < "banana")
+    print("b" > "abc")
+    print("ab" < "abc")
+    val n = 42
+    val pi = 3.14159
+    print(f"n={n}, pi={pi}, ok={n > 40}, nested={f"[{n * 2}]"}")
+    print(f"braces: {{literal}} and {"quoted"}")
+    print("tab\there, quote \" and backslash \\")
+    print(f"")
+    print("")
+    print(123.to_string() + true.to_string())
+    print("ünïcödé".len())

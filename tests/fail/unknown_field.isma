@@ -1,0 +1,5 @@
+# expect-error: no field `nme` on type `User`
+struct User:
+    name: String
+fn main():
+    print(User("x").nme)

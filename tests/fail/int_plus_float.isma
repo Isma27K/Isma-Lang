@@ -1,0 +1,3 @@
+# expect-error: operator `+` cannot be applied to `Int` and `Float`
+fn main():
+    val y = 1 + 2.0

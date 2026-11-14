@@ -1,0 +1,5 @@
+# expect-error: operator `==` cannot be applied to `P`
+struct P:
+    x: Int
+fn main():
+    print(P(1) == P(1))

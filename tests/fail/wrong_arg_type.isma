@@ -1,0 +1,5 @@
+# expect-error: mismatched types: expected `Int`, found `String`
+fn double(a: Int) -> Int:
+    return a * 2
+fn main():
+    print(double("two"))

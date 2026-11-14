@@ -1,0 +1,6 @@
+# expect-error: cannot assign to immutable field `name` of `User`
+struct User:
+    name: String
+fn main():
+    val u = User("a")
+    u.name = "b"

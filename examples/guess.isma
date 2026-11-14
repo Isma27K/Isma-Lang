@@ -1,0 +1,22 @@
+# Think of a number between 1 and 100 - Isma will find it.
+fn main():
+    print("Think of a number between 1 and 100.")
+    var low = 1
+    var high = 100
+    var tries = 0
+    while low <= high:
+        val guess = (low + high) / 2
+        tries += 1
+        print(f"Is it {guess}? (h = higher, l = lower, y = yes)")
+        val answer = input()
+        if answer == "y":
+            print(f"Got it in {tries} tries!")
+            return
+        elif answer == "h":
+            low = guess + 1
+        elif answer == "l":
+            high = guess - 1
+        else:
+            print("Please answer h, l or y.")
+            tries -= 1
+    print("Hmm, you changed your number, didn't you?")

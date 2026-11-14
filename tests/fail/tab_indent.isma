@@ -1,0 +1,3 @@
+# expect-error: tabs are not allowed in indentation
+fn main():
+	pass

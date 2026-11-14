@@ -1,0 +1,4 @@
+# expect-panic: integer overflow
+fn main():
+    val m = -9223372036854775808
+    print(-m)

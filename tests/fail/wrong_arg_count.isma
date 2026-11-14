@@ -1,0 +1,5 @@
+# expect-error: function `add` takes 2 argument(s) but 3 were given
+fn add(a: Int, b: Int) -> Int:
+    return a + b
+fn main():
+    print(add(1, 2, 3))

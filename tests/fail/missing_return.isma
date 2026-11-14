@@ -1,0 +1,6 @@
+# expect-error: function `f` might not return a value
+fn f(x: Int) -> Int:
+    if x > 0:
+        return 1
+fn main():
+    print(f(1))

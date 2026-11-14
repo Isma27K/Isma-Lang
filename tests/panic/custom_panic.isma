@@ -1,0 +1,3 @@
+# expect-panic: boom 42
+fn main():
+    panic(f"boom {6 * 7}")

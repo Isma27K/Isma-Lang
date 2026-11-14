@@ -1,0 +1,4 @@
+# expect-panic: pop from empty list
+fn main():
+    var xs: List[Int] = []
+    print(xs.pop())

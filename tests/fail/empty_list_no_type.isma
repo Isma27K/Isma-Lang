@@ -1,0 +1,3 @@
+# expect-error: cannot infer the element type of an empty list
+fn main():
+    val xs = []
