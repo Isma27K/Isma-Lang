@@ -9,6 +9,13 @@ struct Point:
         val dy = self.y - other.y
         return sqrt(dx * dx + dy * dy)
 
+    # Operator functions work across modules like any other method.
+    fn +(self, other: Point) -> Point:
+        return Point(self.x + other.x, self.y + other.y)
+
+    fn to_string(self) -> String:
+        return f"({self.x}, {self.y})"
+
 enum Shape:
     Circle(center: Point, radius: Float)
     Rect(corner: Point, w: Float, h: Float)

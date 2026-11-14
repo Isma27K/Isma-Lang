@@ -1,0 +1,5 @@
+# expect-error: define `fn +(self, other: V) -> V` in `struct V`
+struct V:
+    x: Float
+fn main():
+    print((V(1.0) + V(2.0)).x)

@@ -1020,6 +1020,35 @@ mod tests {
         items
     }
 
+    const OPS_SRC: &str = "import time\n\nstruct V:\n    x: Float\n\n    fn +(self, other: V) -> V:\n        return V(self.x + other.x)\n\nfn main():\n    val a = V(1.0) + V(2.0)\n    val t = time.now()\n    print(time.now() - t)\n    a.\n";
+
+    #[test]
+    fn operators_hover_and_jump_to_their_function() {
+        let (s, uri) = server_with(OPS_SRC);
+        let hover = |needle: &str, delta: usize| {
+            let h = s.hover(lt::HoverParams { text_document_position_params: tdp(&uri, at(OPS_SRC, needle, delta)), work_done_progress_params: Default::default() });
+            let lt::HoverContents::Markup(m) = h.unwrap().contents else { panic!() };
+            m.value
+        };
+        let shown = hover("+ V(2.0)", 0);
+        assert!(shown.contains("fn +(self, other: V) -> V") && shown.contains("operator function of `V`"), "{shown}");
+        let shown = hover("- t)", 0);
+        assert!(shown.contains("fn -(self, other: time.DateTime) -> time.Duration"), "{shown}");
+        let r = s
+            .definition(lt::GotoDefinitionParams {
+                text_document_position_params: tdp(&uri, at(OPS_SRC, "+ V(2.0)", 0)),
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+            })
+            .unwrap();
+        let lt::GotoDefinitionResponse::Scalar(loc) = r else { panic!() };
+        assert_eq!(loc.range.start, at(OPS_SRC, "+(self", 0));
+        // Operator functions are used through their operator, not offered after `.`.
+        let items = complete(&s, &uri, at(OPS_SRC, "    a.\n", 6));
+        let labels: Vec<_> = items.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(labels, ["x"]);
+    }
+
     #[test]
     fn module_files_need_no_main() {
         let a = crate::analyze("fn square(x: Int) -> Int:\n    return x * x\n");

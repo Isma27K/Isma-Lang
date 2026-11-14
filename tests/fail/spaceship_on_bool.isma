@@ -1,0 +1,3 @@
+# expect-error: operator `<=>` cannot be applied to `Bool`
+fn main():
+    print(true <=> false)

@@ -148,6 +148,9 @@ struct Point:                                # structs with typed fields
     fn length(self) -> Float:                # methods take `self`
         return sqrt(self.x * self.x + self.y * self.y)
 
+    fn +(self, other: Point) -> Point:       # operator functions: `p + q`
+        return Point(self.x + other.x, self.y + other.y)
+
 fn clamp(x: Int, low: Int, high: Int) -> Int:
     if x < low:
         return low
@@ -181,7 +184,7 @@ fn main():
         count += x
     for i in 0..3:                           # ...or a range
         print(f"{i}: {xs[i]}")               # f-strings
-    print(f"|p| = {p.length()}, sum = {count}")
+    print(f"|p + p| = {(p + p).length()}, sum = {count}")
     val word = first_long(["a", "tiny", "list"])
     print(word?.len() ?: 0)                  # safe call `?.` and elvis `?:`
     if word != null:
@@ -228,7 +231,8 @@ fn main():
     print(now.format("%A, %d %B %Y at %H:%M"))
     val landing = time.parse_iso("1969-07-20T20:17:40Z")
     print(f"Moon landing was a {landing.weekday_name()}")
-    print(f"{now.seconds_since(landing) / (365 * 86400)} years ago")
+    print(f"{((now - landing) / time.days(365)).to_int()} years ago")   # DateTime - DateTime is a Duration
+    print(now + time.hours(36))                                        # 36 hours from now
 ```
 
 <p align="center">
@@ -264,7 +268,7 @@ The VS Code extension (in the companion `isma-vscode` project) gets all its smar
 | `fib(35)`: 30 million recursive calls | 38 ms | 28 ms | 872 ms |
 | Sieve of Eratosthenes to 10 million | 49 ms | 41 ms | 2,012 ms |
 | Building a 15 MB string from 2 million f-strings | 120 ms | 83 ms | 278 ms |
-| Moving a `Vec2` particle 5 million steps (`pos = pos.add(vel)`) | 21 ms | 9 ms | 1,129 ms |
+| Moving a `Vec2` particle 5 million steps (`pos = pos + vel`) | 21 ms | 9 ms | 1,129 ms |
 | Binary trees: building and walking 3 million `enum` nodes | 41 ms | 92 ms | 319 ms |
 
 These are the best of 3 runs on an AMD Ryzen 5 5500. Reproduce them with `./bench/run.sh`.
@@ -286,6 +290,7 @@ These are the best of 3 runs on an AMD Ryzen 5 5500. Reproduce them with `./benc
 - **Every file is a namespace of one type checker.** [`src/project.rs`](src/project.rs) finds each `import` relative to the file that contains it and loads every file once, so modules may import each other. All files share one offset space for source positions, which is how errors, panic locations and go-to-definition land in the right file. The whole program becomes one LLVM module, so calls across files inline like any others.
 - **The standard library is Isma code** ([`stdlib/time.isma`](stdlib/time.isma)), compiled together with your program, so it's as fast as your own functions. A panic inside it reports *your* calling line, like Rust's `#[track_caller]`.
 - **Memory management happens on a mid-level IR.** The typed program is lowered to a control-flow graph in which every intermediate value has a name ([`src/mir.rs`](src/mir.rs)). [`src/arc.rs`](src/arc.rs) then adds reference counting in the style of Perceus (Koka, Lean 4). It drops each value right after its last use. Parameters are borrowed unless consumed, and projections stay borrowed while interprocedural write-effect summaries prove their slot can't change. A unique struct's memory is reused for the next one, and unique strings are appended to in place. Types that can form cycles get a trial-deletion cycle collector. [`src/cycles.rs`](src/cycles.rs) decides which, from the type graph: a cycle needs a reference that can be replaced after construction, so immutable trees never pay for it.
+- **Operators on your types are method calls.** `a + b` on a struct type-checks to a direct call of its `fn +`, picked by the right operand's type when there are several, and `a < b` to `fn <=>`. The optimizer and the reference counting see an ordinary call: `acc = acc + v` reuses `acc`'s memory, and the particle benchmark runs as fast as with `pos.add(vel)`.
 - **`match` is checked with Maranget's usefulness algorithm** ([`src/patterns.rs`](src/patterns.rs)), as in Rust and OCaml. The same pass that proves a `match` exhaustive produces the missing cases for the error message and finds unreachable ones. Cases compile to chains of tag tests, which LLVM merges into a `switch`. Enums without data are plain integers, and data-less variants of other enums are shared constants.
 - **Codegen writes LLVM IR as text** and hands it to `clang -O3`, together with a ~780-line C runtime: the allocator, the cycle collector, strings, lists, printing and clocks.
 - **Null safety is checked by flow typing.** The checker tracks which locals and `val` field chains are known to be non-null at each point (through `if`, `and`/`or`, loops, early `return`s and `?:`), which is what makes smart casts work. At run time it costs nothing: `User?` is a nullable pointer, and `Int?` is a flag-plus-value pair that stays in registers.
@@ -293,7 +298,7 @@ These are the best of 3 runs on an AMD Ryzen 5 5500. Reproduce them with `./benc
   - Integer `+ - *` use LLVM's overflow-checking intrinsics.
   - Panic paths are marked cold.
   - List indexing is bounds-checked inline.
-- **About 13,000 lines of Rust.** The only dependencies are `ariadne` (error rendering) and `lsp-server` / `lsp-types` (the language server).
+- **About 13,800 lines of Rust.** The only dependencies are `ariadne` (error rendering) and `lsp-server` / `lsp-types` (the language server).
 
 <a id="roadmap"></a>
 ## 🗺️ Roadmap
@@ -306,8 +311,8 @@ These are the best of 3 runs on an AMD Ryzen 5 5500. Reproduce them with `./benc
 - [x] Memory management through automatic reference counting, with a cycle collector
 - [x] `enum` + `match` with exhaustiveness checking
 - [x] Importing your own `.isma` files: `import`, `from ... import`, `as`, folders and `..`
+- [x] Operator functions: `fn +(self, other: T)`, `==`, `<=>`, `[]`, so `time.now() - start` is a `Duration`
 - [ ] Generics for user code: `fn max[T](a: T, b: T) -> T`
-- [ ] Operator functions (so that `time.now() - start` works)
 - [ ] More modules: `math`, `fs`, maps, more string utilities
 
 <a id="development"></a>

@@ -1,0 +1,48 @@
+# `time.Duration` and the operators of `time.DateTime`: `b - a`, `a + d`, `<`, `==`.
+import time
+
+fn main():
+    val a = time.utc(2026, 11, 14, 16, 5, 9)
+    val b = time.utc(2026, 11, 15, 18, 35, 10) + time.millis(250)
+    print(b - a)
+    print(a - b)
+    print(a + time.days(3))
+    print(b - time.hours(26))
+    print(a + time.nanos(1))
+    print(a - time.millis(1))
+    print(f"{a < b} {a > b} {a <= a} {a == a + time.seconds(0)} {a != b}")
+    print((b - a).seconds())
+    print((b - a).millis())
+    print((a - b).abs())
+    print((a - b).is_negative())
+
+    # Durations
+    val d = time.minutes(1) + time.seconds(30)
+    print(d)
+    print(d * 2)
+    print(d * 1.5)
+    print(d / 4)
+    print(d / time.seconds(10))
+    print(time.seconds(130) % time.minutes(1))
+    print(f"{time.micros(1500)} {time.nanos(42)} {time.millis(1)} {time.nanos(1_234_567)} {time.seconds(0)}")
+    print(f"{-d} {time.hours(50)} {time.days(1) + time.millis(5)} {time.hours(1) + time.seconds(5)}")
+    print(f"{d.seconds()} {d.minutes()} {d.millis()} {d.micros()} {d.nanos()}")
+    print(d > time.seconds(30))
+    print(d == time.seconds(90))
+    print(d <=> time.minutes(2))
+    val t = time.nanos(40_859_266)
+    print(f"{t.round(time.millis(1))} {t.truncate(time.millis(1))} {t.round(time.micros(1))} {(-t).round(time.millis(1))}")
+    print(f"{time.millis(1500).round(time.seconds(1))} {time.millis(-1500).round(time.seconds(1))} {time.millis(1499).round(time.seconds(1))}")
+    var total = time.seconds(0)
+    for i in 1..=4:
+        total += time.millis(250) * i
+    total -= time.millis(100)
+    print(total)
+    val late: time.Duration? = null
+    print(late)
+
+    # The clocks only promise that time doesn't run backwards.
+    val start = time.monotonic()
+    print(time.monotonic() - start >= time.seconds(0))
+    val t0 = time.now()
+    print(time.now() - t0 < time.minutes(1))

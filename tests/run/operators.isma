@@ -1,0 +1,215 @@
+# Operator functions: `fn +(self, other: T)` and friends, overloads, `<=>`,
+# `==`, indexing with `[]` / `[]=`, compound assignment, and `to_string`.
+
+struct Vec2:
+    x: Float
+    y: Float
+
+    fn +(self, other: Vec2) -> Vec2:
+        return Vec2(self.x + other.x, self.y + other.y)
+
+    fn -(self, other: Vec2) -> Vec2:
+        return Vec2(self.x - other.x, self.y - other.y)
+
+    fn -(self) -> Vec2:
+        return Vec2(-self.x, -self.y)
+
+    fn *(self, k: Float) -> Vec2:
+        return Vec2(self.x * k, self.y * k)
+
+    # The dot product: the same operator, overloaded on the right operand's type.
+    fn *(self, other: Vec2) -> Float:
+        return self.x * other.x + self.y * other.y
+
+    fn /(self, k: Float) -> Vec2:
+        return Vec2(self.x / k, self.y / k)
+
+    fn ==(self, other: Vec2) -> Bool:
+        return self.x == other.x and self.y == other.y
+
+    # Shorter vectors come first.
+    fn <=>(self, other: Vec2) -> Int:
+        return self * self <=> other * other
+
+    fn to_string(self) -> String:
+        return f"({self.x}, {self.y})"
+
+struct Money:
+    cents: Int
+    currency: String
+
+    fn +(self, other: Money) -> Money:
+        if self.currency != other.currency:
+            panic(f"cannot add {other.currency} to {self.currency}")
+        return Money(self.cents + other.cents, self.currency)
+
+    fn *(self, k: Int) -> Money:
+        return Money(self.cents * k, self.currency)
+
+    fn %(self, k: Int) -> Int:
+        return self.cents % k
+
+    # By currency, then by amount.
+    fn <=>(self, other: Money) -> Int:
+        val c = self.currency <=> other.currency
+        if c != 0:
+            return c
+        return self.cents <=> other.cents
+
+    fn ==(self, other: Money) -> Bool:
+        return self <=> other == 0
+
+    fn to_string(self) -> String:
+        val cents = self.cents % 100
+        var pad = ""
+        if cents < 10:
+            pad = "0"
+        return f"{self.cents / 100}.{pad}{cents} {self.currency}"
+
+struct Pos:
+    row: Int
+    col: Int
+
+struct Grid:
+    w: Int
+    var cells: List[Int]
+
+    fn [](self, i: Int) -> Int:
+        return self.cells[i]
+
+    fn []=(self, i: Int, v: Int):
+        self.cells[i] = v
+
+    # A second way to index: by position.
+    fn [](self, p: Pos) -> Int:
+        return self.cells[p.row * self.w + p.col]
+
+    fn []=(self, p: Pos, v: Int):
+        self.cells[p.row * self.w + p.col] = v
+
+struct Body:
+    var pos: Vec2
+    var vel: Vec2
+
+enum Priority:
+    Low
+    Medium
+    High
+
+    fn rank(self) -> Int:
+        match self:
+            case Low:
+                return 0
+            case Medium:
+                return 1
+            case High:
+                return 2
+
+    fn <=>(self, other: Priority) -> Int:
+        return self.rank() <=> other.rank()
+
+    fn to_string(self) -> String:
+        return f"<{self.rank()}>"
+
+enum Shape:
+    Circle(r: Float)
+    Square(side: Float)
+
+    fn ==(self, other: Shape) -> Bool:
+        match self:
+            case Circle(a):
+                match other:
+                    case Circle(b):
+                        return a == b
+                    case _:
+                        return false
+            case Square(a):
+                match other:
+                    case Square(b):
+                        return a == b
+                    case _:
+                        return false
+
+fn sort(xs: List[Money]):
+    for i in 1..xs.len():
+        var j = i
+        while j > 0 and xs[j] < xs[j - 1]:
+            val t = xs[j]
+            xs[j] = xs[j - 1]
+            xs[j - 1] = t
+            j -= 1
+
+fn main():
+    val a = Vec2(1.0, 2.0)
+    val b = Vec2(3.0, 4.0)
+    print(a + b)
+    print(f"{a - b} {-a} {a * 2.0} {a * b} {b / 2.0}")
+    print(a == b)
+    print(a != b)
+    print(a == Vec2(1.0, 2.0))
+    print(f"{a < b} {a <= b} {a > b} {a >= b} {a <=> b} {b <=> a} {a <=> a}")
+    print(a + b * 2.0 == Vec2(7.0, 10.0))
+
+    # `<=>` on numbers and strings
+    val abc = "abc"
+    val abd = "abd"
+    print(f"{3 <=> 1} {1 <=> 3} {2 <=> 2} {2.5 <=> 0.5} {abc <=> abd} {abd <=> abc} {abc <=> abc}")
+
+    # compound assignment: locals, fields and list elements
+    var p = a
+    p += b
+    p -= Vec2(0.5, 0.5)
+    print(p)
+    val body = Body(Vec2(0.0, 0.0), Vec2(1.0, 0.5))
+    for _ in 0..4:
+        body.pos += body.vel
+    print(body.pos)
+    val points = [a, b]
+    points[0] += b
+    points[1] -= a
+    print(f"{points[0]} {points[1]}")
+
+    # a value of a type with `to_string` prints itself, `null` when it's null
+    var maybe: Vec2? = null
+    print(maybe)
+    maybe = a
+    print(f"[{maybe}]")
+
+    # ordering and equality from `<=>` and `==`
+    val wallet = [Money(250, "EUR"), Money(1999, "USD"), Money(5, "EUR"), Money(1000, "EUR")]
+    sort(wallet)
+    for m in wallet:
+        print(m)
+    var total = Money(0, "EUR")
+    for m in wallet:
+        if m.currency == "EUR":
+            total += m
+    print(total)
+    print(total * 3)
+    print(total % 100)
+    print(Money(5, "EUR") == Money(5, "EUR"))
+    print(Money(5, "EUR") != Money(5, "USD"))
+
+    # indexing, with two kinds of index
+    val g = Grid(3, [0, 0, 0, 0, 0, 0])
+    g[1] = 5
+    g[1] += 2
+    g[Pos(1, 2)] = 9
+    g[Pos(1, 2)] *= 2
+    print(f"{g[1]} {g[5]} {g[Pos(1, 2)]} {g[Pos(0, 1)]}")
+
+    # enums
+    print(Priority.High > Priority.Low)
+    print(Priority.Low <=> Priority.Medium)
+    print(Priority.Medium == Priority.Medium)
+    print(Priority.High)
+    print(Shape.Circle(1.0) == Shape.Circle(1.0))
+    print(Shape.Circle(1.0) == Shape.Square(1.0))
+    print(Shape.Square(2.0) != Shape.Square(3.0))
+
+    # a hot loop of operator calls (reference counting keeps reusing memory)
+    var pos = Vec2(0.0, 0.0)
+    val vel = Vec2(0.001, 0.002)
+    for _ in 0..100_000:
+        pos = pos + vel
+    print(pos.x > 99.9 and pos.y > 199.9)

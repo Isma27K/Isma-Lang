@@ -1,0 +1,9 @@
+# expect-error: `V` already has `fn *` for `Float`
+struct V:
+    x: Float
+    fn *(self, k: Float) -> V:
+        return V(self.x * k)
+    fn *(self, factor: Float) -> V:
+        return V(self.x * factor)
+fn main():
+    pass

@@ -1,0 +1,7 @@
+# expect-error: wrong number of parameters for `fn +`
+struct V:
+    x: Float
+    fn +(self) -> V:
+        return self
+fn main():
+    pass

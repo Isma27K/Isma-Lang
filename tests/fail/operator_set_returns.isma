@@ -1,0 +1,8 @@
+# expect-error: `fn []=` must not return a value
+struct Row:
+    var cells: List[Int]
+    fn []=(self, i: Int, v: Int) -> Int:
+        self.cells[i] = v
+        return v
+fn main():
+    pass

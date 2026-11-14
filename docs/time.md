@@ -2,20 +2,21 @@
 
 [← Back to the README](../README.md) · [Language guide](language.md)
 
-UTC dates, times and clocks. Everything is UTC; there are no time zones. A `DateTime` is immutable, and methods like `add_days` return a new value.
+UTC dates, times, durations and clocks. Everything is UTC; there are no time zones. A `DateTime` and a `Duration` are immutable: methods and operators return new values.
 
 ```python
 import time
 
 fn main():
     val now = time.now()
-    print(now.to_iso())                               # 2026-11-14T16:05:09.123Z
+    print(now)                                        # 2026-11-14T16:05:09.123Z
     print(now.format("%A, %d %B %Y %H:%M"))           # Saturday, 14 November 2026 16:05
     val deadline = time.parse_iso("2026-12-25T00:00:00+07:00")   # offsets are converted to UTC
-    print(deadline.seconds_since(now) / 86400)        # whole days left
+    print(deadline - now)                             # 958h34m57.710868749s
+    print(now + time.days(3) > deadline)              # false
 ```
 
-The module is [written in Isma](../stdlib/time.isma) (about 460 lines). Only reading the clock and sleeping go through small C hooks.
+The module is [written in Isma](../stdlib/time.isma) (about 650 lines). Only reading the clock and sleeping go through small C hooks.
 
 ## Creating a `DateTime`
 
@@ -68,21 +69,63 @@ An unknown code such as `%Q` panics, with the location pointing at your `format`
 
 ## Arithmetic and comparison
 
+`DateTime` has [operator functions](language.md#operator-functions):
+
 | | |
 |---|---|
-| `add_seconds(n)`, `add_minutes(n)`, `add_hours(n)`, `add_days(n)` | Exact arithmetic; negative `n` goes back in time |
+| `a - b` | The [`Duration`](#durations) from `b` to `a` (negative if `a` is earlier) |
+| `a + d`, `a - d` | The moment `d` (a `Duration`) later or earlier |
+| `a < b`, `a <= b`, `a > b`, `a >= b`, `a <=> b` | Earlier moments come first |
+| `a == b`, `a != b` | The same moment |
+| `add_seconds(n)`, `add_minutes(n)`, `add_hours(n)`, `add_days(n)` | Like `a + time.seconds(n)`...; negative `n` goes back in time |
 | `add_months(n)`, `add_years(n)` | Calendar arithmetic. The day is clamped: Jan 31 + 1 month = Feb 28 (29 in a leap year) |
-| `seconds_since(other)`, `millis_since(other)` | `self - other`, rounded toward zero |
-| `compare(other)` | `-1`, `0` or `1` |
-| `is_before(other)`, `is_after(other)`, `equals(other)` | Ordering. Isma has no operator overloading, so `-`, `<` and `==` don't apply to a `DateTime`; the compiler points you to these methods |
+| `seconds_since(other)`, `millis_since(other)` | `(self - other)` in whole seconds or milliseconds, rounded toward zero |
+| `compare(other)`, `is_before(other)`, `is_after(other)`, `equals(other)` | The same as `<=>`, `<`, `>` and `==`, as methods |
 | `start_of_day()` | Midnight of the same day |
+| `to_string()` | The ISO form: what `print(a)` and `f"{a}"` show |
+
+## Durations
+
+A `time.Duration` is a length of time with nanosecond precision, positive or negative. You get one by subtracting two moments, or from these functions:
+
+| | |
+|---|---|
+| `time.nanos(n)`, `time.micros(n)`, `time.millis(n)` | `n` of those |
+| `time.seconds(n)`, `time.minutes(n)`, `time.hours(n)`, `time.days(n)` | `n` of those (a day is 24 hours) |
+
+```python
+val d = time.minutes(1) + time.seconds(30)
+print(d)                       # 1m30s
+print(d * 2)                   # 3m
+print(d * 1.5)                 # 2m15s
+print(d / 4)                   # 22.5s
+print(d / time.seconds(10))    # 9.0: how many times it fits
+print(d > time.seconds(30))    # true
+print(d.seconds())             # 90.0
+```
+
+| | |
+|---|---|
+| `a + b`, `a - b`, `-a` | Sums and differences of durations |
+| `d * n`, `d * x`, `d / n` | Scaled by an `Int` or a `Float` (rounded toward zero, to the nanosecond) |
+| `a / b` | A `Float`: how many times `b` fits in `a` |
+| `a % b` | What's left after taking out whole `b`s: `time.seconds(130) % time.minutes(1)` is `10s` |
+| `<`, `<=`, `>`, `>=`, `<=>`, `==`, `!=` | Shorter first |
+| `nanos()`, `micros()`, `millis()` | Whole units, rounded toward zero, as an `Int` |
+| `seconds()`, `minutes()`, `hours()` | With a fraction, as a `Float` |
+| `round(unit)`, `truncate(unit)` | To a multiple of `unit`: `d.round(time.millis(1))` turns `40.859266ms` into `41ms`. `round` sends halves away from zero, `truncate` goes toward zero |
+| `abs()`, `is_negative()` | |
+| `to_string()` | `1h30m`, `2.5s`, `250ms`, `1.5µs`, `42ns`, `-3s`: what `print(d)` shows |
+
+A `Duration` can only be made by these functions and operators: `time.Duration(...)` is an error.
 
 ## Clocks and helpers
 
 | | |
 |---|---|
 | `time.unix()`, `time.unix_ms()` | The current Unix time |
-| `time.monotonic_ms()`, `time.monotonic_ns()` | A clock that only moves forward. Use it to time code; the calendar clock can jump when the system time is adjusted |
+| `time.monotonic()` | A clock that only moves forward, as a `Duration` since an unspecified moment: only the difference between two readings means something. Use it to time code; the calendar clock can jump when the system time is adjusted |
+| `time.monotonic_ms()`, `time.monotonic_ns()` | The same clock, as an `Int` |
 | `time.sleep_ms(ms)` | Pause the program |
 | `time.is_leap_year(year)` | `true` for 2024, `false` for 1900, `true` for 2000 |
 | `time.days_in_month(year, month)` | `29` for February 2024 |
@@ -93,14 +136,16 @@ An unknown code such as `%Q` panics, with the location pointing at your `format`
 import time
 
 fn main():
-    val start = time.monotonic_ms()
+    val start = time.monotonic()
     var total = 0
     for i in 0..50_000_000:
         total += i % 7
-    print(f"{total} in {time.monotonic_ms() - start} ms")
+    val took = time.monotonic() - start
+    print(f"{total} in {took}")                      # 149999997 in 40.859266ms
+    print(f"{total} in {took.round(time.millis(1))}") # 149999997 in 41ms
 ```
 
-Print the result of the work you're timing. Otherwise LLVM is free to delete a loop whose result is never used, and you'll measure `0 ms`.
+Print the result of the work you're timing. Otherwise LLVM is free to delete a loop whose result is never used, and you'll measure nothing.
 
 ## How it's tested
 

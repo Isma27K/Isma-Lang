@@ -1,0 +1,5 @@
+# expect-error: `-=` would change the type of the target from `time.DateTime` to `time.Duration`
+import time
+fn main():
+    var t = time.now()
+    t -= time.now()

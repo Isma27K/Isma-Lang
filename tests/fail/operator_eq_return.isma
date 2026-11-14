@@ -1,0 +1,7 @@
+# expect-error: `fn ==` must return `Bool`
+struct V:
+    x: Float
+    fn ==(self, other: V) -> Int:
+        return 1
+fn main():
+    print(V(1.0) == V(2.0))

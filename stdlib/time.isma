@@ -3,11 +3,16 @@
 #     import time
 #
 #     val now = time.now()
-#     print(now.to_iso())                     # 2026-11-14T16:05:09.123Z
+#     print(now)                              # 2026-11-14T16:05:09.123Z
 #     print(now.format("%Y-%m-%d %H:%M"))     # 2026-11-14 16:05
+#     print(now + time.days(3))               # three days later
 #
-# Everything is UTC; there are no time zones. A DateTime is immutable:
-# methods such as `add_days` return a new value.
+#     val start = time.monotonic()
+#     work()
+#     print(f"took {time.monotonic() - start}")   # took 1.25s
+#
+# Everything is UTC; there are no time zones. A DateTime and a Duration are
+# immutable: methods and operators return new values.
 
 # A moment in UTC with nanosecond precision. Create one with `time.now()`,
 # `time.utc(...)`, `time.date(...)`, `time.from_unix(...)` or `time.parse_iso(...)`.
@@ -166,6 +171,32 @@ struct DateTime:
     fn millis_since(self, other: DateTime) -> Int:
         return _diff_ns(self, other, 1_000_000)
 
+    # The time from `other` to this moment: `time.now() - start`.
+    fn -(self, other: DateTime) -> Duration:
+        return Duration(_diff_ns(self, other, 1))
+
+    # This moment moved back by `d`.
+    fn -(self, d: Duration) -> DateTime:
+        return self + -d
+
+    # This moment moved forward by `d`.
+    fn +(self, d: Duration) -> DateTime:
+        val nanos = self.nanosecond + _floor_mod(d._ns, 1_000_000_000)
+        val seconds = self.unix() + _floor_div(d._ns, 1_000_000_000) + nanos / 1_000_000_000
+        return _from_unix_parts(seconds, nanos % 1_000_000_000)
+
+    # Earlier moments come first: `a < b`, `a >= b`...
+    fn <=>(self, other: DateTime) -> Int:
+        return self.compare(other)
+
+    # The same moment.
+    fn ==(self, other: DateTime) -> Bool:
+        return self.compare(other) == 0
+
+    # The ISO 8601 form, used by `print` and f-strings.
+    fn to_string(self) -> String:
+        return self.to_iso()
+
     # -1 if this moment is earlier than `other`, 0 if equal, 1 if later.
     fn compare(self, other: DateTime) -> Int:
         val a = self.unix()
@@ -196,6 +227,161 @@ struct DateTime:
     fn start_of_day(self) -> DateTime:
         return DateTime(self.year, self.month, self.day, 0, 0, 0, 0)
 
+# A length of time with nanosecond precision, positive or negative: what
+# `time.now() - start` gives, or `time.seconds(5)`, `time.millis(250)`...
+#
+#     val timeout = time.seconds(30)
+#     val d = time.minutes(1) + time.seconds(30)
+#     print(d)                   # 1m30s
+#     print(d * 2)               # 3m
+#     print(d > timeout)         # true
+#     print(d.seconds())         # 90.0
+struct Duration:
+    _ns: Int
+
+    # The whole duration in nanoseconds.
+    fn nanos(self) -> Int:
+        return self._ns
+
+    # In whole microseconds (rounded toward zero).
+    fn micros(self) -> Int:
+        return self._ns / 1000
+
+    # In whole milliseconds (rounded toward zero).
+    fn millis(self) -> Int:
+        return self._ns / 1_000_000
+
+    # In seconds, with a fraction: 1.5 for 1500 milliseconds.
+    fn seconds(self) -> Float:
+        return self._ns.to_float() / 1_000_000_000.0
+
+    # In minutes, with a fraction.
+    fn minutes(self) -> Float:
+        return self._ns.to_float() / 60_000_000_000.0
+
+    # In hours, with a fraction.
+    fn hours(self) -> Float:
+        return self._ns.to_float() / 3_600_000_000_000.0
+
+    # The same length, made positive.
+    fn abs(self) -> Duration:
+        if self._ns < 0:
+            return -self
+        return self
+
+    # Rounded to the nearest multiple of `unit` (halves away from zero):
+    # `elapsed.round(time.millis(1))` prints as "41ms" instead of "40.859266ms".
+    fn round(self, unit: Duration) -> Duration:
+        if unit._ns <= 0:
+            return self
+        val r = self._ns % unit._ns     # the part below `unit`, with the sign of the duration
+        val down = self._ns - r         # rounded toward zero
+        if r + r >= unit._ns:
+            return Duration(down + unit._ns)
+        if r + r <= -unit._ns:
+            return Duration(down - unit._ns)
+        return Duration(down)
+
+    # Rounded toward zero to a multiple of `unit`.
+    fn truncate(self, unit: Duration) -> Duration:
+        if unit._ns <= 0:
+            return self
+        return Duration(self._ns - self._ns % unit._ns)
+
+    # Is it shorter than zero (`b - a` when `b` is earlier)?
+    fn is_negative(self) -> Bool:
+        return self._ns < 0
+
+    # Like "1h30m", "2.5s", "250ms", "1.5µs" or "-3s".
+    fn to_string(self) -> String:
+        if self._ns == 0:
+            return "0s"
+        var n = self._ns
+        var out = ""
+        if n < 0:
+            out = "-"
+            n = -n
+        if n < 1000:
+            return f"{out}{n}ns"
+        if n < 1_000_000:
+            return out + _decimal(n, 1000, 3) + "µs"
+        if n < 1_000_000_000:
+            return out + _decimal(n, 1_000_000, 6) + "ms"
+        val h = n / 3_600_000_000_000
+        val m = n / 60_000_000_000 % 60
+        val s = n % 60_000_000_000
+        if h > 0:
+            out += f"{h}h"
+        if m > 0:
+            out += f"{m}m"
+        if s > 0:
+            out += _decimal(s, 1_000_000_000, 9) + "s"
+        return out
+
+    fn +(self, other: Duration) -> Duration:
+        return Duration(self._ns + other._ns)
+
+    fn -(self, other: Duration) -> Duration:
+        return Duration(self._ns - other._ns)
+
+    fn -(self) -> Duration:
+        return Duration(-self._ns)
+
+    # `d * 3`
+    fn *(self, k: Int) -> Duration:
+        return Duration(self._ns * k)
+
+    # `d * 1.5` (rounded toward zero, to the nanosecond).
+    fn *(self, k: Float) -> Duration:
+        return Duration((self._ns.to_float() * k).to_int())
+
+    # `d / 4` (rounded toward zero, to the nanosecond).
+    fn /(self, k: Int) -> Duration:
+        return Duration(self._ns / k)
+
+    # How many times `other` fits: `time.minutes(3) / time.seconds(10)` is 18.0.
+    fn /(self, other: Duration) -> Float:
+        return self._ns.to_float() / other._ns.to_float()
+
+    # What is left after taking out whole `other`s: `time.seconds(130) % time.minutes(1)` is 10s.
+    fn %(self, other: Duration) -> Duration:
+        return Duration(self._ns % other._ns)
+
+    # Shorter durations come first.
+    fn <=>(self, other: Duration) -> Int:
+        return self._ns <=> other._ns
+
+    fn ==(self, other: Duration) -> Bool:
+        return self._ns == other._ns
+
+# `n` nanoseconds.
+fn nanos(n: Int) -> Duration:
+    return Duration(n)
+
+# `n` microseconds.
+fn micros(n: Int) -> Duration:
+    return Duration(n * 1000)
+
+# `n` milliseconds.
+fn millis(n: Int) -> Duration:
+    return Duration(n * 1_000_000)
+
+# `n` seconds.
+fn seconds(n: Int) -> Duration:
+    return Duration(n * 1_000_000_000)
+
+# `n` minutes.
+fn minutes(n: Int) -> Duration:
+    return Duration(n * 60_000_000_000)
+
+# `n` hours.
+fn hours(n: Int) -> Duration:
+    return Duration(n * 3_600_000_000_000)
+
+# `n` days of 24 hours.
+fn days(n: Int) -> Duration:
+    return Duration(n * 86_400_000_000_000)
+
 # The current date and time in UTC.
 fn now() -> DateTime:
     val ns = __realtime_ns()
@@ -217,6 +403,12 @@ fn monotonic_ms() -> Int:
 # Like `monotonic_ms`, in nanoseconds.
 fn monotonic_ns() -> Int:
     return __monotonic_ns()
+
+# A clock that only moves forward, for measuring how long something takes:
+# `time.monotonic() - start` is a Duration. A reading on its own means nothing
+# (it counts from an unspecified moment, such as when the computer started).
+fn monotonic() -> Duration:
+    return Duration(__monotonic_ns())
 
 # Pause the program for `ms` milliseconds.
 fn sleep_ms(ms: Int):
@@ -344,6 +536,18 @@ fn _pad(n: Int, width: Int) -> String:
     while s.len() < width:
         s = "0" + s
     return s
+
+# `n / unit` as a decimal with up to `digits` digits after the point, without
+# trailing zeros: `_decimal(1_500, 1000, 3)` is "1.5".
+fn _decimal(n: Int, unit: Int, digits: Int) -> String:
+    var frac = n % unit
+    if frac == 0:
+        return (n / unit).to_string()
+    var width = digits
+    while frac % 10 == 0:
+        frac /= 10
+        width -= 1
+    return f"{n / unit}.{_pad(frac, width)}"
 
 fn _fraction(nanos: Int) -> String:
     if nanos == 0:

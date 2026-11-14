@@ -1,0 +1,7 @@
+# expect-error: `fn <=>` compares two `V`s: its parameter must be `V`
+struct V:
+    x: Float
+    fn <=>(self, other: Float) -> Int:
+        return self.x <=> other
+fn main():
+    pass

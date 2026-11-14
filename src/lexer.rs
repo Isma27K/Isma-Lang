@@ -438,6 +438,7 @@ impl<'a> Lexer<'a> {
             (b'?', b'.') => (Tok::QuestionDot, 2),
             (b'?', _) => (Tok::Question, 1),
             (b'|', n) if n != b'|' => (Tok::Pipe, 1),
+            (b'<', b'=') if self.peek_at(2) == b'>' => (Tok::Spaceship, 3),
             (b'<', b'=') => (Tok::Le, 2),
             (b'>', b'=') => (Tok::Ge, 2),
             (b'+', b'=') => (Tok::PlusEq, 2),

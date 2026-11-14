@@ -1,4 +1,4 @@
-# expect-error: `==` works on enums whose variants carry no data
+# expect-error: `==` works by itself on enums whose variants carry no data
 enum Shape:
     Circle(radius: Float)
     Rect(w: Float, h: Float)

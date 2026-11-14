@@ -367,6 +367,7 @@ fn binop_str(b: BinOp) -> &'static str {
         BinOp::Le => "<=",
         BinOp::Gt => ">",
         BinOp::Ge => ">=",
+        BinOp::Cmp => "<=>",
         _ => "?",
     }
 }

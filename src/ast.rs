@@ -265,6 +265,8 @@ pub enum BinOp {
     Le,
     Gt,
     Ge,
+    /// `a <=> b`: -1, 0 or 1.
+    Cmp,
     And,
     Or,
 }
@@ -283,14 +285,28 @@ impl BinOp {
             BinOp::Le => "<=",
             BinOp::Gt => ">",
             BinOp::Ge => ">=",
+            BinOp::Cmp => "<=>",
             BinOp::And => "and",
             BinOp::Or => "or",
         }
     }
 
+    /// Does it produce a `Bool` from two values? (`<=>` produces an `Int`.)
     pub fn is_comparison(self) -> bool {
         matches!(self, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)
     }
+
+    /// `<`, `<=`, `>`, `>=`: the orderings, which user types get from `<=>`.
+    pub fn is_ordering(self) -> bool {
+        matches!(self, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)
+    }
+}
+
+/// The names of operator functions, as written after `fn`.
+pub const OPERATOR_NAMES: &[&str] = &["+", "-", "*", "/", "%", "==", "<=>", "[]", "[]="];
+
+pub fn is_operator_name(name: &str) -> bool {
+    OPERATOR_NAMES.contains(&name)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

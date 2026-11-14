@@ -23,6 +23,89 @@ struct FuncSig {
     span: Span,
 }
 
+/// What an operator function defines: `fn +(self, other: T)` is `Add`, and
+/// so on. `-` is `Sub` with a parameter and `Neg` without one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum OpKind {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    Neg,
+    Eq,
+    Cmp,
+    Get,
+    Set,
+}
+
+impl OpKind {
+    /// The operator function `name` with `params` parameters besides `self`.
+    fn of_fn(name: &str, params: usize) -> Option<OpKind> {
+        Some(match (name, params) {
+            ("+", 1) => OpKind::Add,
+            ("-", 1) => OpKind::Sub,
+            ("-", 0) => OpKind::Neg,
+            ("*", 1) => OpKind::Mul,
+            ("/", 1) => OpKind::Div,
+            ("%", 1) => OpKind::Mod,
+            ("==", 1) => OpKind::Eq,
+            ("<=>", 1) => OpKind::Cmp,
+            ("[]", 1) => OpKind::Get,
+            ("[]=", 2) => OpKind::Set,
+            _ => return None,
+        })
+    }
+
+    /// The operator function that implements `op` (`!=` is `==`, `<` is `<=>`...).
+    fn of_binop(op: BinOp) -> OpKind {
+        match op {
+            BinOp::Add => OpKind::Add,
+            BinOp::Sub => OpKind::Sub,
+            BinOp::Mul => OpKind::Mul,
+            BinOp::Div => OpKind::Div,
+            BinOp::Mod => OpKind::Mod,
+            BinOp::Eq | BinOp::Ne => OpKind::Eq,
+            BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Cmp => OpKind::Cmp,
+            BinOp::And | BinOp::Or => unreachable!("not an operator function"),
+        }
+    }
+
+    /// For symbol names in the generated code.
+    fn mangled(name: &str) -> &'static str {
+        match name {
+            "+" => "add",
+            "-" => "sub",
+            "*" => "mul",
+            "/" => "div",
+            "%" => "mod",
+            "==" => "eq",
+            "<=>" => "cmp",
+            "[]" => "get",
+            _ => "set",
+        }
+    }
+}
+
+/// The struct or enum behind a type (looking through `?`): the types that can have operator functions.
+fn user_type(t: &Type) -> Option<StructId> {
+    match t.non_null() {
+        Type::Struct(s) | Type::Enum(s, _) => Some(*s),
+        _ => None,
+    }
+}
+
+/// The type an operator expression has when its operands are broken.
+fn result_on_error(op: BinOp) -> Type {
+    if op.is_comparison() {
+        Type::Bool
+    } else if op == BinOp::Cmp {
+        Type::Int
+    } else {
+        Type::Error
+    }
+}
+
 /// `import geometry`: a module bound to a name in one file.
 struct ImportInfo {
     module_ns: usize,
@@ -169,6 +252,8 @@ pub struct Checker {
     /// Names whose import failed (already reported): their uses stay quiet.
     failed_imports: std::collections::HashSet<(usize, String)>,
     methods: HashMap<(StructId, String), FuncId>,
+    /// Operator functions; several per kind when they take different parameter types.
+    operators: HashMap<(StructId, OpKind), Vec<FuncId>>,
     diags: Vec<Diagnostic>,
     // per-function state
     locals: Vec<TLocal>,
@@ -214,6 +299,7 @@ pub fn analyze(files: &[SourceFile]) -> Analysis {
         names: HashMap::new(),
         failed_imports: Default::default(),
         methods: HashMap::new(),
+        operators: HashMap::new(),
         diags: Vec::new(),
         locals: Vec::new(),
         scopes: Vec::new(),
@@ -724,6 +810,14 @@ impl Checker {
                     }
                     Item::Fn(f) => {
                         let name = &f.name.name;
+                        if is_operator_name(name) {
+                            self.err(
+                                Diagnostic::error(format!("`fn {name}` must be a method of a struct or enum"), f.sig_span)
+                                    .with_primary("operator function outside a type")
+                                    .with_help(format!("define it inside the type it works on, taking `self`: `fn {name}(self, other: T) -> ...`")),
+                            );
+                            continue;
+                        }
                         if let Some(self_span) = f.self_param {
                             self.err(Diagnostic::error("`self` is only allowed in methods inside a `struct`", self_span));
                         }
@@ -1034,6 +1128,13 @@ impl Checker {
     fn declare_methods<'p>(&mut self, sid: StructId, methods: &'p [FnDecl], fields: &[&str], ns: usize, bodies: &mut Vec<(&'p FnDecl, Option<StructId>, usize)>) {
         let tname = self.structs[sid].name.clone();
         for m in methods {
+            if is_operator_name(&m.name.name) && m.self_param.is_some() {
+                if let Some(fid) = self.declare_operator(sid, m) {
+                    self.ide.structs[sid].methods.push(fid);
+                    bodies.push((m, Some(sid), ns));
+                }
+                continue;
+            }
             if fields.contains(&m.name.name.as_str()) {
                 self.err(Diagnostic::error(format!("`{}` is both a field and a method of `{tname}`", m.name.name), m.name.span));
                 continue;
@@ -1058,6 +1159,216 @@ impl Checker {
             self.ide.structs[sid].methods.push(fid);
             bodies.push((m, Some(sid), ns));
         }
+    }
+
+    /// `fn +(self, other: Vec2) -> Vec2` in struct or enum `sid`: check its
+    /// shape and register it. `None` if it is too malformed to have a body checked.
+    fn declare_operator(&mut self, sid: StructId, m: &FnDecl) -> Option<FuncId> {
+        let sym = m.name.name.as_str();
+        let tname = self.structs[sid].name.clone();
+        let short = tname.rsplit('.').next().unwrap_or(&tname).to_string();
+        let Some(kind) = OpKind::of_fn(sym, m.params.len()) else {
+            let shape = match sym {
+                "-" => "`fn -` takes one parameter (for `a - b`) or none (for `-a`) besides `self`".to_string(),
+                "[]=" => "`fn []=` takes the index and the new value: `fn []=(self, i: Int, value: T)`".to_string(),
+                "[]" => "`fn []` takes the index: `fn [](self, i: Int) -> T`".to_string(),
+                _ => format!("`fn {sym}` takes one parameter besides `self`: `fn {sym}(self, other: {short}) -> ...`"),
+            };
+            self.err(Diagnostic::error(format!("wrong number of parameters for `fn {sym}`"), m.sig_span).with_primary("wrong shape").with_note(shape));
+            return None;
+        };
+        let fid = self.declare_fn(m, Some(sid));
+        let (params, ret) = (self.funcs[fid].params.clone(), self.funcs[fid].ret.clone());
+        let me = self.def_types[sid].clone();
+        let span = m.sig_span;
+        let want = match kind {
+            OpKind::Eq => Some(Type::Bool),
+            OpKind::Cmp => Some(Type::Int),
+            OpKind::Set => Some(Type::Unit),
+            _ => None,
+        };
+        match want {
+            Some(w) if ret != w && !ret.is_error() => {
+                let d = match kind {
+                    OpKind::Eq => Diagnostic::error("`fn ==` must return `Bool`", span).with_note("`!=` is its opposite"),
+                    OpKind::Cmp => Diagnostic::error("`fn <=>` must return `Int`", span)
+                        .with_note("negative when `self` comes first, 0 when equal, positive when it comes after (`a <=> b` on numbers and strings gives -1, 0 or 1)"),
+                    _ => Diagnostic::error("`fn []=` must not return a value", span),
+                };
+                self.err(d.with_primary("wrong return type"));
+            }
+            None if ret == Type::Unit => {
+                let example = if kind == OpKind::Get { "T".to_string() } else { short.clone() };
+                self.err(
+                    Diagnostic::error(format!("`fn {sym}` must return a value"), span)
+                        .with_primary("no return type")
+                        .with_help(format!("add one, e.g. `-> {example}`")),
+                );
+            }
+            _ => {}
+        }
+        if matches!(kind, OpKind::Eq | OpKind::Cmp) && params[1].1 != me && !params[1].1.is_error() {
+            let found = self.tn(&params[1].1);
+            self.err(
+                Diagnostic::error(format!("`fn {sym}` compares two `{short}`s: its parameter must be `{short}`"), span)
+                    .with_primary(format!("this takes `{found}`")),
+            );
+        }
+        let others = self.operators.get(&(sid, kind)).cloned().unwrap_or_default();
+        let single = matches!(kind, OpKind::Neg | OpKind::Eq | OpKind::Cmp);
+        let clash = others.iter().copied().find(|&o| single || self.funcs[o].params.get(1).map(|p| &p.1) == params.get(1).map(|p| &p.1));
+        if let Some(prev) = clash {
+            let prev_span = self.funcs[prev].span;
+            let mut d = if single {
+                Diagnostic::error(format!("`{short}` already has `fn {sym}`"), m.name.span)
+            } else {
+                let arg = self.tn(&params[1].1);
+                Diagnostic::error(format!("`{short}` already has `fn {sym}` for `{arg}`"), m.name.span)
+            };
+            d = d.with_label(prev_span, "first defined here");
+            if !single {
+                d = d.with_note(format!("`fn {sym}` can be defined several times with different parameter types, e.g. `fn *(self, k: Int)` and `fn *(self, k: Float)`"));
+            }
+            self.err(d);
+            return Some(fid);
+        }
+        self.operators.entry((sid, kind)).or_default().push(fid);
+        Some(fid)
+    }
+
+    /// Hover and go-to-definition on an operator that calls operator function `fid`.
+    fn operator_use(&mut self, fid: FuncId, span: Span) {
+        let f = &self.ide.functions[fid];
+        let owner = f.owner.map(|o| self.structs[o].name.clone()).unwrap_or_default();
+        let doc = match &f.doc {
+            Some(d) => format!("operator function of `{owner}`\n\n{d}"),
+            None => format!("operator function of `{owner}`"),
+        };
+        let code = f.signature.clone();
+        self.hover(span, code, Some(doc));
+        self.ide.definitions.push((span, self.funcs[fid].span));
+    }
+
+    /// Where `sym` is written between offsets `from` and `to` of the current file.
+    fn token_span(&self, from: u32, to: u32, sym: &str) -> Span {
+        let (base, src) = &self.ns_sources[self.ns];
+        let found = (from >= *base && to >= from)
+            .then(|| src.get((from - base) as usize..(to - base) as usize))
+            .flatten()
+            .and_then(|gap| gap.find(sym));
+        match found {
+            Some(i) => Span { start: from + i as u32, end: from + (i + sym.len()) as u32 },
+            None => Span { start: from, end: to },
+        }
+    }
+
+    /// The overload of operator `kind` of `sid` that takes an argument of type
+    /// `arg` (an exact match first). `Err` holds the overloads that exist.
+    fn find_operator(&self, sid: StructId, kind: OpKind, arg: Option<&Type>) -> Result<FuncId, Vec<FuncId>> {
+        let cands = self.operators.get(&(sid, kind)).cloned().unwrap_or_default();
+        let Some(arg) = arg else { return cands.first().copied().ok_or(cands) };
+        let param = |f: FuncId| self.funcs[f].params[1].1.clone();
+        cands
+            .iter()
+            .copied()
+            .find(|&f| param(f) == *arg)
+            .or_else(|| cands.iter().copied().find(|&f| arg.compatible(&param(f))))
+            .ok_or(cands)
+    }
+
+    /// "`time.DateTime - time.DateTime -> time.Duration`, ..." for an error's note.
+    fn overload_list(&self, lhs: &str, sym: &str, fids: &[FuncId]) -> String {
+        let shown: Vec<String> = fids
+            .iter()
+            .map(|&f| {
+                let arg = self.tn(&self.funcs[f].params[1].1);
+                let ret = self.tn(&self.funcs[f].ret);
+                if sym == "[]" { format!("`{lhs}[{arg}] -> {ret}`") } else { format!("`{lhs} {sym} {arg} -> {ret}`") }
+            })
+            .collect();
+        and_list(&shown)
+    }
+
+    /// Can the program define operator functions on `sid`? (Not on standard-library types.)
+    fn can_extend(&self, sid: StructId) -> bool {
+        self.ns_kinds[self.struct_ns[sid]] != FileKind::Std
+    }
+
+    /// `a + b`, `a == b`, `a < b`, `a <=> b` where `a` is a struct or enum: a
+    /// call to its operator function.
+    #[allow(clippy::too_many_arguments)]
+    fn user_binary(&mut self, op: BinOp, sid: StructId, tl: TExpr, tr: TExpr, lspan: Span, rspan: Span, span: Span) -> TExpr {
+        let kind = OpKind::of_binop(op);
+        let sym = op.symbol();
+        let op_span = self.token_span(lspan.end, rspan.start, sym);
+        let fail = |tl: TExpr, tr: TExpr| Self::mk(TExprKind::Binary(op, Box::new(tl), Box::new(tr)), result_on_error(op), span);
+        if tl.ty.is_nullable() {
+            self.null_use_error(&tl, NullUse::Value);
+            return fail(tl, tr);
+        }
+        let (a, b) = (self.tn(&tl.ty), self.tn(&tr.ty));
+        let short = a.rsplit('.').next().unwrap_or(&a).to_string();
+        let kw = if self.structs[sid].variants.is_some() { "enum" } else { "struct" };
+        let fid = match self.find_operator(sid, kind, Some(&tr.ty)) {
+            Ok(f) => f,
+            Err(cands) if cands.is_empty() => {
+                let msg = if a == b { format!("operator `{sym}` cannot be applied to `{a}`") } else { format!("operator `{sym}` cannot be applied to `{a}` and `{b}`") };
+                let mut d = Diagnostic::error(msg, span).with_label(lspan, format!("this is `{a}`")).with_label(rspan, format!("this is `{b}`"));
+                if self.can_extend(sid) {
+                    d = d.with_help(match kind {
+                        OpKind::Eq => format!("define `fn ==(self, other: {short}) -> Bool` in `{kw} {short}` (`!=` comes with it)"),
+                        OpKind::Cmp => format!("define `fn <=>(self, other: {short}) -> Int` in `{kw} {short}`: it gives `<`, `<=`, `>`, `>=` and `<=>`"),
+                        _ => format!("define `fn {sym}(self, other: {b}) -> {short}` in `{kw} {short}`"),
+                    });
+                    if kind == OpKind::Eq && matches!(tl.ty, Type::Enum(_, true)) {
+                        d = d.with_note("`==` works by itself on enums whose variants carry no data; or use `match` to look at the variant");
+                    }
+                }
+                self.err(d);
+                return fail(tl, tr);
+            }
+            Err(cands) => {
+                if tr.ty.is_nullable() && cands.iter().any(|&f| self.funcs[f].params[1].1 == *tr.ty.non_null()) {
+                    self.null_use_error(&tr, NullUse::Value);
+                    return fail(tl, tr);
+                }
+                let mut d = Diagnostic::error(format!("operator `{sym}` cannot be applied to `{a}` and `{b}`"), span)
+                    .with_label(rspan, format!("this is `{b}`"))
+                    .with_note(format!("`{a}` has {}", self.overload_list(&a, sym, &cands)));
+                let duration = cands.iter().any(|&f| self.tn(&self.funcs[f].params[1].1) == "time.Duration");
+                if duration && matches!(tr.ty, Type::Int) {
+                    let n = self.snippet(rspan).unwrap_or_else(|| "n".into());
+                    d = d.with_help(format!("make a duration from the number, e.g. `time.seconds({n})`, `time.minutes({n})` or `time.millis({n})`"));
+                } else if self.can_extend(sid) && !matches!(kind, OpKind::Eq | OpKind::Cmp) {
+                    d = d.with_help(format!("or define another `fn {sym}(self, other: {b})` in `{kw} {short}`"));
+                }
+                self.err(d);
+                return fail(tl, tr);
+            }
+        };
+        self.operator_use(fid, op_span);
+        let param = self.funcs[fid].params[1].1.clone();
+        let ret = self.funcs[fid].ret.clone();
+        let tr = self.coerce(tr, &param, None);
+        let call = Self::mk(TExprKind::Call(fid, vec![tl, tr]), ret, span);
+        match op {
+            BinOp::Ne => Self::mk(TExprKind::Not(Box::new(call)), Type::Bool, span),
+            _ if op.is_ordering() => {
+                let zero = Self::mk(TExprKind::Int(0), Type::Int, span);
+                Self::mk(TExprKind::Binary(op, Box::new(call), Box::new(zero)), Type::Bool, span)
+            }
+            _ => call,
+        }
+    }
+
+    /// `fn to_string(self) -> String` of a struct or enum, which `print` and f-strings use.
+    fn to_string_method(&self, t: &Type) -> Option<FuncId> {
+        let sid = match t {
+            Type::Struct(s) | Type::Enum(s, _) => *s,
+            _ => return None,
+        };
+        let fid = *self.methods.get(&(sid, "to_string".to_string()))?;
+        (self.funcs[fid].params.len() == 1 && self.funcs[fid].ret == Type::Str).then_some(fid)
     }
 
     /// `Shape.Circle(radius: Float)`
@@ -1100,7 +1411,9 @@ impl Checker {
             Some(sid) => {
                 let sname = &self.structs[sid].name;
                 let short = sname.rsplit('.').next().unwrap_or(sname);
-                let symbol = if self.ns == 0 { format!("isma_m_{short}_{}", f.name.name) } else { format!("isma_m_{msym}__{short}_{}", f.name.name) };
+                // Operator functions get a name, numbered because they can be overloaded.
+                let method = if is_operator_name(&f.name.name) { format!("op_{}{}", OpKind::mangled(&f.name.name), self.funcs.len()) } else { f.name.name.clone() };
+                let symbol = if self.ns == 0 { format!("isma_m_{short}_{method}") } else { format!("isma_m_{msym}__{short}_{method}") };
                 (format!("{sname}.{}", f.name.name), symbol)
             }
             None if self.ns == 0 && f.name.name == "main" => ("main".into(), "isma_main".into()),
@@ -2395,9 +2708,17 @@ impl Checker {
             }
             ExprKind::Index(list, index) => {
                 let tl = self.expr(list, None);
-                let ti = self.expr(index, Some(&Type::Int));
-                let elem = self.index_elem_type(&tl, &ti, target.span);
-                (Place::Index { list: tl, index: ti, span: target.span }, elem)
+                if user_type(&tl.ty).is_some() {
+                    let Some((place, ty)) = self.user_index_place(tl, index, op.is_some(), target.span) else {
+                        let _ = self.expr(value, None);
+                        return None;
+                    };
+                    (place, ty)
+                } else {
+                    let ti = self.expr(index, Some(&Type::Int));
+                    let elem = self.index_elem_type(&tl, &ti, target.span);
+                    (Place::Index { list: tl, index: ti, span: target.span }, elem)
+                }
             }
             _ => {
                 self.err(
@@ -2442,8 +2763,49 @@ impl Checker {
                 self.add_facts(vec![NullPath::local(id)]);
             }
         }
+        let mut compound = op.map(CompoundOp::Builtin);
         match op {
             None => v = self.coerce(v, &place_ty, None),
+            // `v += w` on a struct or enum: its operator function, `v = v + w`.
+            Some(op) if !place_ty.is_nullable() && user_type(&place_ty).is_some() && !v.ty.is_error() => {
+                let sid = user_type(&place_ty).unwrap();
+                let a = self.tn(&place_ty);
+                let sym = op.symbol();
+                let op_span = self.token_span(target.span.end, value.span.start, &format!("{sym}="));
+                match self.find_operator(sid, OpKind::of_binop(op), Some(&v.ty)) {
+                    Ok(fid) if self.funcs[fid].ret == place_ty => {
+                        self.operator_use(fid, op_span);
+                        let param = self.funcs[fid].params[1].1.clone();
+                        v = self.coerce(v, &param, None);
+                        compound = Some(CompoundOp::Call(fid));
+                    }
+                    Ok(fid) => {
+                        let ret = self.tn(&self.funcs[fid].ret);
+                        self.err(
+                            Diagnostic::error(format!("`{sym}=` would change the type of the target from `{a}` to `{ret}`"), span)
+                                .with_label(target.span, format!("this is `{a}`"))
+                                .with_help(format!("`{a} {sym} {}` gives a `{ret}`: store it in a new variable", self.tn(&v.ty))),
+                        );
+                    }
+                    Err(cands) => {
+                        let b = self.tn(&v.ty);
+                        let mut d = Diagnostic::error(format!("cannot apply `{sym}=` to `{a}` and `{b}`"), span)
+                            .with_label(target.span, format!("this is `{a}`"))
+                            .with_label(value.span, format!("this is `{b}`"));
+                        d = if cands.is_empty() {
+                            if self.can_extend(sid) {
+                                let short = a.rsplit('.').next().unwrap_or(&a).to_string();
+                                d.with_help(format!("define `fn {sym}(self, other: {b}) -> {short}` in `{short}`: `x {sym}= y` uses it"))
+                            } else {
+                                d
+                            }
+                        } else {
+                            d.with_note(format!("`{a}` has {}", self.overload_list(&a, sym, &cands)))
+                        };
+                        self.err(d);
+                    }
+                }
+            }
             Some(op) if place_ty.is_nullable() && !place_ty.is_error() && v.ty.compatible(place_ty.non_null()) => {
                 let tn = self.tn(&place_ty);
                 let t = self.snippet(target.span).unwrap_or_else(|| "x".into());
@@ -2479,7 +2841,136 @@ impl Checker {
                 }
             }
         }
-        Some(TStmt::Assign { place, op, value: v, span })
+        Some(TStmt::Assign { place, op: compound, value: v, span })
+    }
+
+    /// `-v` on a struct or enum: its `fn -(self)`.
+    fn user_neg(&mut self, t: TExpr, span: Span) -> TExpr {
+        if t.ty.is_nullable() {
+            self.null_use_error(&t, NullUse::Value);
+            return Self::error_expr(span);
+        }
+        let sid = user_type(&t.ty).unwrap();
+        match self.find_operator(sid, OpKind::Neg, None) {
+            Ok(fid) => {
+                self.operator_use(fid, Span { start: span.start, end: span.start + 1 });
+                let ret = self.funcs[fid].ret.clone();
+                Self::mk(TExprKind::Call(fid, vec![t]), ret, span)
+            }
+            Err(_) => {
+                let found = self.tn(&t.ty);
+                let mut d = Diagnostic::error(format!("cannot negate a value of type `{found}`"), span);
+                if self.can_extend(sid) {
+                    let short = found.rsplit('.').next().unwrap_or(&found).to_string();
+                    d = d.with_help(format!("define `fn -(self) -> {short}` in `{short}`"));
+                }
+                self.err(d);
+                Self::error_expr(span)
+            }
+        }
+    }
+
+    /// `grid[i]` on a struct or enum: its `fn [](self, i: T)`.
+    fn user_index(&mut self, tl: TExpr, index: &Expr, span: Span) -> TExpr {
+        if tl.ty.is_nullable() {
+            self.null_use_error(&tl, NullUse::Index);
+            let _ = self.expr(index, None);
+            return Self::error_expr(span);
+        }
+        let sid = user_type(&tl.ty).unwrap();
+        let ti = self.expr(index, None);
+        if ti.ty.is_error() {
+            return Self::error_expr(span);
+        }
+        let brackets = Span { start: tl.span.end, end: span.end };
+        match self.find_operator(sid, OpKind::Get, Some(&ti.ty)) {
+            Ok(fid) => {
+                self.operator_use(fid, brackets);
+                let param = self.funcs[fid].params[1].1.clone();
+                let ret = self.funcs[fid].ret.clone();
+                let ti = self.coerce(ti, &param, None);
+                Self::mk(TExprKind::Call(fid, vec![tl, ti]), ret, span)
+            }
+            Err(cands) => {
+                let (a, b) = (self.tn(&tl.ty), self.tn(&ti.ty));
+                let d = if cands.is_empty() {
+                    let mut d = Diagnostic::error(format!("cannot index into a value of type `{a}`"), tl.span).with_primary("not a list");
+                    if self.can_extend(sid) {
+                        let short = a.rsplit('.').next().unwrap_or(&a).to_string();
+                        d = d.with_help(format!("define `fn [](self, i: {b}) -> T` in `{short}` to read `x[i]`"));
+                    }
+                    d
+                } else {
+                    Diagnostic::error(format!("`{a}` can't be indexed with `{b}`"), ti.span)
+                        .with_primary(format!("this is `{b}`"))
+                        .with_note(format!("`{a}` has {}", self.overload_list(&a, "[]", &cands)))
+                };
+                self.err(d);
+                Self::error_expr(span)
+            }
+        }
+    }
+
+    /// `grid[i] = v` (and `grid[i] op= v`, which also reads it) on a struct or
+    /// enum: the place, and the type of value it takes.
+    fn user_index_place(&mut self, tl: TExpr, index: &Expr, compound: bool, span: Span) -> Option<(Place, Type)> {
+        if tl.ty.is_nullable() {
+            self.null_use_error(&tl, NullUse::Index);
+            let _ = self.expr(index, None);
+            return None;
+        }
+        let sid = user_type(&tl.ty).unwrap();
+        let ti = self.expr(index, None);
+        if ti.ty.is_error() {
+            return None;
+        }
+        let (a, b) = (self.tn(&tl.ty), self.tn(&ti.ty));
+        let short = a.rsplit('.').next().unwrap_or(&a).to_string();
+        let brackets = Span { start: tl.span.end, end: span.end };
+        let set = match self.find_operator(sid, OpKind::Set, Some(&ti.ty)) {
+            Ok(f) => f,
+            Err(cands) => {
+                let mut d = if cands.is_empty() {
+                    Diagnostic::error(format!("cannot assign to an index of `{a}`"), span).with_primary("no `fn []=`")
+                } else {
+                    let shown: Vec<String> = cands.iter().map(|&f| format!("`{}`", self.tn(&self.funcs[f].params[1].1))).collect();
+                    Diagnostic::error(format!("`{a}` can't be assigned to by an index of type `{b}`"), ti.span)
+                        .with_note(format!("its `fn []=` takes {}", and_list(&shown)))
+                };
+                if cands.is_empty() && self.can_extend(sid) {
+                    if self.operators.contains_key(&(sid, OpKind::Get)) {
+                        d = d.with_note(format!("`{short}` has `fn []`, so `x[i]` can be read but not assigned"));
+                    }
+                    d = d.with_help(format!("define `fn []=(self, i: {b}, value: T)` in `{short}`"));
+                }
+                self.err(d);
+                return None;
+            }
+        };
+        self.operator_use(set, brackets);
+        let index_ty = self.funcs[set].params[1].1.clone();
+        let ty = self.funcs[set].params[2].1.clone();
+        let get = if compound {
+            match self.find_operator(sid, OpKind::Get, Some(&ti.ty)) {
+                Ok(g) if self.funcs[g].ret == ty => Some(g),
+                Ok(g) => {
+                    let (got, want) = (self.tn(&self.funcs[g].ret), self.tn(&ty));
+                    self.err(Diagnostic::error(format!("`fn []` of `{a}` returns `{got}` but `fn []=` takes `{want}`, so `x[i] op= v` can't work"), span));
+                    return None;
+                }
+                Err(_) => {
+                    self.err(
+                        Diagnostic::error(format!("`x[i] op= v` needs to read `x[i]` too, but `{a}` has no `fn []`"), span)
+                            .with_help(format!("define `fn [](self, i: {b}) -> {}` in `{short}`", self.tn(&ty))),
+                    );
+                    return None;
+                }
+            }
+        } else {
+            None
+        };
+        let ti = self.coerce(ti, &index_ty, None);
+        Some((Place::Custom { obj: tl, index: ti, get, set, ty: ty.clone() }, ty))
     }
 
     /// Check that `e` fits where a value of type `expected` is needed, turning
@@ -2693,6 +3184,7 @@ impl Checker {
             ExprKind::Unary(op, inner) => {
                 let t = self.expr(inner, None);
                 match op {
+                    UnOp::Neg if user_type(&t.ty).is_some() => self.user_neg(t, span),
                     UnOp::Neg => {
                         if matches!(&t.ty, Type::Nullable(i) if i.is_numeric()) {
                             self.null_use_error(&t, NullUse::Value);
@@ -2772,6 +3264,9 @@ impl Checker {
             }
             ExprKind::Index(list, index) => {
                 let tl = self.expr(list, None);
+                if user_type(&tl.ty).is_some() {
+                    return self.user_index(tl, index, span);
+                }
                 let ti = self.expr(index, Some(&Type::Int));
                 let elem = self.index_elem_type(&tl, &ti, span);
                 Self::mk(TExprKind::Index(Box::new(tl), Box::new(ti)), elem, span)
@@ -2936,13 +3431,16 @@ impl Checker {
 
     /// Convert a value to String for f-strings.
     fn stringify(&mut self, t: TExpr, span: Span) -> TExpr {
+        if let Some(fid) = self.to_string_method(&t.ty) {
+            return Self::mk(TExprKind::Call(fid, vec![t]), Type::Str, span);
+        }
         match &t.ty {
             Type::Str => t,
             Type::Int | Type::Float | Type::Bool | Type::Enum(_, false) => Self::mk(TExprKind::Builtin(Builtin::ToStr, vec![t]), Type::Str, span),
             Type::Error => t,
             Type::Null => Self::mk(TExprKind::Str("null".into()), Type::Str, span),
             // `x?.to_string() ?: "null"`
-            Type::Nullable(inner) if inner.is_primitive() => {
+            Type::Nullable(inner) if inner.is_primitive() || self.to_string_method(inner).is_some() => {
                 let inner = (**inner).clone();
                 let binder = self.hidden_local(inner.clone());
                 let it = Self::mk(TExprKind::Local(binder), inner, span);
@@ -2953,10 +3451,14 @@ impl Checker {
             }
             other => {
                 let found = self.tn(other);
-                self.err(
-                    Diagnostic::error(format!("cannot format a value of type `{found}` in an f-string"), span)
-                        .with_note("only `Int`, `Float`, `Bool` and `String` (and their nullable versions) can be formatted"),
-                );
+                let mut d = Diagnostic::error(format!("cannot format a value of type `{found}` in an f-string"), span)
+                    .with_note("numbers, `Bool`, `String`, enums without data, and types with a `fn to_string(self) -> String` method can be formatted");
+                if let Some(sid) = user_type(other).filter(|s| self.can_extend(*s)) {
+                    let kw = if self.structs[sid].variants.is_some() { "enum" } else { "struct" };
+                    let short = found.rsplit('.').next().unwrap_or(&found).to_string();
+                    d = d.with_help(format!("give `{kw} {short}` a method `fn to_string(self) -> String`"));
+                }
+                self.err(d);
                 Self::error_expr(span)
             }
         }
@@ -2984,8 +3486,16 @@ impl Checker {
         let tl = self.expr(l, None);
         let tr = self.expr(r, Some(&tl.ty));
         if tl.ty.is_error() || tr.ty.is_error() {
-            let ty = if op.is_comparison() { Type::Bool } else { Type::Error };
-            return Self::mk(TExprKind::Binary(op, Box::new(tl), Box::new(tr)), ty, span);
+            return Self::mk(TExprKind::Binary(op, Box::new(tl), Box::new(tr)), result_on_error(op), span);
+        }
+        // Structs and enums: their operator functions (enums without data have `==` built in).
+        if let Some(sid) = user_type(&tl.ty) {
+            let builtin_eq = matches!(op, BinOp::Eq | BinOp::Ne)
+                && matches!(tl.ty.non_null(), Type::Enum(_, false))
+                && !self.operators.contains_key(&(sid, OpKind::Eq));
+            if !builtin_eq {
+                return self.user_binary(op, sid, tl, tr, l.span, r.span, span);
+            }
         }
         if tl.ty.is_nullable() || tr.ty.is_nullable() {
             let base = tl.ty.non_null().clone();
@@ -2998,15 +3508,14 @@ impl Checker {
                 }
                 let works = match op {
                     BinOp::Add => matches!(base, Type::Int | Type::Float | Type::Str),
-                    BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => matches!(base, Type::Int | Type::Float | Type::Str),
+                    BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Cmp => matches!(base, Type::Int | Type::Float | Type::Str),
                     BinOp::Eq | BinOp::Ne => false,
                     _ => base.is_numeric(),
                 };
                 if works {
                     let culprit = if tl.ty.is_nullable() { &tl } else { &tr };
                     self.null_use_error(culprit, NullUse::Value);
-                    let ty = if op.is_comparison() { Type::Bool } else { Type::Error };
-                    return Self::mk(TExprKind::Binary(op, Box::new(tl), Box::new(tr)), ty, span);
+                    return Self::mk(TExprKind::Binary(op, Box::new(tl), Box::new(tr)), result_on_error(op), span);
                 }
             }
         }
@@ -3016,7 +3525,7 @@ impl Checker {
                 BinOp::Add => matches!(tl.ty, Type::Int | Type::Float | Type::Str),
                 BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => tl.ty.is_numeric(),
                 BinOp::Eq | BinOp::Ne => tl.ty.is_primitive(),
-                BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => matches!(tl.ty, Type::Int | Type::Float | Type::Str),
+                BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Cmp => matches!(tl.ty, Type::Int | Type::Float | Type::Str),
                 BinOp::And | BinOp::Or => unreachable!(),
             };
         if !ok {
@@ -3036,15 +3545,12 @@ impl Checker {
                 (Type::Str, Type::Int | Type::Float | Type::Bool) | (Type::Int | Type::Float | Type::Bool, Type::Str) if op == BinOp::Add => {
                     d.with_help("use an f-string like f\"{a}{b}\" or call `.to_string()`")
                 }
-                (Type::Struct(sid), _) | (_, Type::Struct(sid)) if self.structs[*sid].name == "time.DateTime" => {
-                    let help = match op {
-                        BinOp::Sub => "to get the time between two moments use `a.millis_since(b)` or `a.seconds_since(b)`",
-                        BinOp::Add => "to move a moment use `.add_seconds(n)`, `.add_minutes(n)`, `.add_days(n)`, `.add_months(n)`...",
-                        BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => "to compare moments use `a.is_before(b)`, `a.is_after(b)` or `a.compare(b)`",
-                        BinOp::Eq | BinOp::Ne => "to check for the same moment use `a.equals(b)`",
-                        _ => "use the methods of `time.DateTime` (e.g. `millis_since`, `add_seconds`)",
-                    };
-                    d.with_help(help).with_note("Isma has no operator overloading: operators work on numbers, `Bool` and `String`")
+                // `2.0 * v`: operator functions belong to the left operand.
+                (_, rt) if matches!(op, BinOp::Add | BinOp::Mul)
+                    && user_type(rt).is_some_and(|sid| self.find_operator(sid, OpKind::of_binop(op), Some(&tl.ty)).is_ok()) =>
+                {
+                    let (ls, rs) = (self.snippet(l.span).unwrap_or_else(|| "a".into()), self.snippet(r.span).unwrap_or_else(|| "b".into()));
+                    d.with_help(format!("write `{rs} {sym} {ls}`: an operator function belongs to the type on the left"))
                 }
                 (Type::Enum(..), _) | (_, Type::Enum(..)) if op.is_comparison() => d
                     .with_note("`==` works on enums whose variants carry no data; this one's do")
@@ -3055,10 +3561,15 @@ impl Checker {
                 _ => d,
             };
             self.err(d);
-            let ty = if op.is_comparison() { Type::Bool } else { Type::Error };
-            return Self::mk(TExprKind::Binary(op, Box::new(tl), Box::new(tr)), ty, span);
+            return Self::mk(TExprKind::Binary(op, Box::new(tl), Box::new(tr)), result_on_error(op), span);
         }
-        let ty = if op.is_comparison() { Type::Bool } else { tl.ty.clone() };
+        let ty = if op.is_comparison() {
+            Type::Bool
+        } else if op == BinOp::Cmp {
+            Type::Int
+        } else {
+            tl.ty.clone()
+        };
         Self::mk(TExprKind::Binary(op, Box::new(tl), Box::new(tr)), ty, span)
     }
 
@@ -3475,17 +3986,27 @@ impl Checker {
             match &param {
                 Some(p) => t = self.coerce(t, p, None),
                 // print accepts any primitive, and prints `null` for a null one
-                None if t.ty == Type::Null || t.ty.is_nullable() && t.ty.non_null().is_primitive() || matches!(t.ty, Type::Enum(_, false)) => {
+                None if t.ty == Type::Null
+                    || t.ty.is_nullable() && t.ty.non_null().is_primitive()
+                    || matches!(t.ty, Type::Enum(_, false))
+                    || self.to_string_method(t.ty.non_null()).is_some() =>
+                {
                     t = self.stringify(t, a.value.span)
                 }
                 None => {
                     if !t.ty.is_primitive() && !t.ty.is_error() {
                         let found = self.tn(&t.ty);
-                        self.err(
-                            Diagnostic::error(format!("`print` cannot print a value of type `{found}`"), a.value.span)
-                                .with_note("`print` accepts `Int`, `Float`, `Bool` and `String` (and their nullable versions)")
-                                .with_help("print individual fields, or use an f-string"),
-                        );
+                        let mut d = Diagnostic::error(format!("`print` cannot print a value of type `{found}`"), a.value.span)
+                            .with_note("`print` accepts numbers, `Bool`, `String`, enums without data, and types with a `fn to_string(self) -> String` method");
+                        d = match user_type(&t.ty).filter(|s| self.can_extend(*s)) {
+                            Some(sid) => {
+                                let kw = if self.structs[sid].variants.is_some() { "enum" } else { "struct" };
+                                let short = found.rsplit('.').next().unwrap_or(&found).trim_end_matches('?').to_string();
+                                d.with_help(format!("give `{kw} {short}` a method `fn to_string(self) -> String`, or print its fields"))
+                            }
+                            None => d.with_help("print individual fields, or use an f-string"),
+                        };
+                        self.err(d);
                     }
                 }
             }
@@ -3703,7 +4224,7 @@ fn contains_break(stmts: &[TStmt]) -> bool {
                 || match place {
                     Place::Local(_) => false,
                     Place::Field { obj, .. } => expr_breaks(obj),
-                    Place::Index { list, index, .. } => expr_breaks(list) || expr_breaks(index),
+                    Place::Index { list, index, .. } | Place::Custom { obj: list, index, .. } => expr_breaks(list) || expr_breaks(index),
                 }
         }
         TStmt::If { branches, else_block } => {

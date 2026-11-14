@@ -1,0 +1,5 @@
+# expect-error: make a duration from the number, e.g. `time.seconds(5)`
+import time
+fn main():
+    val later = time.now() + 5
+    print(later)

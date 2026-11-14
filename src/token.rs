@@ -71,6 +71,8 @@ pub enum Tok {
     Le,
     Gt,
     Ge,
+    /// `<=>` (three-way comparison)
+    Spaceship,
     PlusEq,
     MinusEq,
     StarEq,
@@ -170,6 +172,7 @@ impl fmt::Display for Tok {
             Tok::Le => "`<=`",
             Tok::Gt => "`>`",
             Tok::Ge => "`>=`",
+            Tok::Spaceship => "`<=>`",
             Tok::PlusEq => "`+=`",
             Tok::MinusEq => "`-=`",
             Tok::StarEq => "`*=`",

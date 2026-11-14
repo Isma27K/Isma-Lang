@@ -1,0 +1,8 @@
+# expect-error: `Row` has `fn []`, so `x[i]` can be read but not assigned
+struct Row:
+    var cells: List[Int]
+    fn [](self, i: Int) -> Int:
+        return self.cells[i]
+fn main():
+    val r = Row([1, 2])
+    r[0] = 5

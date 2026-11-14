@@ -1,4 +1,4 @@
-# expect-error: `print` cannot print a value of type `P`
+# expect-error: give `struct P` a method `fn to_string(self) -> String`, or print its fields
 struct P:
     x: Int
 fn main():

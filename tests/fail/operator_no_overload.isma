@@ -1,0 +1,7 @@
+# expect-error: `V` has `V * Float -> V`
+struct V:
+    x: Float
+    fn *(self, k: Float) -> V:
+        return V(self.x * k)
+fn main():
+    print((V(1.0) * 2).x)

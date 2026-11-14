@@ -918,8 +918,40 @@ impl<'a> Codegen<'a> {
         v
     }
 
+    /// `<=>` from two `i1` results: `(a > b) - (a < b)`.
+    fn three_way(&mut self, gt: &str, lt: &str) -> String {
+        let g = self.fresh();
+        self.emit(format!("{g} = zext i1 {gt} to i64"));
+        let l = self.fresh();
+        self.emit(format!("{l} = zext i1 {lt} to i64"));
+        let r = self.fresh();
+        self.emit(format!("{r} = sub i64 {g}, {l}"));
+        r
+    }
+
     /// Apply a (non-short-circuit) binary operator to already-evaluated operands.
     fn binop_values(&mut self, op: BinOp, ty: &Type, a: &str, b: &str, span: Span) -> String {
+        if op == BinOp::Cmp {
+            let (gt, lt) = (self.fresh(), self.fresh());
+            match ty {
+                Type::Int => {
+                    self.emit(format!("{gt} = icmp sgt i64 {a}, {b}"));
+                    self.emit(format!("{lt} = icmp slt i64 {a}, {b}"));
+                }
+                Type::Float => {
+                    self.emit(format!("{gt} = fcmp ogt double {a}, {b}"));
+                    self.emit(format!("{lt} = fcmp olt double {a}, {b}"));
+                }
+                Type::Str => {
+                    let c = self.fresh();
+                    self.emit(format!("{c} = call i64 @isma_str_cmp(ptr {a}, ptr {b})"));
+                    self.emit(format!("{gt} = icmp sgt i64 {c}, 0"));
+                    self.emit(format!("{lt} = icmp slt i64 {c}, 0"));
+                }
+                _ => unreachable!("<=> on {ty:?}"),
+            }
+            return self.three_way(&gt, &lt);
+        }
         let r = self.fresh();
         match ty {
             Type::Int => match op {

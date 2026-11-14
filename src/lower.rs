@@ -7,6 +7,7 @@
 
 use crate::ast::BinOp;
 use crate::mir::*;
+use crate::span::Span;
 use crate::tast::{self, Builtin, TExpr, TExprKind, TFunc, TPat, TPatKind, TProgram, TStmt};
 use crate::types::*;
 
@@ -129,9 +130,7 @@ impl<'a> Lower<'a> {
                             None => Rvalue::Use(v),
                             Some(op) => {
                                 let ty = self.vars[*id].ty.clone();
-                                let t = self.temp(ty.clone());
-                                self.push(Stmt::Assign(t, Rvalue::Binary(*op, ty, Operand::Var(*id), v, *span)));
-                                Rvalue::Use(Operand::Var(t))
+                                Rvalue::Use(self.compound(*op, &ty, Operand::Var(*id), v, *span))
                             }
                         };
                         self.push(Stmt::Assign(*id, r));
@@ -145,9 +144,7 @@ impl<'a> Lower<'a> {
                             Some(op) => {
                                 let cur = self.temp(ty.clone());
                                 self.push(Stmt::Assign(cur, Rvalue::Field(o, *sid, *idx)));
-                                let new = self.temp(ty.clone());
-                                self.push(Stmt::Assign(new, Rvalue::Binary(*op, ty.clone(), Operand::Var(cur), v, *span)));
-                                Operand::Var(new)
+                                self.compound(*op, &ty, Operand::Var(cur), v, *span)
                             }
                         };
                         let old = is_ref(&ty).then(|| self.temp(ty.clone()));
@@ -166,13 +163,27 @@ impl<'a> Lower<'a> {
                             Some(op) => {
                                 let cur = self.temp(ty.clone());
                                 self.push(Stmt::Assign(cur, Rvalue::Index(l, i.clone(), Some(*ispan))));
-                                let new = self.temp(ty.clone());
-                                self.push(Stmt::Assign(new, Rvalue::Binary(*op, ty.clone(), Operand::Var(cur), v, *span)));
-                                Operand::Var(new)
+                                self.compound(*op, &ty, Operand::Var(cur), v, *span)
                             }
                         };
                         let old = is_ref(&ty).then(|| self.temp(ty.clone()));
                         self.push(Stmt::Store { place: Place::Index { list: l, index: i, span: *ispan }, value: v, old });
+                    }
+                    // `grid[i] = v` is `grid.[]=(i, v)`; `grid[i] += v` reads with `[]` first.
+                    tast::Place::Custom { obj, index, get, set, ty } => {
+                        let o = self.operand(obj);
+                        let o = self.as_var(o, &obj.ty);
+                        let i = self.operand(index);
+                        let v = match (op, get) {
+                            (None, _) => v,
+                            (Some(op), Some(get)) => {
+                                let cur = self.temp(ty.clone());
+                                self.push(Stmt::Assign(cur, Rvalue::Call(*get, vec![Operand::Var(o), i.clone()], *span)));
+                                self.compound(*op, ty, Operand::Var(cur), v, *span)
+                            }
+                            (Some(_), None) => unreachable!("checked: `x[i] op= v` needs `fn []`"),
+                        };
+                        self.push(Stmt::Eval(Rvalue::Call(*set, vec![Operand::Var(o), i, v], *span)));
                     }
                 }
             }
@@ -429,6 +440,17 @@ impl<'a> Lower<'a> {
             }
             other => other,
         }
+    }
+
+    /// The new value of `x op= v`, from the current value `cur`.
+    fn compound(&mut self, op: tast::CompoundOp, ty: &Type, cur: Operand, v: Operand, span: Span) -> Operand {
+        let new = self.temp(ty.clone());
+        let r = match op {
+            tast::CompoundOp::Builtin(op) => Rvalue::Binary(op, ty.clone(), cur, v, span),
+            tast::CompoundOp::Call(f) => Rvalue::Call(f, vec![cur, v], span),
+        };
+        self.push(Stmt::Assign(new, r));
+        Operand::Var(new)
     }
 
     fn as_var(&mut self, o: Operand, ty: &Type) -> VarId {

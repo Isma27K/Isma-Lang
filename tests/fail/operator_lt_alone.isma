@@ -1,0 +1,7 @@
+# expect-error: it gives `<`, `<=`, `>` and `>=`
+struct V:
+    x: Float
+    fn <(self, other: V) -> Bool:
+        return self.x < other.x
+fn main():
+    pass

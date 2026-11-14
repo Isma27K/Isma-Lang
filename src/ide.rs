@@ -140,7 +140,8 @@ impl IdeInfo {
                     .collect();
                 for &fid in &s.methods {
                     let f = &self.functions[fid];
-                    if hide_private && f.name.starts_with('_') {
+                    // Operator functions (`fn +`) are used through their operator, not `.`.
+                    if hide_private && f.name.starts_with('_') || crate::ast::is_operator_name(&f.name) {
                         continue;
                     }
                     let doc = match &f.doc {

@@ -315,9 +315,44 @@ impl Parser {
         Ok(None)
     }
 
+    /// A function's name: an identifier, or an operator (`fn +(self, other: T)`).
+    fn fn_name(&mut self) -> PResult<Ident> {
+        let start = self.span();
+        let name = match self.peek() {
+            Tok::Plus => "+",
+            Tok::Minus => "-",
+            Tok::Star => "*",
+            Tok::Slash => "/",
+            Tok::Percent => "%",
+            Tok::EqEq => "==",
+            Tok::Spaceship => "<=>",
+            Tok::LBracket => {
+                self.bump();
+                self.expect(Tok::RBracket)?;
+                let name = if self.eat(&Tok::Assign) { "[]=" } else { "[]" };
+                return Ok(Ident { name: name.into(), span: start.merge(self.prev_span) });
+            }
+            Tok::Lt | Tok::Le | Tok::Gt | Tok::Ge | Tok::NotEq => {
+                let found = self.peek().clone();
+                return self.error_diag(
+                    Diagnostic::error(format!("{found} can't be defined on its own"), start)
+                        .with_primary("not an operator function")
+                        .with_help(if matches!(found, Tok::NotEq) {
+                            "define `fn ==(self, other: T) -> Bool`: `!=` is its opposite"
+                        } else {
+                            "define `fn <=>(self, other: T) -> Int` (negative, 0 or positive): it gives `<`, `<=`, `>` and `>=`"
+                        }),
+                );
+            }
+            _ => return self.expect_ident("function name"),
+        };
+        self.bump();
+        Ok(Ident { name: name.into(), span: start })
+    }
+
     fn fn_decl(&mut self) -> PResult<FnDecl> {
         let start = self.expect(Tok::Fn)?;
-        let name = self.expect_ident("function name")?;
+        let name = self.fn_name()?;
         self.expect(Tok::LParen)?;
         let mut self_param = None;
         let mut params = Vec::new();
@@ -942,6 +977,17 @@ impl Parser {
         self.cmp_expr()
     }
 
+    /// `a <=> b` gives a number, so it binds tighter than `==` and `<`:
+    /// `a <=> b == 0` compares its result.
+    fn spaceship_expr(&mut self) -> PResult<Expr> {
+        let l = self.elvis_expr()?;
+        if self.eat(&Tok::Spaceship) {
+            let r = self.elvis_expr()?;
+            return Ok(Self::binary(BinOp::Cmp, l, r));
+        }
+        Ok(l)
+    }
+
     fn cmp_op(&self) -> Option<BinOp> {
         Some(match self.peek() {
             Tok::EqEq => BinOp::Eq,
@@ -955,10 +1001,10 @@ impl Parser {
     }
 
     fn cmp_expr(&mut self) -> PResult<Expr> {
-        let l = self.elvis_expr()?;
+        let l = self.spaceship_expr()?;
         if let Some(op) = self.cmp_op() {
             self.bump();
-            let r = self.elvis_expr()?;
+            let r = self.spaceship_expr()?;
             let e = Self::binary(op, l, r);
             if self.cmp_op().is_some() {
                 let span = self.span();

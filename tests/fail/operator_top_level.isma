@@ -1,0 +1,5 @@
+# expect-error: `fn +` must be a method of a struct or enum
+fn +(a: Int, b: Int) -> Int:
+    return a
+fn main():
+    pass

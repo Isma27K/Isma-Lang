@@ -1,0 +1,8 @@
+# expect-error: write `v * 2.0`: an operator function belongs to the type on the left
+struct V:
+    x: Float
+    fn *(self, k: Float) -> V:
+        return V(self.x * k)
+fn main():
+    val v = V(1.0)
+    print((2.0 * v).x)

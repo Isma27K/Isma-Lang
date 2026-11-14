@@ -62,7 +62,7 @@ pub struct TLocal {
 #[derive(Debug)]
 pub enum TStmt {
     Let(LocalId, TExpr),
-    Assign { place: Place, op: Option<BinOp>, value: TExpr, span: Span },
+    Assign { place: Place, op: Option<CompoundOp>, value: TExpr, span: Span },
     Expr(TExpr),
     If { branches: Vec<(TExpr, Vec<TStmt>)>, else_block: Option<Vec<TStmt>> },
     While { cond: TExpr, body: Vec<TStmt> },
@@ -112,6 +112,18 @@ pub enum Place {
     Local(LocalId),
     Field { obj: TExpr, sid: StructId, idx: usize },
     Index { list: TExpr, index: TExpr, span: Span },
+    /// `grid[i]` on a type with operator functions: `set` is its `fn []=`,
+    /// `get` its `fn []` (needed by `grid[i] += x`). `ty` is the element type.
+    Custom { obj: TExpr, index: TExpr, get: Option<FuncId>, set: FuncId, ty: Type },
+}
+
+/// What `x op= v` computes from the current value of `x` and `v`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompoundOp {
+    /// On numbers and strings.
+    Builtin(BinOp),
+    /// An operator function: `x = f(x, v)`.
+    Call(FuncId),
 }
 
 #[derive(Debug)]

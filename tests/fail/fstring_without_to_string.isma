@@ -1,0 +1,5 @@
+# expect-error: give `struct V` a method `fn to_string(self) -> String`
+struct V:
+    x: Float
+fn main():
+    print(f"v = {V(1.0)}")

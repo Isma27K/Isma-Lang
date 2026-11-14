@@ -13,6 +13,7 @@ Isma reads like Python, checks like Kotlin and compiles to native code. This gui
 - [Control flow](#control-flow)
 - [Structs and methods](#structs-and-methods)
 - [Enums and `match`](#enums-and-match)
+- [Operator functions](#operator-functions)
 - [Lists](#lists)
 - [Strings and f-strings](#strings-and-f-strings)
 - [Null safety](#null-safety)
@@ -100,7 +101,7 @@ print("n = " + 5)            # error. Write f"n = {5}" or "n = " + 5.to_string()
 
 On top of that:
 - every path through a function with a return type must `return`;
-- `==` only works on `Int`, `Float`, `Bool`, `String` and enums without data, and on their nullable versions (where `null == null`);
+- `==` only works on `Int`, `Float`, `Bool`, `String`, enums without data and their nullable versions (where `null == null`), and on types that define [`fn ==`](#operator-functions). Isma never compares references;
 - a `match` must handle every possible value;
 - comparisons don't chain (`a < b < c` is an error);
 - an expression used as a statement must be a call, so a stray `x == 2` on its own line is caught.
@@ -282,6 +283,61 @@ Since one case always runs, a function whose cases all `return` needs no `return
 
 `match` works with [smart casts](#smart-casts). Inside a case that can't match `null`, the matched variable isn't null. After `case null: return`, it isn't null for the rest of the function. A name bound in a case after `case null:` gets the non-null type.
 
+## Operator functions
+
+A struct or enum gets operators by defining methods named after them:
+
+```python
+struct Vec2:
+    x: Float
+    y: Float
+
+    fn +(self, other: Vec2) -> Vec2:
+        return Vec2(self.x + other.x, self.y + other.y)
+
+    fn *(self, k: Float) -> Vec2:          # vector * number
+        return Vec2(self.x * k, self.y * k)
+
+    fn *(self, other: Vec2) -> Float:      # vector * vector: the dot product
+        return self.x * other.x + self.y * other.y
+
+    fn -(self) -> Vec2:                    # no parameter: `-v`
+        return Vec2(-self.x, -self.y)
+
+    fn ==(self, other: Vec2) -> Bool:      # `==` and `!=`
+        return self.x == other.x and self.y == other.y
+
+    fn <=>(self, other: Vec2) -> Int:      # `<`, `<=`, `>`, `>=`: shorter vectors first
+        return self * self <=> other * other
+
+    fn to_string(self) -> String:          # for `print` and f-strings
+        return f"({self.x}, {self.y})"
+
+fn main():
+    val a = Vec2(1.0, 2.0)
+    var p = a + Vec2(3.0, 4.0) * 2.0
+    p += a                                 # p = p + a
+    print(p)                               # (8.0, 12.0)
+    print(f"{-a} {a * p} {a < p}")         # (-1.0, -2.0) 32.0 true
+```
+
+| Define | To get |
+|---|---|
+| `fn +(self, other: T) -> R`, and `-`, `*`, `/`, `%` | `a + b`; also `a += b` when `R` is the type of `a` |
+| `fn -(self) -> R` | `-a` |
+| `fn ==(self, other: Self) -> Bool` | `a == b` and `a != b` |
+| `fn <=>(self, other: Self) -> Int` | `a < b`, `a <= b`, `a > b`, `a >= b` and `a <=> b`. Return a negative number when `self` comes first, `0` when they're equal, a positive one when it comes after |
+| `fn [](self, i: I) -> T` | `a[i]` |
+| `fn []=(self, i: I, value: T)` | `a[i] = v`. With `fn []` too: `a[i] += v` |
+| `fn to_string(self) -> String` | `print(a)` and `f"{a}"` (an ordinary method, not an operator) |
+
+- **Overloading.** `+ - * / %`, `[]` and `[]=` can be defined several times with different parameter types: the type of the right operand (or index) picks one. So `time.DateTime - time.DateTime` is a [`time.Duration`](time.md#durations), and `time.DateTime - time.Duration` is a `DateTime`.
+- **The left operand decides.** `v * 2.0` calls `Vec2`'s `fn *`, but `2.0 * v` is an error (the compiler suggests swapping them).
+- **`<=>` also works on `Int`, `Float` and `String`**, giving `-1`, `0` or `1`, which keeps comparisons short: `return self.name <=> other.name`. It binds tighter than `==`, so `a <=> b == 0` does what it says.
+- **`==` and `<=>` compare two values of the same type.** `fn ==` and `fn <=>` are defined once per type; there is no automatic `==` for structs.
+- **They're methods.** They live inside a struct or enum, take `self`, and are public. `a + b` compiles to a direct call of `fn +`, so it costs what a method call costs (usually nothing, once inlined), and `acc = acc + v` reuses `acc`'s memory like `acc = acc.add(v)` would.
+- **Not definable:** `and`, `or`, `not`, `!=` (the opposite of `==`) and `<`-style operators on their own (they all come from `<=>`).
+
 ## Lists
 
 ```python
@@ -305,6 +361,7 @@ xs[99]                               # panic: index 99 out of bounds for list of
 ```python
 val s = f"pi is about {3.14159}, 2 + 2 = {2 + 2}, ok = {true}"
 "abc" < "abd"            # comparison is lexicographic
+"abc" <=> "abd"          # -1 (see operator functions)
 " 42 ".to_int()          # 42. Invalid input panics, like Kotlin's toInt().
 "2.5".to_float()
 for c in "héllo".chars():
@@ -494,7 +551,7 @@ Available modules: [`time`](time.md).
 
 | Function | |
 |---|---|
-| `print(x)` | Print an `Int`, `Float`, `Bool`, `String` or enum without data (its variant's name), followed by a newline. A nullable one prints `null` when it is null |
+| `print(x)` | Print an `Int`, `Float`, `Bool`, `String`, enum without data (its variant's name) or a value whose type has a `fn to_string(self) -> String` method, followed by a newline. A nullable one prints `null` when it is null |
 | `input() -> String` | Read one line from stdin, without the newline |
 | `args() -> List[String]` | Command-line arguments passed to the program |
 | `sqrt(x: Float) -> Float` | Square root |
@@ -522,6 +579,7 @@ Panics cover:
 - **No top-level constants.** Everything lives inside functions.
 - **Byte-based strings.** `String.len()` and `substring()` count bytes, and there's no `s[i]` indexing; use `chars()`.
 - **No negative indexing.** `xs[-1]` panics.
-- **No operator overloading.** Compare structs with methods, e.g. `a.equals(b)` or `a.millis_since(b)`.
+- **Operators look at the left operand.** `2.0 * v` can't use `Vec2`'s `fn *`; write `v * 2.0`.
+- **`==` from `fn ==` needs non-null values.** Check for `null` first (a smart cast then does the rest).
 - **`match` is a statement.** It doesn't produce a value; assign or `return` inside its cases.
 - **No generic enums yet.** You can't write `Option[T]` yourself (but `T?` covers the most common use).

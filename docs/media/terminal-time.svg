@@ -15,13 +15,13 @@
 <g font-family="'JetBrains Mono','Fira Code','DejaVu Sans Mono',Menlo,Consolas,monospace" font-size="14" fill="#d7dae0">
 <g class="r" style="animation-delay:0.40s"><text x="20" y="68.0" fill="#39ff78" font-weight="700">$</text></g>
 <g class="t" style="animation:type 0.53s steps(15) 0.55s both"><text y="68.0" xml:space="preserve"><tspan x="36.9" fill="#d7dae0">isma clock.isma</tspan></text></g>
-<g class="r" style="animation-delay:1.38s"><text y="87.0" xml:space="preserve"><tspan x="20.0">UTC now:      2026-11-14T11:35:01.150944057Z</tspan></text></g>
-<g class="r" style="animation-delay:1.41s"><text y="106.0" xml:space="preserve"><tspan x="20.0">Pretty:       Saturday, 14 November 2026 at 11:35</tspan></text></g>
-<g class="r" style="animation-delay:1.44s"><text y="125.0" xml:space="preserve"><tspan x="20.0">Unix seconds: 1794656101</tspan></text></g>
-<g class="r" style="animation-delay:1.48s"><text y="144.0" xml:space="preserve"><tspan x="20.0">New year in 47 days and 12 hours</tspan></text></g>
+<g class="r" style="animation-delay:1.38s"><text y="87.0" xml:space="preserve"><tspan x="20.0">UTC now:      2026-11-14T18:27:25.578237169Z</tspan></text></g>
+<g class="r" style="animation-delay:1.41s"><text y="106.0" xml:space="preserve"><tspan x="20.0">Pretty:       Saturday, 14 November 2026 at 18:27</tspan></text></g>
+<g class="r" style="animation-delay:1.44s"><text y="125.0" xml:space="preserve"><tspan x="20.0">Unix seconds: 1794680845</tspan></text></g>
+<g class="r" style="animation-delay:1.48s"><text y="144.0" xml:space="preserve"><tspan x="20.0">New year in 47 days and 5 hours</tspan></text></g>
 <g class="r" style="animation-delay:1.51s"><text y="163.0" xml:space="preserve"><tspan x="20.0">Moon landing: 20 Jul 1969, 20:17 UTC, a Sunday</tspan></text></g>
 <g class="r" style="animation-delay:1.55s"><text y="182.0" xml:space="preserve"><tspan x="20.0">That was 57 years ago</tspan></text></g>
-<g class="r" style="animation-delay:1.58s"><text y="201.0" xml:space="preserve"><tspan x="20.0">Summed to 14999995 in 4 ms</tspan></text></g>
+<g class="r" style="animation-delay:1.58s"><text y="201.0" xml:space="preserve"><tspan x="20.0">Summed to 14999995 in 4.327ms</tspan></text></g>
 <g class="r" style="animation-delay:1.82s"><text x="20" y="220.0" fill="#39ff78" font-weight="700">$</text><rect class="c" x="36.9" y="209.0" width="8.4" height="16" fill="#39ff78"/></g>
 </g>
 </svg>

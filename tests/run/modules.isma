@@ -13,6 +13,7 @@ from mylib.shapes import util as shape_util
 fn main():
     val p = Point(3.0, 4.0)
     print(p.dist(origin()))
+    print(p + geo.Point(1.0, 1.0))
     val c = geometry.Shape.Circle(p, 2.0)
     val r = S.Rect(geo.Point(0.0, 0.0), 2.0, 5.0)
     print(c.area())
