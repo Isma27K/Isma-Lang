@@ -18,6 +18,7 @@ best_of_3() {
 }
 
 printf "%-8s %10s %10s %10s\n" bench isma rust python
+results=()
 for b in fib sieve; do
     $ISMA build "$b.isma" -o "out/$b-isma"
     rustc -O "$b.rs" -o "out/$b-rust" 2>/dev/null
@@ -27,4 +28,14 @@ for b in fib sieve; do
     tr=$(best_of_3 "out/$b-rust")
     if command -v python3 > /dev/null; then tp="$(best_of_3 python3 "$b.py")ms"; else tp="n/a"; fi
     printf "%-8s %8sms %8sms %10s\n" "$b" "$ti" "$tr" "$tp"
+    results+=("\"$b\": {\"isma\": $ti, \"rust\": $tr, \"python\": ${tp%ms}}")
 done
+# Machine-readable results (used by docs/media/generate.py for the README chart).
+{
+    echo "{"
+    echo "  \"date\": \"$(date -u +%Y-%m-%d)\","
+    echo "  \"cpu\": \"$(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2 | sed 's/^ *//' || uname -m)\","
+    (IFS=,; echo "  ${results[*]}" | sed 's/},"/},\n  "/g')
+    echo "}"
+} > results.json
+echo "wrote bench/results.json"

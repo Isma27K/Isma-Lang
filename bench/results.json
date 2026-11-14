@@ -1,0 +1,6 @@
+{
+  "date": "2026-11-14",
+  "cpu": "AMD Ryzen 5 5500",
+  "fib": {"isma": 44, "rust": 29, "python": 959},
+  "sieve": {"isma": 47, "rust": 43, "python": 2163}
+}

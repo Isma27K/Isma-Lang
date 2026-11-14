@@ -1,155 +1,151 @@
-# Isma
+<p align="center">
+  <img src="docs/media/hero.svg" alt="ISMA: Python's syntax, Kotlin's strictness, Rust's speed" width="100%">
+</p>
 
-**Python's syntax. Kotlin's strictness. Rust's speed.**
+<p align="center">
+  <img src="docs/media/badge-native.svg" alt="compiles to native code">
+  <img src="docs/media/badge-llvm.svg" alt="optimizer: LLVM -O3">
+  <img src="docs/media/badge-tests.svg" alt="test programs passing">
+  <img src="docs/media/badge-editor.svg" alt="editor: VS Code">
+  <img src="docs/media/badge-fun.svg" alt="built for fun">
+</p>
 
-Isma is a compiled programming language written for fun. Programs read like Python, are checked as strictly as Kotlin, and compile ahead of time into native binaries through LLVM, the same optimizer Rust uses.
+<p align="center">
+  <b>Isma</b> is a small programming language that <b>reads like Python</b>, <b>checks like Kotlin</b><br>
+  and <b>compiles to native machine code</b> through LLVM, the optimizer behind Rust.
+</p>
+
+<p align="center">
+  <a href="#a-taste">A taste</a> ·
+  <a href="#quick-start">Quick start</a> ·
+  <a href="docs/language.md">Language guide</a> ·
+  <a href="docs/time.md"><code>time</code> module</a> ·
+  <a href="#editor-support">VS Code</a> ·
+  <a href="#performance">Performance</a> ·
+  <a href="#how-it-works">How it works</a>
+</p>
+
+<br>
+
+<a id="a-taste"></a>
+## 🌱 A taste
 
 ```python
-struct Vec2:
-    var x: Float
+import time
+
+struct Task:
+    name: String
+    var done: Bool
+
+    fn finish(self):
+        self.done = true
+
+fn main():
+    val todo = [Task("write a compiler", false), Task("add a time module", false), Task("take a nap", false)]
+    for task in todo:
+        if task.name != "take a nap":
+            task.finish()
+
+    var finished = 0
+    for task in todo:
+        if task.done:
+            finished += 1
+    val today = time.now()
+    print(f"{finished}/{todo.len()} done on {today.format("%A, %d %B %Y")}")
+```
+
+```console
+$ isma tasks.isma
+2/3 done on Saturday, 14 November 2026
+```
+
+Run a script like Python, or build a standalone native binary:
+
+<p align="center">
+  <img src="docs/media/terminal-run.svg" alt="Terminal: `isma hello.isma` prints Hello from Isma!; `isma build fib.isma -o fib` then `./fib` prints the Fibonacci results; `file` shows it's a native ELF x86-64 executable" width="660">
+</p>
+
+<a id="why-isma"></a>
+## 💡 Why Isma?
+
+<table>
+<tr>
+<td width="33%" valign="top">
+
+### 🐍 Reads like Python
+
+Indentation instead of braces. `for x in list`, `and` / `or` / `not`, f-strings. Run a file with `isma app.isma`, just like `python app.py`, or give it a `#!/usr/bin/env isma` line and run it directly.
+
+</td>
+<td width="33%" valign="top">
+
+### 🛡️ Checks like Kotlin
+
+`val` vs `var`. No `null`, no implicit conversions, no "truthy" values, and every path must `return`. Mistakes are caught before the program runs, with messages that tell you the fix.
+
+</td>
+<td width="33%" valign="top">
+
+### ⚡ Runs like Rust
+
+Compiled ahead of time to a native binary with LLVM `-O3`. Integer overflow and out-of-bounds indexing still stop the program safely, and it ran **21–57× faster than Python** in the [benchmarks](#performance).
+
+</td>
+</tr>
+</table>
+
+<a id="errors"></a>
+## 🧑‍🏫 Errors that teach
+
+Isma's checker is strict, but it explains itself: every error points at the exact spot and usually says how to fix it. Bugs that only show up at run time stop with a clear message and the line they came from:
+
+<p align="center">
+  <img src="docs/media/terminal-errors.svg" alt="Terminal: `isma check oops.isma` reports 'mismatched types: expected Float, found Int' with a hint to use .to_float(), and 'if condition must be a Bool, found Int' with a hint to compare explicitly; `isma crash.isma` prints 10, 20, 30 then 'panic at crash.isma:5:15: index 3 out of bounds for list of length 3'" width="860">
+</p>
+
+<a id="quick-start"></a>
+## 🚀 Quick start
+
+You need [Rust](https://rustup.rs) to build the compiler, and `clang`, which Isma uses to produce native code.
+
+```bash
+./install.sh             # pick [1] default or [2] custom
+isma hello.isma          # run a script
+isma build app.isma -o app && ./app
+```
+
+<details>
+<summary><b>📺 Watch the installer</b>: a hacker-styled installer with default and custom modes, plus a matching uninstaller</summary>
+<br>
+<p align="center">
+  <img src="docs/media/terminal-install.svg" alt="The Isma installer: a green ISMA banner, recon steps (host, cargo, clang), deploy steps (compile, copy to ~/.local/bin, wire PATH, self-test, write manifest) and an ACCESS GRANTED box" width="640">
+</p>
+</details>
+
+| Command | |
+|---|---|
+| `isma app.isma [args...]` | Compile and run. Unchanged scripts are cached and start in **~2 ms** |
+| `isma build app.isma -o app` | A standalone native binary that runs without Isma |
+| `isma check app.isma` | Type-check and lint only |
+| `isma build app.isma --emit-llvm` | Also write the generated LLVM IR |
+| `isma run --debug app.isma` | Build without optimizations (`-O0 -g`) |
+| `./uninstall.sh` | Remove everything Isma installed (default or pick targets) |
+
+Installation details, options and the uninstaller are covered in [docs/install.md](docs/install.md).
+
+<a id="language"></a>
+## 📖 The language in one screen
+
+```python
+import time                                  # the standard library is written in Isma
+
+struct Point:                                # structs with typed fields
+    var x: Float                             # fields are immutable unless `var`
     var y: Float
 
-    fn length(self) -> Float:
+    fn length(self) -> Float:                # methods take `self`
         return sqrt(self.x * self.x + self.y * self.y)
 
-fn fib(n: Int) -> Int:
-    if n < 2:
-        return n
-    return fib(n - 1) + fib(n - 2)
-
-fn main():
-    val v = Vec2(x=3.0, y=4.0)
-    var xs: List[Int] = []
-    for i in 0..10:
-        xs.push(fib(i))
-    print(f"|v| = {v.length()}, fib(9) = {xs[9]}")
-```
-
-```
-$ isma run demo.isma
-|v| = 5.0, fib(9) = 34
-```
-
-## Install
-
-You need Rust (to build the compiler) and clang. Isma uses clang to produce native code, and looks for it in `$ISMA_CC`, then `PATH`, then `/usr/lib/llvm-*/bin`.
-
-```bash
-./install.sh            # interactive: [1] default or [2] custom
-./install.sh -y         # default install, no questions asked
-./install.sh --dir DIR  # install into DIR, no questions asked
-```
-
-- **Default** installs to `~/.local/bin`, adds it to your PATH if needed, and runs a self-test that compiles and runs a hello-world program.
-- **Custom** asks for the directory (`~/.local/bin`, `/usr/local/bin`, `~/.cargo/bin`, or any path you type), whether to edit your PATH, and whether to run the self-test.
-- If the target directory needs root, the installer asks for your sudo password just for copying the binary. Never run the script itself with `sudo`.
-- PATH changes go into your shell config (`~/.bashrc`, `~/.zshrc`, `~/.profile` or a fish `conf.d` file) between `# >>> isma >>>` markers, so they can be removed cleanly.
-
-## Uninstall
-
-```bash
-./uninstall.sh          # interactive: [1] wipe everything or [2] pick targets
-./uninstall.sh -y       # wipe everything, no questions asked
-~/.local/share/isma/uninstall.sh   # same script, still there if the repo is gone
-```
-
-The uninstaller finds every Isma binary, the compile cache, the PATH entries and the install manifest, then shows them as numbered targets. It only deletes things Isma created:
-- a binary named `isma` is removed only if it really is Isma (it checks `--version`);
-- a cache or data folder containing anyone else's files is skipped;
-- your source code is never touched.
-
-Flags for both scripts: `--no-anim` (no animations). Setting `NO_COLOR=1` turns off colors. The uninstaller also takes `--keep-cache`, and the installer takes `--no-path` and `--no-test`. Colors and animations switch off automatically when the output isn't a terminal.
-
-## Usage: just like Python
-
-```bash
-isma hello.isma                  # compile + run, like `python hello.py`
-isma greet.isma Ana Budi         # everything after the script goes to the script
-```
-
-Scripts can carry a shebang line and run directly:
-```python
-#!/usr/bin/env isma
-fn main():
-    for name in args():
-        print(f"Hello, {name}!")
-```
-```bash
-chmod +x greet.isma
-./greet.isma Ana                 # Hello, Ana!
-```
-
-The first run of a script compiles it to native code (about 80 ms). Later runs of the unchanged script reuse the cached binary and start in about **2 ms**, faster than Python's own startup. Editing the script, or upgrading Isma, triggers a recompile automatically. The cache lives in `~/.cache/isma` (override it with `ISMA_CACHE_DIR`), and `isma clean` empties it.
-
-Other commands:
-```bash
-isma build fib.isma -o fib       # standalone native binary; ship it without Isma
-isma check app.isma              # type-check only
-isma build x.isma --emit-llvm    # also write the LLVM IR (x.ll)
-isma run --debug x.isma          # -O0 -g instead of -O3
-```
-
-## Language tour
-
-### Variables: `val` and `var`
-```python
-val name = "Isma"        # immutable, type inferred as String
-var count: Int = 0       # mutable, type written explicitly
-count += 1
-name = "other"           # compile error: cannot assign twice to immutable variable
-```
-Every variable has to be initialized; there is no null. Declaring a name twice in the same scope is an error. An inner block may shadow an outer name.
-
-### Types
-| Type | Notes |
-|---|---|
-| `Int` | 64-bit signed. Overflow **panics** instead of silently wrapping. |
-| `Float` | 64-bit IEEE 754. |
-| `Bool` | `true` / `false`. |
-| `String` | Immutable UTF-8. `+` concatenates. `.len()` counts bytes. |
-| `List[T]` | Growable, bounds-checked, reference semantics. |
-| `struct`s | User-defined, reference semantics (like Python and Kotlin objects). |
-
-### Strict typing (the Kotlin part)
-Isma never converts types for you:
-
-```python
-val a = 1 + 2.0          # error: `+` cannot be applied to `Int` and `Float`
-val b = 1.to_float() + 2.0   # ok
-if count:                # error: condition must be a `Bool`. There's no truthiness.
-if count != 0:           # ok
-print("n = " + 5)        # error. Use f"n = {5}" or 5.to_string()
-```
-
-On top of that:
-- every path through a function with a return type must `return`;
-- `==` only works on `Int`, `Float`, `Bool` and `String`;
-- comparisons don't chain;
-- an expression used as a statement must be a call, so a typo like `x == 2` on its own line is caught.
-
-Errors look like Rust's:
-
-```
-Error: cannot assign twice to immutable variable `count`
-   ╭─[ demo.isma:3:5 ]
-   │
- 3 │     count = count + 2.5
-   │     ──┬──
-   │       ╰──── cannot assign twice to immutable variable
-   │
- 2 │     val count = 10
-   │         ──┬──
-   │           ╰──── `count` is declared with `val` here
-   │
-   │ Help: make it mutable with `var count`
-───╯
-Error: operator `+` cannot be applied to `Int` and `Float`
-   ...
-   │ Help: Isma never converts implicitly; use `.to_float()` on the `Int` side
-```
-
-### Functions
-```python
 fn clamp(x: Int, low: Int, high: Int) -> Int:
     if x < low:
         return low
@@ -157,213 +153,134 @@ fn clamp(x: Int, low: Int, high: Int) -> Int:
         return high
     return x
 
-clamp(15, 0, 10)                 # positional arguments
-clamp(x=15, high=10, low=0)      # named arguments, any order
-```
-Functions can be called before the point where they're defined. A function without `-> T` returns nothing.
-
-### Control flow
-```python
-if a and not b: ...
-elif c or d: ...
-else: ...
-
-while i < 10:
-    i += 1
-
-for i in 0..10:      # 0 to 9
-for i in 1..=10:     # 1 to 10
-for x in my_list:    # loop over elements
-
-break, continue, return, pass
-```
-A block can also sit on the same line: `if x > 0: return x`.
-
-### Structs and methods
-```python
-struct Account:
-    owner: String        # immutable field (the default)
-    var balance: Int     # mutable field
-
-    fn deposit(self, amount: Int):
-        self.balance += amount
-
-val acc = Account("ana", 0)          # or Account(owner="ana", balance=0)
-acc.deposit(50)
-acc.owner = "bob"                    # compile error: immutable field
+fn main():
+    val p = Point(x=3.0, y=4.0)              # `val` can't be reassigned...
+    var count = 0                            # ...`var` can
+    val xs: List[Int] = [5, 3, 8]            # lists are typed and bounds-checked
+    xs.push(clamp(42, 0, 10))
+    for x in xs:                             # loop over a list...
+        count += x
+    for i in 0..3:                           # ...or a range
+        print(f"{i}: {xs[i]}")               # f-strings
+    print(f"|p| = {p.length()}, sum = {count}")
+    print(time.now().to_iso())
 ```
 
-### Lists
-```python
-var xs = [3, 1, 2]                   # List[Int]
-var empty: List[String] = []         # an empty list needs a type annotation
-xs.push(4)
-xs[0] = 10
-val last = xs.pop()
-print(xs.len())
-xs[99]                               # panic: index 99 out of bounds for list of length 3
-```
+The [**language guide**](docs/language.md) covers everything: types, strictness rules, lints, structs, lists, strings, modules, built-ins and panics.
 
-### Strings and f-strings
-```python
-val s = f"pi is about {3.14159}, 2 + 2 = {2 + 2}, ok = {true}"
-"abc" < "abd"            # comparison is lexicographic
-" 42 ".to_int()          # 42. Invalid input panics, like Kotlin's toInt().
-"2.5".to_float()
-```
+<a id="time"></a>
+## 🕰️ Batteries included: `time`
 
-| String method | |
-|---|---|
-| `len() -> Int` | Length in bytes |
-| `chars() -> List[String]` | Each character as a one-character string: `for c in s.chars():` |
-| `substring(start, end) -> String` | Bytes `start..end`; panics if out of range or splitting a character |
-| `contains(s)`, `starts_with(s)`, `ends_with(s)` | `-> Bool` |
-| `to_int()`, `to_float()`, `to_string()` | Conversions (parsing panics on bad input) |
+The first standard-library module handles UTC dates, times and clocks, and it's written in Isma itself. It was cross-checked against Python's `datetime` on 3,000 random dates.
 
-### Modules: `import`
 ```python
 import time
 
 fn main():
-    val now = time.now()        # call module functions as module.function(...)
-    val t: time.DateTime = now  # module types are written module.Type
-```
-- **Standard-library modules are written in Isma** (see [`stdlib/`](stdlib)). They're compiled together with your program, so they're as fast as your own code.
-- **Privacy.** Names starting with `_` are private to their module.
-- **Construction.** A module's structs can only be created through its functions, which validate the values. You can't build a `DateTime` for February 30.
-- **Panic locations.** A panic inside a standard-library function is reported at *your* line that called it, like Rust's `#[track_caller]`:
-  ```
-  panic at app.isma:4:11: invalid date 2023-02-29: February 2023 has 28 days
-  ```
-- **Lint.** An `import` you never use is a warning.
-
-## The `time` module (UTC)
-
-Everything is UTC; there are no time zones. A `DateTime` is immutable, and methods like `add_days` return a new value.
-
-```python
-import time
-
-val now = time.now()
-print(now.to_iso())                               # 2026-11-14T16:05:09.123Z
-print(now.format("%A, %d %B %Y %H:%M"))           # Saturday, 14 November 2026 16:05
-val deadline = time.parse_iso("2026-12-25T00:00:00+07:00")   # offsets are converted to UTC
-print(deadline.seconds_since(now) / 86400)        # whole days left
+    val now = time.now()
+    print(now.format("%A, %d %B %Y at %H:%M"))
+    val landing = time.parse_iso("1969-07-20T20:17:40Z")
+    print(f"Moon landing was a {landing.weekday_name()}")
+    print(f"{now.seconds_since(landing) / (365 * 86400)} years ago")
 ```
 
-| Create a `DateTime` | |
-|---|---|
-| `time.now()` | The current UTC date and time (nanosecond precision) |
-| `time.utc(year, month, day, hour, minute, second)` | Validated; panics on e.g. February 30 |
-| `time.date(year, month, day)` | Midnight UTC |
-| `time.from_unix(seconds)` / `time.from_unix_ms(ms)` | From a Unix timestamp |
-| `time.parse_iso(text)` | `"2026-11-14"`, `"2026-11-14T16:05:09Z"`, `"... 16:05:09.25+02:00"`. Panics if invalid; check first with `time.is_valid_iso(text)` |
+<p align="center">
+  <img src="docs/media/terminal-time.svg" alt="Terminal: `isma clock.isma` prints the current UTC time in ISO format, a pretty date, the Unix time, days until new year, the Moon landing date (a Sunday) and how long a summing loop took" width="660">
+</p>
 
-| `DateTime` | |
-|---|---|
-| fields | `year`, `month`, `day`, `hour`, `minute`, `second`, `nanosecond` (read-only) |
-| `to_iso()`, `date_string()`, `time_string()` | `"2026-11-14T16:05:09Z"`, `"2026-11-14"`, `"16:05:09"` |
-| `format(pattern)` | `%Y %y %m %d %H %I %p %M %S %L %f %j %A %a %B %b %s %%` (strftime-style) |
-| `unix()`, `unix_ms()`, `millisecond()` | Timestamps and the millisecond part |
-| `weekday()`, `weekday_name()`, `month_name()`, `day_of_year()` | `0` = Monday … `6` = Sunday |
-| `add_seconds/minutes/hours/days(n)` | Exact arithmetic (negative `n` goes back) |
-| `add_months(n)`, `add_years(n)` | Calendar arithmetic; Jan 31 + 1 month = Feb 28/29 |
-| `seconds_since(other)`, `millis_since(other)` | Differences, rounded toward zero |
-| `compare(other)`, `is_before(other)`, `is_after(other)`, `equals(other)` | Ordering (`==` doesn't apply to structs) |
-| `start_of_day()` | Midnight of the same day |
+Every function, format code and helper is listed in the [`time` reference](docs/time.md).
 
-| Clocks and helpers | |
-|---|---|
-| `time.unix()`, `time.unix_ms()` | Current Unix time |
-| `time.monotonic_ms()`, `time.monotonic_ns()` | A clock that only moves forward, for measuring durations |
-| `time.sleep_ms(ms)` | Pause the program |
-| `time.is_leap_year(year)`, `time.days_in_month(year, month)` | Calendar facts |
+<a id="editor-support"></a>
+## 🧩 Editor support
 
-How it's verified:
-- `tests/run/time_utc.isma` checks every function against values computed with Python's `datetime`.
-- During development, the module was cross-checked against Python on 3,000 random timestamps between years 2 and 9998, covering every format code, the weekday, `add_months` clamping and parse round-trips.
+<img src="docs/media/vscode-icon.png" alt="Isma VS Code extension icon" width="72" align="right">
 
-### Built-ins
-| Function | Description |
-|---|---|
-| `print(x)` | Print any `Int`, `Float`, `Bool` or `String`, followed by a newline |
-| `input() -> String` | Read one line from stdin (without the newline) |
-| `args() -> List[String]` | Command-line arguments passed to the program |
-| `sqrt(x: Float) -> Float` | Square root |
-| `assert(cond: Bool)` | Panic if `cond` is false |
-| `panic(msg: String)` | Abort with a message |
-| `exit(code: Int)` | Exit the process |
+The VS Code extension (in the companion `isma-vscode` project) gets all its smarts from **`isma lsp`**, a language server built into the compiler. So the editor always agrees with `isma build`. It provides:
 
-Conversions are methods: `.to_string()`, `.to_int()`, `.to_float()`.
+- **Live type checking and lints** as you type. Unused and unreachable code is faded out.
+- **Hover** shows the type of any variable or expression, including inferred types, plus `#` doc comments.
+- **Inlay type hints**: `val total = price * qty` shows as `val total: Float = …`.
+- **Completion** for members after `.`, module functions after `time.`, modules after `import `, and variables in scope.
+- **Go to definition**, an **outline view**, syntax highlighting, snippets and a **▶ Run** button.
+- **Automatic restarts**: when you reinstall `isma`, the extension notices and restarts the language server by itself.
 
-### Panics
-Runtime errors print where they happened and exit with code 101:
-```
-panic at examples/calc.isma:9:19: cannot parse "abc" as Float
-```
-Panics cover integer overflow, division by zero, out-of-bounds indexing, `pop()` on an empty list, failed `assert`, failed parsing and `panic(...)`.
+<a id="performance"></a>
+## ⚡ Performance
 
-## Performance
+<p align="center">
+  <img src="docs/media/benchmark.svg" alt="Bar chart of run times in milliseconds, lower is better. fib(35): Isma 42, Rust 26, Python 891. Sieve to 10 million: Isma 39, Rust 32, Python 2,204." width="760">
+</p>
 
-`bench/run.sh` runs the same programs in Isma, Rust (`rustc -O`) and CPython. Best of 3 runs on one machine:
+| Benchmark | Isma | Rust (`rustc -O`) | Python 3 |
+|---|---:|---:|---:|
+| `fib(35)`: 30 million recursive calls | 42 ms | 26 ms | 891 ms |
+| Sieve of Eratosthenes to 10 million | 39 ms | 32 ms | 2,204 ms |
 
-| benchmark | Isma | Rust | Python |
-|---|---|---|---|
-| `fib(35)` (recursion) | 41 ms | 25 ms | 842 ms |
-| sieve to 10M (`List[Bool]`) | 38 ms | 34 ms | 2043 ms |
+These are the best of 3 runs on an AMD Ryzen 5 5500. Reproduce them with `./bench/run.sh`.
 
-About 20–50× faster than Python and close to Rust. On `fib`, the remaining gap comes from Isma's overflow checks: Rust in release mode silently wraps on overflow. With `rustc -O -C overflow-checks=on`, Rust's `fib` takes about 46 ms, which is slower than Isma.
+- **Where the gap to Rust comes from.** Most of it is safety: Isma checks every integer operation for overflow, while Rust in release mode silently wraps. With the same checks (`rustc -O -C overflow-checks=on`), Rust's `fib` takes about 46 ms, slower than Isma.
+- **Help for the optimizer.** Isma tells LLVM which memory can never overlap (TBAA metadata). That lets list lengths stay in CPU registers inside hot loops.
+- **Benchmarking your own code.** LLVM deletes loops whose results are never used, so print what you compute or you'll measure `0 ms`. `isma run --debug` turns optimization off.
 
-## How it works
+<a id="how-it-works"></a>
+## 🔧 How it works
 
-```
-source.isma
-   │  lexer.rs     tokens + Python-style INDENT/DEDENT
-   ▼
-   │  parser.rs    recursive descent + precedence climbing → AST
-   ▼
-   │  check.rs     name resolution, strict types, val/var, definite returns → typed AST
-   ▼
-   │  codegen.rs   textual LLVM IR (allocas → mem2reg, checked arithmetic, TBAA)
-   ▼
-clang -O3  program.ll + runtime.c  →  native executable
-```
+<p align="center">
+  <img src="docs/media/pipeline.svg" alt="Diagram: your .isma file goes through the lexer, parser, type checker, LLVM IR codegen and clang -O3 with a small C runtime, producing a native binary. stdlib/time.isma joins at the parser via `import time`. The type checker also powers `isma lsp`, which feeds VS Code." width="100%">
+</p>
 
-The pieces in more detail:
-- **Compiler.** About 4,500 lines of Rust. Its only dependency is [`ariadne`](https://crates.io/crates/ariadne), which renders the error messages.
-- **Runtime.** `runtime/runtime.c` (~300 lines) is embedded in the compiler binary. It contains the allocator, string helpers, list growth, printing and panics.
-- **Overflow checks.** Integer `+ - *` compile to `llvm.s*.with.overflow`, with branches into cold panic paths.
-- **Alias analysis.** The compiler emits TBAA metadata: list headers, elements of each type and each struct field get separate alias classes. Isma has no pointer casts, so this is sound, and it lets LLVM keep values like a list's length in registers inside hot loops.
+- **One front end, two uses.** The same lexer, parser and type checker compile your programs and power the editor through `isma lsp`.
+- **The standard library is Isma code** ([`stdlib/time.isma`](stdlib/time.isma)), compiled together with your program, so it's as fast as your own functions. A panic inside it reports *your* calling line, like Rust's `#[track_caller]`.
+- **Codegen writes LLVM IR as text** and hands it to `clang -O3`, together with a ~400-line C runtime for strings, lists, printing and clocks.
+- **Safety stays cheap.**
+  - Integer `+ - *` use LLVM's overflow-checking intrinsics.
+  - Panic paths are marked cold.
+  - List indexing is bounds-checked inline.
+- **About 6,800 lines of Rust.** The only dependencies are `ariadne` (error rendering) and `lsp-server` / `lsp-types` (the language server).
 
-## Project layout
-```
-src/            compiler (lexer, parser, checker, codegen, driver, CLI)
-runtime/        C runtime linked into every program
-stdlib/         the standard library, written in Isma (time.isma)
-examples/       hello, fib, fizzbuzz, structs, primes_sieve, sort, collatz, guess, calc, clock
-install.sh      installs `isma` (default or custom)
-uninstall.sh    removes it again (wipe all or pick targets)
-tests/run/      programs + expected stdout
-tests/fail/     programs that must not compile (`# expect-error: ...`)
-tests/panic/    programs that must panic (`# expect-panic: ...`)
-bench/          Isma vs Rust vs Python
-```
-`cargo test` runs the unit tests and every `.isma` test case.
+<a id="roadmap"></a>
+## 🗺️ Roadmap
 
-## Known limitations (v0.1)
-- **Memory is never freed.** Allocation uses a bump arena, which is fine for short programs. ARC is next on the list.
-- Your own code is still a single file: you can `import` standard-library modules, but not your own files yet.
-- No top-level constants. Everything lives inside functions.
-- `String.len()` and `substring()` count bytes, and strings can't be indexed with `s[i]` (use `chars()`).
-- No negative indexing (`xs[-1]` panics).
-
-## Roadmap
-- [ ] Null safety: `Int?`, `none`, `?.`, the elvis operator `?:`, smart casts
+- [x] Core language: `val`/`var`, functions, structs, lists, f-strings, strict types
+- [x] Native compilation through LLVM, with overflow and bounds checks
+- [x] Lints, error hints and a VS Code extension with a language server
+- [x] `import` and a standard library written in Isma (`time`)
+- [ ] Null safety: `Int?`, `?.`, the elvis operator `?:`, smart casts
 - [ ] Memory management through automatic reference counting
 - [ ] `enum` + `match` with exhaustiveness checking
-- [ ] Generics for user code (`fn max[T](a: T, b: T) -> T`)
-- [x] Modules and imports for the standard library (`import time`)
+- [ ] Generics for user code: `fn max[T](a: T, b: T) -> T`
+- [ ] Operator functions (so that `time.now() - start` works)
 - [ ] Importing your own `.isma` files
-- [ ] Closures and lambdas
-- [ ] Top-level `val` constants
-- [ ] A larger standard library (`math`, `fs`, maps, more string methods)
+- [ ] More modules: `math`, `fs`, maps, more string utilities
+
+<a id="development"></a>
+## 🧪 Development
+
+```bash
+cargo test                          # unit tests + every program in tests/
+./bench/run.sh                      # Isma vs Rust vs Python (writes bench/results.json)
+python3 docs/media/generate.py      # re-render the README's media from real runs
+```
+
+<details>
+<summary><b>Project layout</b></summary>
+
+```
+src/            compiler: lexer, parser, checker, codegen, driver, language server, CLI
+stdlib/         the standard library, written in Isma (time.isma)
+runtime/        the small C runtime linked into every program
+examples/       hello, fib, fizzbuzz, structs, primes_sieve, sort, collatz, guess, calc, clock
+tests/run/      programs + their expected output
+tests/fail/     programs that must not compile    (# expect-error: ...)
+tests/warn/     programs that must warn            (# expect-warning: ...)
+tests/panic/    programs that must panic           (# expect-panic: ...)
+bench/          Isma vs Rust vs Python
+docs/           language guide, time reference, install guide, README media
+install.sh      the installer (default or custom)
+uninstall.sh    the uninstaller (wipe all or pick targets)
+```
+</details>
+
+<br>
+
+<p align="center"><sub>Made for fun. The terminal recordings above are real runs of Isma and the chart uses real benchmark results. All images are generated by <code>docs/media/generate.py</code>.</sub></p>
