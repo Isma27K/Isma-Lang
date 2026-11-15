@@ -43,17 +43,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "isma"
-version = "0.0.1"
-dependencies = [
- "ariadne",
- "lsp-server",
- "lsp-types",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "itoa"
 version = "1.0.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -178,6 +167,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "tarn"
+version = "0.0.1"
+dependencies = [
+ "ariadne",
+ "lsp-server",
+ "lsp-types",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

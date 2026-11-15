@@ -1,4 +1,0 @@
-# expect-panic: panic/modules/deep.isma:4:12: index 4 out of bounds
-from modules.deep import pick
-fn main():
-    print(pick([1, 2]))

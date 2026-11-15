@@ -1,4 +1,4 @@
-# Same file name as `shapes/util.isma`: two different modules.
+# Same file name as `shapes/util.tr`: two different modules.
 struct Pair:
     first: String
     second: Int

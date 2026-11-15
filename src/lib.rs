@@ -1,4 +1,4 @@
-//! The Isma compiler: Python-like syntax, Kotlin-strict types, native speed.
+//! The Tarn compiler: Python-like syntax, Kotlin-strict types, native speed.
 
 pub mod arc;
 pub mod ast;
@@ -28,7 +28,7 @@ use std::path::Path;
 
 pub(crate) fn internal_error(d: &Diagnostic, module: &str) -> Diagnostic {
     Diagnostic::error(format!("internal error in the standard library module `{module}`: {}", d.message), Span::default())
-        .with_note("this is a bug in the Isma compiler, not in your code")
+        .with_note("this is a bug in the Tarn compiler, not in your code")
 }
 
 /// Load the program in the file at `path` (with contents `src`) and the files it imports.

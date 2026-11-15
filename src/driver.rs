@@ -24,13 +24,13 @@ impl BuildOptions {
     }
 
     fn sanitizer_flags(&self) -> &'static [&'static str] {
-        if self.sanitize { &["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-g", "-DISMA_SANITIZE"] } else { &[] }
+        if self.sanitize { &["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-g", "-DTARN_SANITIZE"] } else { &[] }
     }
 }
 
-/// Locate a clang binary: $ISMA_CC, then `clang` on PATH, then /usr/lib/llvm-*/bin/clang.
+/// Locate a clang binary: $TARN_CC, then `clang` on PATH, then /usr/lib/llvm-*/bin/clang.
 pub fn find_clang() -> Result<PathBuf, String> {
-    if let Ok(cc) = std::env::var("ISMA_CC") {
+    if let Ok(cc) = std::env::var("TARN_CC") {
         return Ok(PathBuf::from(cc));
     }
     if let Some(paths) = std::env::var_os("PATH") {
@@ -52,9 +52,9 @@ pub fn find_clang() -> Result<PathBuf, String> {
             return Ok(p);
         }
     }
-    Err("could not find `clang`, which Isma uses to produce native code.\n\
+    Err("could not find `clang`, which Tarn uses to produce native code.\n\
          Install it (Debian/Ubuntu: `sudo apt install clang`, Fedora: `sudo dnf install clang`,\n\
-         macOS: `xcode-select --install`) or point ISMA_CC at a clang binary."
+         macOS: `xcode-select --install`) or point TARN_CC at a clang binary."
         .into())
 }
 
@@ -70,7 +70,7 @@ pub fn target_triple(clang: &Path) -> Option<String> {
 
 /// A unique scratch directory under the system temp dir.
 pub fn scratch_dir() -> std::io::Result<PathBuf> {
-    let dir = std::env::temp_dir().join(unique_name("isma"));
+    let dir = std::env::temp_dir().join(unique_name("tarn"));
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
 }
@@ -83,15 +83,15 @@ fn unique_name(prefix: &str) -> String {
 
 // ---------------------------------------------------------------- cache
 
-/// `$ISMA_CACHE_DIR`, else `$XDG_CACHE_HOME/isma`, else `~/.cache/isma`.
+/// `$TARN_CACHE_DIR`, else `$XDG_CACHE_HOME/tarn`, else `~/.cache/tarn`.
 pub fn cache_dir() -> Option<PathBuf> {
-    if let Some(d) = std::env::var_os("ISMA_CACHE_DIR") {
+    if let Some(d) = std::env::var_os("TARN_CACHE_DIR") {
         return Some(PathBuf::from(d));
     }
     if let Some(d) = std::env::var_os("XDG_CACHE_HOME") {
-        return Some(PathBuf::from(d).join("isma"));
+        return Some(PathBuf::from(d).join("tarn"));
     }
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache").join("isma"))
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache").join("tarn"))
 }
 
 /// FNV-1a: tiny, and stable across Rust versions (unlike `DefaultHasher`).
@@ -199,13 +199,13 @@ pub fn build_executable(clang: &Path, ir: &str, output: &Path, opts: &BuildOptio
             cmd.arg("-g");
         }
         if opts.sanitize && runtime.extension().is_some_and(|e| e == "c") {
-            cmd.arg("-DISMA_SANITIZE");
+            cmd.arg("-DTARN_SANITIZE");
         }
         cmd.args(["-Wno-override-module", "-w", "-o"]).arg(output).arg(&ll).arg(&runtime).arg("-lm");
         let out = cmd.output().map_err(|e| format!("failed to run {}: {e}", clang.display()))?;
         if !out.status.success() {
             return Err(format!(
-                "clang failed (this is a bug in the Isma compiler):\n{}",
+                "clang failed (this is a bug in the Tarn compiler):\n{}",
                 String::from_utf8_lossy(&out.stderr)
             ));
         }

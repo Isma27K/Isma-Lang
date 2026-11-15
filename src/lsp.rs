@@ -1,7 +1,7 @@
-//! `isma lsp`: a Language Server Protocol server over stdio.
+//! `tarn lsp`: a Language Server Protocol server over stdio.
 //!
 //! It reuses the real compiler front end, so editor squiggles are exactly
-//! the errors `isma build` would report. Features: diagnostics (errors +
+//! the errors `tarn build` would report. Features: diagnostics (errors +
 //! lints), hover types, go-to-definition, completion (including `.` member
 //! completion), document outline and inlay type hints.
 //!
@@ -10,7 +10,7 @@
 //! disk. Changing a document re-checks the open documents that import it.
 
 use crate::check::Analysis;
-use crate::diagnostics::{Diagnostic as IsmaDiagnostic, Severity};
+use crate::diagnostics::{Diagnostic as TarnDiagnostic, Severity};
 use crate::ide::*;
 use crate::project::FileKind;
 use crate::span::Span;
@@ -90,7 +90,7 @@ struct Server {
     docs: HashMap<lt::Uri, Document>,
 }
 
-/// `file:///a/b%20c.isma` -> `/a/b c.isma`
+/// `file:///a/b%20c.tr` -> `/a/b c.tr`
 fn uri_to_path(uri: &lt::Uri) -> Option<PathBuf> {
     let rest = uri.as_str().strip_prefix("file://")?;
     let bytes = rest.as_bytes();
@@ -147,7 +147,7 @@ impl Server {
                 others.into_iter().filter_map(|u| self.reanalyze(u)).collect()
             }
             DidChangeWatchedFiles::METHOD => {
-                // `.isma` files created, deleted or changed outside the editor.
+                // `.tr` files created, deleted or changed outside the editor.
                 let Ok(p) = params::<lt::DidChangeWatchedFilesParams>(n.params) else { return Vec::new() };
                 let open: Vec<&lt::Uri> = p.changes.iter().map(|c| &c.uri).filter(|u| self.docs.contains_key(*u)).collect();
                 if p.changes.len() == open.len() {
@@ -234,7 +234,7 @@ impl Server {
                 let d = lt::Diagnostic {
                     range: lines.range(Span::default()),
                     severity: Some(lt::DiagnosticSeverity::WARNING),
-                    source: Some("isma".into()),
+                    source: Some("tarn".into()),
                     message: "internal compiler error while analyzing this file (please report it)".into(),
                     ..Default::default()
                 };
@@ -271,7 +271,7 @@ impl Server {
         let doc = self.docs.get(&pos.text_document.uri)?;
         let off = doc.lines.offset(pos.position);
         let h = doc.ide.hovers.iter().filter(|h| contains(h.span, off)).min_by_key(|h| h.span.end - h.span.start)?;
-        let mut value = format!("```isma\n{}\n```", h.code);
+        let mut value = format!("```tarn\n{}\n```", h.code);
         if let Some(d) = &h.doc {
             value.push_str("\n\n");
             value.push_str(d);
@@ -515,12 +515,12 @@ impl Server {
         }
         let own = doc.path.as_deref();
         for name in crate::project::module_names(&dir) {
-            let file = dir.join(format!("{name}.isma"));
+            let file = dir.join(format!("{name}.tr"));
             if Some(file.as_path()) == own || items.iter().any(|i| i.label == name) {
                 continue;
             }
             let docs = std::fs::read_to_string(&file).ok().and_then(|t| leading_doc(&t));
-            items.push(module_item(&name, format!("{name}.isma"), docs, lt::CompletionItemKind::MODULE));
+            items.push(module_item(&name, format!("{name}.tr"), docs, lt::CompletionItemKind::MODULE));
         }
         for sub in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
             let name = sub.file_name().to_string_lossy().into_owned();
@@ -536,7 +536,7 @@ impl Server {
     /// plus its folder's modules.
     fn importable_names(&self, doc: &Document, dir: Option<&Path>, module: &str) -> Vec<lt::CompletionItem> {
         // Analyze a probe that imports the module the same way, from the same folder.
-        let probe_path = dir.map(|d| d.join("__isma_probe__.isma"));
+        let probe_path = dir.map(|d| d.join("__tarn_probe__.tr"));
         let level = module.chars().take_while(|c| *c == '.').count();
         let (head, last) = match module[level..].rsplit_once('.') {
             Some((h, l)) => (format!("{}{h}", &module[..level]), l.to_string()),
@@ -577,10 +577,10 @@ impl Server {
             }
             let own = doc.path.as_deref();
             for name in crate::project::module_names(&folder) {
-                let file = folder.join(format!("{name}.isma"));
+                let file = folder.join(format!("{name}.tr"));
                 if Some(file.as_path()) != own && !items.iter().any(|i| i.label == name) {
                     let docs = std::fs::read_to_string(&file).ok().and_then(|t| leading_doc(&t));
-                    items.push(module_item(&name, format!("{name}.isma"), docs, lt::CompletionItemKind::MODULE));
+                    items.push(module_item(&name, format!("{name}.tr"), docs, lt::CompletionItemKind::MODULE));
                 }
             }
         }
@@ -834,7 +834,7 @@ fn visible_locals(doc: &Document, off: usize) -> Vec<&LocalSymbol> {
     out
 }
 
-fn to_lsp_diagnostic(d: &IsmaDiagnostic, lines: &LineMap, uri: &lt::Uri) -> lt::Diagnostic {
+fn to_lsp_diagnostic(d: &TarnDiagnostic, lines: &LineMap, uri: &lt::Uri) -> lt::Diagnostic {
     let mut message = d.message.clone();
     for n in &d.notes {
         message.push_str(&format!("\nnote: {n}"));
@@ -857,7 +857,7 @@ fn to_lsp_diagnostic(d: &IsmaDiagnostic, lines: &LineMap, uri: &lt::Uri) -> lt::
             Severity::Error => lt::DiagnosticSeverity::ERROR,
             Severity::Warning => lt::DiagnosticSeverity::WARNING,
         }),
-        source: Some("isma".into()),
+        source: Some("tarn".into()),
         message,
         related_information: if related.is_empty() { None } else { Some(related) },
         tags: if fades { Some(vec![lt::DiagnosticTag::UNNECESSARY]) } else { None },
@@ -934,7 +934,7 @@ mod tests {
     }
 
     fn server_with(text: &str) -> (Server, lt::Uri) {
-        let uri: lt::Uri = "file:///test.isma".parse().unwrap();
+        let uri: lt::Uri = "file:///test.tr".parse().unwrap();
         let mut s = Server { docs: HashMap::new() };
         s.docs.insert(uri.clone(), doc(text));
         (s, uri)

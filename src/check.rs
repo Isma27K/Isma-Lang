@@ -454,7 +454,7 @@ fn format_doc(lines: &[&str]) -> Option<String> {
             let block = &bodies[start..i];
             let indent = block.iter().filter(|l| !l.trim().is_empty()).map(|l| l.len() - l.trim_start().len()).min().unwrap_or(0);
             let first = block[0].trim_start();
-            let lang = if ["import ", "val ", "var ", "fn ", "print("].iter().any(|k| first.starts_with(k)) { "isma" } else { "text" };
+            let lang = if ["import ", "val ", "var ", "fn ", "print("].iter().any(|k| first.starts_with(k)) { "tarn" } else { "text" };
             out.push_str(&format!("\n```{lang}\n"));
             for l in block {
                 out.push_str(l.get(indent..).unwrap_or("").trim_end());
@@ -609,7 +609,7 @@ impl Checker {
     /// Is there a module file called `name` next to the file being checked?
     fn module_file_nearby(&self, name: &str) -> bool {
         let dir = self.ns_paths[self.ns].as_ref().and_then(|p| p.parent());
-        dir.is_some_and(|d| d.join(format!("{name}.isma")).is_file())
+        dir.is_some_and(|d| d.join(format!("{name}.tr")).is_file())
     }
 
     /// A struct or enum known by its bare name in the current file: defined
@@ -962,7 +962,7 @@ impl Checker {
                             self.err(
                                 Diagnostic::error(format!("function `{name}` is defined more than once"), f.name.span)
                                     .with_label(prev_span, "first defined here")
-                                    .with_note("Isma has no function overloading"),
+                                    .with_note("Tarn has no function overloading"),
                             );
                             continue;
                         }
@@ -1085,7 +1085,7 @@ impl Checker {
                 let mut d = Diagnostic::error(format!("`{path}` is a folder, not a module"), path_span).with_primary("a folder");
                 d = match crate::project::module_names(dir).first().cloned() {
                     Some(first) => d.with_help(format!("import a file inside it, e.g. `from {path} import {first}`")),
-                    None => d.with_note("it contains no `.isma` files"),
+                    None => d.with_note("it contains no `.tr` files"),
                 };
                 self.err(d);
                 self.fail_import(ns, im);
@@ -1604,12 +1604,12 @@ impl Checker {
                 let short = short_name(sname);
                 // Operator functions get a name, numbered because they can be overloaded.
                 let method = if is_operator_name(&f.name.name) { format!("op_{}{}", OpKind::mangled(&f.name.name), self.funcs.len()) } else { f.name.name.clone() };
-                let symbol = if self.ns == 0 { format!("isma_m_{short}_{method}") } else { format!("isma_m_{msym}__{short}_{method}") };
+                let symbol = if self.ns == 0 { format!("tarn_m_{short}_{method}") } else { format!("tarn_m_{msym}__{short}_{method}") };
                 (format!("{sname}.{}", f.name.name), symbol)
             }
-            None if self.ns == 0 && f.name.name == "main" => ("main".into(), "isma_main".into()),
-            None if self.ns == 0 => (f.name.name.clone(), format!("isma_fn_{}", f.name.name)),
-            None => (format!("{module}.{}", f.name.name), format!("isma_{msym}__{}", f.name.name)),
+            None if self.ns == 0 && f.name.name == "main" => ("main".into(), "tarn_main".into()),
+            None if self.ns == 0 => (f.name.name.clone(), format!("tarn_fn_{}", f.name.name)),
+            None => (format!("{module}.{}", f.name.name), format!("tarn_{msym}__{}", f.name.name)),
         };
         let sig = self.signature(&f.name.name, &own, &params, &ret, owner.is_some());
         let comment = self.doc_comment(f.sig_span.start);
@@ -1809,7 +1809,7 @@ impl Checker {
             ret: sig.ret.clone(),
             locals: std::mem::take(&mut self.locals),
             body,
-            exported: sig.symbol == "isma_main",
+            exported: sig.symbol == "tarn_main",
             track_caller: self.ns_kinds[self.ns] == FileKind::Std,
             generic,
         }
@@ -2139,7 +2139,7 @@ impl Checker {
             let found = self.tn(&t.ty);
             let mut d = Diagnostic::error(format!("{what} must be a `Bool`, found `{found}`"), e.span)
                 .with_primary(format!("this is `{found}`"))
-                .with_note("Isma has no \"truthy\" values: conditions must be `Bool`");
+                .with_note("Tarn has no \"truthy\" values: conditions must be `Bool`");
             d = match &t.ty {
                 Type::Int => d.with_help("compare explicitly, e.g. `x != 0`"),
                 Type::Str => d.with_help("compare explicitly, e.g. `s.len() > 0`"),
@@ -3277,8 +3277,8 @@ impl Checker {
                     None => d,
                 }
             }
-            (Type::Float, Type::Int) => d.with_help("Isma never converts implicitly; use `.to_float()`, or write a float literal like `1.0`"),
-            (Type::Int, Type::Float) => d.with_help("Isma never converts implicitly; use `.to_int()` to truncate"),
+            (Type::Float, Type::Int) => d.with_help("Tarn never converts implicitly; use `.to_float()`, or write a float literal like `1.0`"),
+            (Type::Int, Type::Float) => d.with_help("Tarn never converts implicitly; use `.to_int()` to truncate"),
             (Type::Str, Type::Int | Type::Float | Type::Bool) => d.with_help("use `.to_string()` or an f-string like f\"{x}\""),
             _ => d,
         };
@@ -3429,7 +3429,7 @@ impl Checker {
                         "True" => Some("true".to_string()),
                         "False" => Some("false".to_string()),
                         _ if self.module_file_nearby(name) => {
-                            d = d.with_help(format!("`{name}.isma` is a module next to this file: add `import {name}` at the top"));
+                            d = d.with_help(format!("`{name}.tr` is a module next to this file: add `import {name}` at the top"));
                             None
                         }
                         _ if crate::stdlib::find(name).is_some() => {
@@ -3912,8 +3912,8 @@ impl Checker {
                 .with_label(l.span, format!("this is `{a}`"))
                 .with_label(r.span, format!("this is `{b}`"));
             d = match (&tl.ty, &tr.ty) {
-                (Type::Int, Type::Float) => d.with_help("Isma never converts implicitly; use `.to_float()` on the `Int` side"),
-                (Type::Float, Type::Int) => d.with_help("Isma never converts implicitly; use `.to_float()` on the `Int` side"),
+                (Type::Int, Type::Float) => d.with_help("Tarn never converts implicitly; use `.to_float()` on the `Int` side"),
+                (Type::Float, Type::Int) => d.with_help("Tarn never converts implicitly; use `.to_float()` on the `Int` side"),
                 (Type::Str, Type::Int | Type::Float | Type::Bool) | (Type::Int | Type::Float | Type::Bool, Type::Str) if op == BinOp::Add => {
                     d.with_help("use an f-string like f\"{a}{b}\" or call `.to_string()`")
                 }
@@ -4047,7 +4047,7 @@ impl Checker {
                 let hint = match name.as_str() {
                     "println" | "printf" | "echo" => Some("print".to_string()),
                     "len" => {
-                        d = d.with_note("length is a method in Isma");
+                        d = d.with_note("length is a method in Tarn");
                         Some("x.len()".to_string())
                     }
                     "str" | "int" | "float" => {

@@ -1,32 +1,32 @@
-use isma::diagnostics::{self, Diagnostic, RenderFile};
-use isma::project::Project;
-use isma::driver::{self, BuildOptions};
+use tarn::diagnostics::{self, Diagnostic, RenderFile};
+use tarn::project::Project;
+use tarn::driver::{self, BuildOptions};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 const USAGE: &str = "\
-Isma — Python syntax, Kotlin-strict types, native speed.
+tarn  Python's syntax, Kotlin's strictness, native speed
 
-USAGE:
-    isma <file.isma> [args...]           Compile (cached) and run, like `python file.py`
-    isma run [--debug] [--arc-stats] <file.isma> [args...]
-    isma build <file.isma> [-o <output>] [--debug] [--emit-llvm] [--emit-mir]
-    isma check <file.isma>
-    isma lsp                             Language server (used by editors)
-    isma clean                           Delete the compile cache
+Usage
+  tarn <file.tr> [args...]          compile (cached) and run, like `python file.py`
+  tarn run <file.tr> [args...]      the same, accepting --debug and --arc-stats
+  tarn build <file.tr> [-o <out>]   build a standalone native binary
+  tarn check <file.tr>              type-check and lint only
+  tarn lsp                          the language server, for editors
+  tarn clean                        empty the compile cache
 
-OPTIONS:
-    -o <output>    Output executable path (default: file name without .isma)
-    --debug        Build with -O0 -g instead of -O3
-    --arc-stats    Print memory counters (allocations, frees, peak) when the program exits
-    --sanitize     Build with AddressSanitizer (for debugging the compiler)
-    --emit-llvm    Also write the generated LLVM IR next to the output (.ll)
-    --emit-mir     Also write the mid-level IR, with reference counting, next to the output (.mir)
-    -h, --help     Show this message
-    -V, --version  Show the compiler version
+Options
+  -o <output>     output path (default: the file name without .tr)
+  --debug         build with -O0 -g instead of -O3
+  --arc-stats     print memory counters when the program exits
+  --sanitize      build with AddressSanitizer
+  --emit-llvm     also write the generated LLVM IR (.ll)
+  --emit-mir      also write the mid-level IR, with reference counting (.mir)
+  -h, --help      show this message
+  -V, --version   show the compiler version
 
-Scripts can start with `#!/usr/bin/env isma` and be run directly after `chmod +x`.
+A script can start with `#!/usr/bin/env tarn` and run directly after `chmod +x`.
 ";
 
 fn main() -> ExitCode {
@@ -68,7 +68,7 @@ fn parse_args(args: &[String]) -> Result<Cli, String> {
         Cli { command: String::new(), file: None, output: None, debug: false, emit_llvm: false, emit_mir: false, arc_stats: false, sanitize: false, program_args: Vec::new() };
     let mut rest = args;
     match args.first() {
-        // `isma script.isma ...` is shorthand for `isma run script.isma ...`
+        // `tarn script.tr ...` is shorthand for `tarn run script.tr ...`
         Some(first) if !COMMANDS.contains(&first.as_str()) && !first.starts_with('-') => cli.command = "run".into(),
         Some(first) => {
             cli.command = first.clone();
@@ -110,11 +110,11 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
             return Ok(ExitCode::SUCCESS);
         }
         "-V" | "--version" | "version" => {
-            println!("isma {}", env!("CARGO_PKG_VERSION"));
+            println!("tarn {}", env!("CARGO_PKG_VERSION"));
             return Ok(ExitCode::SUCCESS);
         }
         "lsp" => {
-            isma::lsp::run().map_err(|e| format!("language server failed: {e}"))?;
+            tarn::lsp::run().map_err(|e| format!("language server failed: {e}"))?;
             return Ok(ExitCode::SUCCESS);
         }
         "clean" => {
@@ -136,14 +136,14 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
     if cli.arc_stats {
         // Read by the runtime when the program exits.
         // SAFETY: still single-threaded; set before any program is spawned.
-        unsafe { std::env::set_var("ISMA_ARC_STATS", "1") };
+        unsafe { std::env::set_var("TARN_ARC_STATS", "1") };
     }
 
     // The script and every file it imports (parsing them is fast).
-    let project = isma::load_file(&file, &display_path, &src);
+    let project = tarn::load_file(&file, &display_path, &src);
 
     if cli.command == "check" {
-        return match isma::check_project(&project) {
+        return match tarn::check_project(&project) {
             Ok(checked) => {
                 report_warnings(&checked.warnings, &project);
                 Ok(ExitCode::SUCCESS)
@@ -161,7 +161,7 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
 
     let clang = driver::find_clang()?;
     let triple = driver::target_triple(&clang);
-    let (ir, mir) = match isma::compile_project(&project, triple.as_deref()) {
+    let (ir, mir) = match tarn::compile_project(&project, triple.as_deref()) {
         Ok(c) => {
             report_warnings(&c.warnings, &project);
             (c.ir, c.mir)
@@ -199,7 +199,7 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
     Ok(exit_code_of(result?))
 }
 
-/// Run a compiled program. On Unix the isma process is replaced by the
+/// Run a compiled program. On Unix the tarn process is replaced by the
 /// program (like `exec`), so signals, stdin and exit codes behave exactly
 /// as if you had run the binary yourself.
 fn run_program(exe: &Path, script: &Path, args: &[String]) -> Result<ExitCode, String> {

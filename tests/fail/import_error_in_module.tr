@@ -1,4 +1,4 @@
-# expect-error: tests/fail/modules/broken.isma:3
+# expect-error: tests/fail/modules/broken.tr:3
 import modules.broken
 fn main():
     print(broken.half(4))

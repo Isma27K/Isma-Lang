@@ -6,7 +6,7 @@ from mylib.util import greeting
 val answer = 42
 val half = answer / 2
 val tau = math.pi * 2.0
-val name = "Isma"
+val name = "Tarn"
 val banner = "== " + name + " =="
 val big = answer > 40 and not (half == 0)
 val neg = -answer

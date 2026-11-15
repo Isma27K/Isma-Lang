@@ -1,4 +1,4 @@
-# Points and distances. Imported by `main.isma` in this folder.
+# Points and distances. Imported by `main.tr` in this folder.
 
 struct Point:
     x: Float
@@ -10,6 +10,6 @@ fn _square(x: Float) -> Float:               # `_names` are private to their mod
 fn dist(a: Point, b: Point) -> Float:
     return sqrt(_square(a.x - b.x) + _square(a.y - b.y))
 
-# Runs only when you run this file itself: `isma geometry.isma`.
+# Runs only when you run this file itself: `tarn geometry.tr`.
 fn main():
     print(dist(Point(0.0, 0.0), Point(1.0, 1.0)))

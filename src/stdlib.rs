@@ -1,4 +1,4 @@
-//! The standard library: modules written in Isma itself, embedded in the
+//! The standard library: modules written in Tarn itself, embedded in the
 //! compiler and loaded on `import`.
 
 pub struct StdModule {
@@ -7,9 +7,9 @@ pub struct StdModule {
 }
 
 pub const MODULES: &[StdModule] = &[
-    StdModule { name: "time", source: include_str!("../stdlib/time.isma") },
-    StdModule { name: "math", source: include_str!("../stdlib/math.isma") },
-    StdModule { name: "fs", source: include_str!("../stdlib/fs.isma") },
+    StdModule { name: "time", source: include_str!("../stdlib/time.tr") },
+    StdModule { name: "math", source: include_str!("../stdlib/math.tr") },
+    StdModule { name: "fs", source: include_str!("../stdlib/fs.tr") },
 ];
 
 pub fn find(name: &str) -> Option<&'static StdModule> {
@@ -17,7 +17,7 @@ pub fn find(name: &str) -> Option<&'static StdModule> {
 }
 
 /// Built-in hooks that only standard-library modules may call:
-/// (name, parameter types, return type), using Isma type names.
+/// (name, parameter types, return type), using Tarn type names.
 pub const INTRINSICS: &[(&str, &[&str], &str)] = &[
     ("__realtime_ns", &[], "Int"),
     ("__monotonic_ns", &[], "Int"),
@@ -60,5 +60,5 @@ pub const INTRINSICS: &[(&str, &[&str], &str)] = &[
 
 /// Display path for a module in panic messages.
 pub fn display_path(name: &str) -> String {
-    format!("<std>/{name}.isma")
+    format!("<std>/{name}.tr")
 }

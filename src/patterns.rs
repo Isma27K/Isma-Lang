@@ -161,7 +161,7 @@ impl Space<'_> {
         out
     }
 
-    /// Isma source for a pattern of type `ty`.
+    /// Tarn source for a pattern of type `ty`.
     pub fn show(&self, p: &Pat, ty: &Type) -> String {
         match p {
             Pat::Wild => "_".into(),

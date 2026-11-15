@@ -1,4 +1,4 @@
-# Small generic collections, used by `generics_modules.isma`.
+# Small generic collections, used by `generics_modules.tr`.
 
 # The largest of two values.
 fn max[T](a: T, b: T) -> T:

@@ -18,7 +18,7 @@ fn main():
     print(math.degrees(math.atan2(1.0, 1.0)))   # 45.0
 ```
 
-The module is [written in Isma](../stdlib/math.isma). The `Float` functions compile to LLVM's math intrinsics or the C library's, so they cost what they cost in C. `min`, `max`, `clamp` and `abs` are [generic](language.md#generics): they work on `Int`, `Float`, `String` (except `abs`) and your own types that have `<=>` (and `-`, for `abs`).
+The module is [written in Tarn](../stdlib/math.tr). The `Float` functions compile to LLVM's math intrinsics or the C library's, so they cost what they cost in C. `min`, `max`, `clamp` and `abs` are [generic](language.md#generics): they work on `Int`, `Float`, `String` (except `abs`) and your own types that have `<=>` (and `-`, for `abs`).
 
 `Float` functions follow IEEE 754, like C and Python's `math`: invalid input gives NaN or an infinity instead of a panic (`math.sqrt(-1.0)` is NaN, `math.ln(0.0)` is `-inf`). The `Int` functions panic on overflow, like `+` and `*` do.
 

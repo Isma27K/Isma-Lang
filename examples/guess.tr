@@ -1,4 +1,4 @@
-# Think of a number between 1 and 100 - Isma will find it.
+# Think of a number between 1 and 100 - Tarn will find it.
 fn main():
     print("Think of a number between 1 and 100.")
     var low = 1

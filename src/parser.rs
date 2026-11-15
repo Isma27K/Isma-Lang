@@ -203,7 +203,7 @@ impl Parser {
                 Tok::Var => {
                     let span = self.span();
                     self.diags.push(
-                        Diagnostic::error("Isma has no global variables", span)
+                        Diagnostic::error("Tarn has no global variables", span)
                             .with_primary("a top-level `var`")
                             .with_note("a top-level `val` is a constant (a number, `Bool` or `String`), but nothing at the top level can change")
                             .with_help("keep the value in `main` (or a struct) and pass it to the functions that need it"),
@@ -372,7 +372,7 @@ impl Parser {
                     Diagnostic::error(format!("type parameters don't take bounds: write `{}` alone", p.name), span)
                         .with_primary("remove this")
                         .with_note(format!(
-                            "Isma works out what `{}` must support from how the code uses it: comparing two `{}`s with `<` makes it need `<=>`, printing one makes it need `to_string`",
+                            "Tarn works out what `{}` must support from how the code uses it: comparing two `{}`s with `<` makes it need `<=>`, printing one makes it need `to_string`",
                             p.name, p.name
                         )),
                 );
@@ -765,7 +765,7 @@ impl Parser {
             let span = name.span;
             return self.error_diag(
                 Diagnostic::error(format!("`{}` must be initialized", name.name), span)
-                    .with_note("every variable in Isma needs an initial value")
+                    .with_note("every variable in Tarn needs an initial value")
                     .with_help(format!("write `{kw} {} = <value>`", name.name)),
             );
         }
@@ -962,7 +962,7 @@ impl Parser {
                 if self.at(&Tok::If) {
                     let span = self.span();
                     return self.error_diag(
-                        Diagnostic::error("`else if` is not valid Isma", span).with_help("use `elif`"),
+                        Diagnostic::error("`else if` is not valid Tarn", span).with_help("use `elif`"),
                     );
                 }
                 else_block = Some(self.block()?);
@@ -1123,7 +1123,7 @@ impl Parser {
                 Diagnostic::error("unexpected `?`", span)
                     .with_primary("not valid here")
                     .with_note("`?` makes a type nullable (`Int?`); in expressions it is part of `?.` and `?:`")
-                    .with_help("Isma has no `c ? a : b` operator; use an `if` statement"),
+                    .with_help("Tarn has no `c ? a : b` operator; use an `if` statement"),
             );
         }
         Ok(l)
@@ -1385,7 +1385,7 @@ impl Parser {
                             Diagnostic::error(format!("expected `:` after a map key, found {}", self.peek()), span)
                                 .with_primary("expected `:`")
                                 .with_note("map literals pair each key with its value: `{\"a\": 1, \"b\": 2}`")
-                                .with_help("Isma has no set literals; for a list, use `[...]`"),
+                                .with_help("Tarn has no set literals; for a list, use `[...]`"),
                         );
                     }
                     self.bump();

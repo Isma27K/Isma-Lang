@@ -1,4 +1,4 @@
-//! Loading a program's files: the entry file, the `.isma` files it imports
+//! Loading a program's files: the entry file, the `.tr` files it imports
 //! (found relative to the importing file, like Python's package-relative
 //! imports), and the standard-library modules. Every file becomes one
 //! namespace of the type checker; file `k` is namespace `k`, the entry file 0.
@@ -14,7 +14,7 @@ use std::path::{Component, Path, PathBuf};
 pub enum FileKind {
     /// The file being compiled (namespace 0).
     Root,
-    /// One of the user's own `.isma` files, imported.
+    /// One of the user's own `.tr` files, imported.
     User,
     /// A standard-library module (its problems are compiler bugs).
     Std,
@@ -25,7 +25,7 @@ pub struct SourceFile {
     /// The canonical path on disk (`None` for the standard library and for
     /// programs that only exist in memory).
     pub path: Option<PathBuf>,
-    /// How diagnostics and panics name the file: `app/geometry.isma`, `<std>/time.isma`.
+    /// How diagnostics and panics name the file: `app/geometry.tr`, `<std>/time.tr`.
     pub display: String,
     /// The module's name, its file stem (`geometry`); empty for the root.
     pub name: String,
@@ -165,13 +165,13 @@ impl Loader<'_> {
                                 return None;
                             }
                             let folder = folder.as_ref()?;
-                            self.open(&folder.join(format!("{}.isma", n.name.name)), file, im.span, root_dir, display_dir)
+                            self.open(&folder.join(format!("{}.tr", n.name.name)), file, im.span, root_dir, display_dir)
                         })
                         .collect()
                 }
                 (Some(names), Target::Dir(d)) => {
                     let d = d.clone();
-                    names.iter().map(|n| self.open(&d.join(format!("{}.isma", n.name.name)), file, im.span, root_dir, display_dir)).collect()
+                    names.iter().map(|n| self.open(&d.join(format!("{}.tr", n.name.name)), file, im.span, root_dir, display_dir)).collect()
                 }
                 _ => Vec::new(),
             };
@@ -202,7 +202,7 @@ impl Loader<'_> {
         for s in &segs {
             stem.push(s);
         }
-        let file_path = stem.with_extension("isma");
+        let file_path = stem.with_extension("tr");
         // A file of yours wins over a standard-library module of the same name.
         if let Some(id) = self.open(&file_path, file, im.span, root_dir, display_dir) {
             return Target::File(id);
@@ -263,7 +263,7 @@ fn defines(p: &Program, name: &str) -> bool {
     })
 }
 
-/// The `.isma` files of a folder, by module name (for suggestions and completion).
+/// The `.tr` files of a folder, by module name (for suggestions and completion).
 pub fn module_names(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(dir)
         .into_iter()
@@ -271,7 +271,7 @@ pub fn module_names(dir: &Path) -> Vec<String> {
         .flatten()
         .filter_map(|e| {
             let p = e.path();
-            (p.extension().is_some_and(|x| x == "isma")).then(|| p.file_stem()?.to_str().map(String::from)).flatten()
+            (p.extension().is_some_and(|x| x == "tr")).then(|| p.file_stem()?.to_str().map(String::from)).flatten()
         })
         .collect();
     names.sort();
@@ -322,7 +322,7 @@ mod tests {
     use super::*;
 
     fn tree(name: &str, files: &[(&str, &str)]) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("isma-project-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tarn-project-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         for (p, text) in files {
             let p = dir.join(p);
@@ -343,25 +343,25 @@ mod tests {
         let dir = tree(
             "resolve",
             &[
-                ("main.isma", "import geometry\nimport time\nimport shapes.circle as c\nfrom shapes import square\nfrom geometry import Point\nimport nope\n"),
-                ("geometry.isma", "struct Point:\n    x: Int\n"),
-                ("shapes/circle.isma", "from .. import geometry\n"),
-                ("shapes/square.isma", "from ..geometry import Point\n"),
+                ("main.tr", "import geometry\nimport time\nimport shapes.circle as c\nfrom shapes import square\nfrom geometry import Point\nimport nope\n"),
+                ("geometry.tr", "struct Point:\n    x: Int\n"),
+                ("shapes/circle.tr", "from .. import geometry\n"),
+                ("shapes/square.tr", "from ..geometry import Point\n"),
             ],
         );
-        let p = load_at(&dir, "main.isma");
+        let p = load_at(&dir, "main.tr");
         assert!(p.diags.is_empty());
         let names: Vec<&str> = p.files.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names, ["", "geometry", "time", "circle", "square"]);
         let displays: Vec<&str> = p.files.iter().map(|f| f.display.as_str()).collect();
-        assert_eq!(displays, ["main.isma", "geometry.isma", "<std>/time.isma", "shapes/circle.isma", "shapes/square.isma"]);
+        assert_eq!(displays, ["main.tr", "geometry.tr", "<std>/time.tr", "shapes/circle.tr", "shapes/square.tr"]);
         let root = &p.files[0].imports;
         assert!(matches!(root[0].target, Target::File(1)));
         assert!(matches!(root[1].target, Target::File(2)));
         assert!(matches!(root[2].target, Target::File(3)));
         assert!(matches!(root[3].target, Target::Dir(_)) && root[3].submodules == [Some(4)]);
         assert!(matches!(root[4].target, Target::File(1)) && root[4].submodules == [None]);
-        assert!(matches!(&root[5].target, Target::Missing { tried, .. } if tried == &["nope.isma"]));
+        assert!(matches!(&root[5].target, Target::Missing { tried, .. } if tried == &["nope.tr"]));
         // `..` climbs to the folder above, and both reach the same file.
         assert!(matches!(p.files[3].imports[0].target, Target::Dir(_)) && p.files[3].imports[0].submodules == [Some(1)]);
         assert!(matches!(p.files[4].imports[0].target, Target::File(1)));
@@ -374,17 +374,17 @@ mod tests {
 
     #[test]
     fn your_files_shadow_the_standard_library() {
-        let dir = tree("shadow", &[("main.isma", "import time\n"), ("time.isma", "fn now() -> Int:\n    return 1\n")]);
-        let p = load_at(&dir, "main.isma");
+        let dir = tree("shadow", &[("main.tr", "import time\n"), ("time.tr", "fn now() -> Int:\n    return 1\n")]);
+        let p = load_at(&dir, "main.tr");
         assert_eq!(p.files[1].kind, FileKind::User);
-        assert_eq!(p.files[1].display, "time.isma");
+        assert_eq!(p.files[1].display, "time.tr");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn cycles_load_each_file_once() {
-        let dir = tree("cycle", &[("main.isma", "import a\n"), ("a.isma", "import b\n"), ("b.isma", "import a\nimport main\n")]);
-        let p = load_at(&dir, "main.isma");
+        let dir = tree("cycle", &[("main.tr", "import a\n"), ("a.tr", "import b\n"), ("b.tr", "import a\nimport main\n")]);
+        let p = load_at(&dir, "main.tr");
         assert_eq!(p.files.len(), 3);
         assert!(matches!(p.files[2].imports[0].target, Target::File(1)));
         assert!(matches!(p.files[2].imports[1].target, Target::File(0)));
@@ -393,8 +393,8 @@ mod tests {
 
     #[test]
     fn paths_are_shown_like_the_entry_file() {
-        assert_eq!(relative(Path::new("/a/b"), Path::new("/a/c/d.isma")), PathBuf::from("../c/d.isma"));
-        assert_eq!(shown(Path::new("/p/app/lib/x.isma"), Some(Path::new("/p/app")), Path::new("app")), "app/lib/x.isma");
-        assert_eq!(shown(Path::new("/p/app/../x.isma"), Some(Path::new("/p/app")), Path::new("")), "../x.isma");
+        assert_eq!(relative(Path::new("/a/b"), Path::new("/a/c/d.tr")), PathBuf::from("../c/d.tr"));
+        assert_eq!(shown(Path::new("/p/app/lib/x.tr"), Some(Path::new("/p/app")), Path::new("app")), "app/lib/x.tr");
+        assert_eq!(shown(Path::new("/p/app/../x.tr"), Some(Path::new("/p/app")), Path::new("")), "../x.tr");
     }
 }

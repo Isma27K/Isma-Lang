@@ -1,24 +1,24 @@
 //! End-to-end language tests.
 //!
-//! - tests/run/*.isma    compile + run; stdout must equal the sibling `.out` file
-//! - tests/fail/*.isma   must fail to compile; first line `# expect-error: <text>`
-//! - tests/panic/*.isma  must exit 101; first line `# expect-panic: <text>`
-//! - tests/arc/*.isma    must stay within an allocation budget; first line `# expect-max-allocs: <n>`
+//! - tests/run/*.tr    compile + run; stdout must equal the sibling `.out` file
+//! - tests/fail/*.tr   must fail to compile; first line `# expect-error: <text>`
+//! - tests/panic/*.tr  must exit 101; first line `# expect-panic: <text>`
+//! - tests/arc/*.tr    must stay within an allocation budget; first line `# expect-max-allocs: <n>`
 //!
 //! Every `run` program must also free everything it allocated (checked by the
-//! runtime with `ISMA_ARC_CHECK=1`), and is run again under AddressSanitizer.
+//! runtime with `TARN_ARC_CHECK=1`), and is run again under AddressSanitizer.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-const ISMA: &str = env!("CARGO_BIN_EXE_isma");
+const TARN: &str = env!("CARGO_BIN_EXE_tarn");
 
 fn cases(dir: &str) -> Vec<PathBuf> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join(dir);
     let mut files: Vec<PathBuf> = std::fs::read_dir(&root)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", root.display()))
         .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|x| x == "isma"))
+        .filter(|p| p.extension().is_some_and(|x| x == "tr"))
         .collect();
     files.sort();
     assert!(!files.is_empty(), "no test cases in {}", root.display());
@@ -27,12 +27,12 @@ fn cases(dir: &str) -> Vec<PathBuf> {
 
 /// A cache private to this test process, so every test run really compiles.
 ///
-/// Its name must stay outside the `isma-test-<name>-<pid>` paths `scratch`
-/// hands out: it used to be `isma-test-cache-<pid>`, which is `scratch("cache")`,
+/// Its name must stay outside the `tarn-test-<name>-<pid>` paths `scratch`
+/// hands out: it used to be `tarn-test-cache-<pid>`, which is `scratch("cache")`,
 /// so the cache test wiped it while other tests were linking against the
 /// runtime object inside. Caches left behind by earlier runs are swept here.
 fn cache_dir() -> PathBuf {
-    const PREFIX: &str = "isma-shared-cache-";
+    const PREFIX: &str = "tarn-shared-cache-";
     static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     DIR.get_or_init(|| {
         let tmp = std::env::temp_dir();
@@ -54,12 +54,12 @@ fn process_alive(pid: u32) -> bool {
     !cfg!(target_os = "linux") || Path::new("/proc").join(pid.to_string()).exists()
 }
 
-fn isma(args: &[&str]) -> Output {
-    Command::new(ISMA).args(args).env("NO_COLOR", "1").env("ISMA_CACHE_DIR", cache_dir()).output().expect("failed to run isma")
+fn tarn(args: &[&str]) -> Output {
+    Command::new(TARN).args(args).env("NO_COLOR", "1").env("TARN_CACHE_DIR", cache_dir()).output().expect("failed to run tarn")
 }
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("isma-test-{name}-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("tarn-test-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -86,13 +86,13 @@ fn run_all(files: Vec<PathBuf>, check: fn(&Path) -> Result<(), String>) {
     }
 }
 
-fn isma_env(args: &[&str], env: &[(&str, &str)]) -> Output {
-    let mut cmd = Command::new(ISMA);
-    cmd.args(args).env("NO_COLOR", "1").env("ISMA_CACHE_DIR", cache_dir());
+fn tarn_env(args: &[&str], env: &[(&str, &str)]) -> Output {
+    let mut cmd = Command::new(TARN);
+    cmd.args(args).env("NO_COLOR", "1").env("TARN_CACHE_DIR", cache_dir());
     for (k, v) in env {
         cmd.env(k, v);
     }
-    cmd.output().expect("failed to run isma")
+    cmd.output().expect("failed to run tarn")
 }
 
 /// Run a `tests/run` program and compare its output; also fail on leaks.
@@ -100,7 +100,7 @@ fn check_run(f: &Path, extra: &[&str]) -> Result<(), String> {
     let mut args = vec!["run"];
     args.extend_from_slice(extra);
     args.push(f.to_str().unwrap());
-    let out = isma_env(&args, &[("ISMA_ARC_CHECK", "1")]);
+    let out = tarn_env(&args, &[("TARN_ARC_CHECK", "1")]);
     let expected =
         std::fs::read_to_string(f.with_extension("out")).map_err(|e| format!("{}: missing .out file ({e})", f.display()))?;
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -126,7 +126,7 @@ fn run_programs() {
 
 /// Can this clang build programs with AddressSanitizer?
 fn sanitizer_available() -> bool {
-    let Ok(clang) = isma::driver::find_clang() else { return false };
+    let Ok(clang) = tarn::driver::find_clang() else { return false };
     let dir = scratch("asan-probe");
     let src = dir.join("probe.c");
     std::fs::write(&src, "int main(void) { return 0; }\n").unwrap();
@@ -155,17 +155,17 @@ fn run_programs_under_sanitizers() {
 fn allocation_budgets() {
     run_all(cases("arc"), |f| {
         let max: u64 = directive(f, "expect-max-allocs").parse().map_err(|e| format!("{}: bad budget: {e}", f.display()))?;
-        let out = isma_env(&["run", f.to_str().unwrap()], &[("ISMA_ARC_STATS", "1"), ("ISMA_ARC_CHECK", "1")]);
+        let out = tarn_env(&["run", f.to_str().unwrap()], &[("TARN_ARC_STATS", "1"), ("TARN_ARC_CHECK", "1")]);
         let stderr = String::from_utf8_lossy(&out.stderr);
         if !out.status.success() || stderr.contains("objects leaked") {
             return Err(format!("{}: failed\n{stderr}", f.display()));
         }
         let allocs: u64 = stderr
             .lines()
-            .find_map(|l| l.strip_prefix("isma arc: "))
+            .find_map(|l| l.strip_prefix("tarn arc: "))
             .and_then(|l| l.split_whitespace().next())
             .and_then(|n| n.parse().ok())
-            .ok_or_else(|| format!("{}: no `isma arc:` stats line in\n{stderr}", f.display()))?;
+            .ok_or_else(|| format!("{}: no `tarn arc:` stats line in\n{stderr}", f.display()))?;
         if allocs > max {
             return Err(format!("{}: {allocs} allocations, budget is {max}", f.display()));
         }
@@ -177,7 +177,7 @@ fn allocation_budgets() {
 fn compile_errors() {
     run_all(cases("fail"), |f| {
         let want = directive(f, "expect-error");
-        let out = isma(&["check", f.to_str().unwrap()]);
+        let out = tarn(&["check", f.to_str().unwrap()]);
         let stderr = String::from_utf8_lossy(&out.stderr);
         if out.status.success() {
             return Err(format!("{}: compiled successfully but should have failed with `{want}`", f.display()));
@@ -193,7 +193,7 @@ fn compile_errors() {
 fn runtime_panics() {
     run_all(cases("panic"), |f| {
         let want = directive(f, "expect-panic");
-        let out = isma(&["run", f.to_str().unwrap()]);
+        let out = tarn(&["run", f.to_str().unwrap()]);
         let stderr = String::from_utf8_lossy(&out.stderr);
         if out.status.code() != Some(101) {
             return Err(format!("{}: expected exit code 101, got {}\n{stderr}", f.display(), out.status));
@@ -207,36 +207,36 @@ fn runtime_panics() {
 
 #[test]
 fn build_produces_native_executable() {
-    let dir = std::env::temp_dir().join(format!("isma-build-test-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("tarn-build-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let exe = dir.join("fib");
     let ll = dir.join("fib.ll");
-    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/fib.isma");
-    let out = isma(&["build", src.to_str().unwrap(), "-o", exe.to_str().unwrap(), "--emit-llvm"]);
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/fib.tr");
+    let out = tarn(&["build", src.to_str().unwrap(), "-o", exe.to_str().unwrap(), "--emit-llvm"]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let run = Command::new(&exe).output().unwrap();
     assert!(String::from_utf8_lossy(&run.stdout).contains("fib(30) = 832040"));
     let ir = std::fs::read_to_string(&ll).unwrap();
-    assert!(ir.contains("define internal i64 @isma_fn_fib(i64 %a0)"));
+    assert!(ir.contains("define internal i64 @tarn_fn_fib(i64 %a0)"));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn python_style_invocation_with_args() {
     let dir = scratch("args");
-    let script = dir.join("echo.isma");
+    let script = dir.join("echo.tr");
     std::fs::write(
         &script,
         "fn main():\n    val a = args()\n    print(a.len())\n    for x in a:\n        print(x)\n",
     )
     .unwrap();
-    // `isma file.isma ...`: everything after the script goes to the script,
-    // including things that look like isma flags.
-    let out = isma(&[script.to_str().unwrap(), "hello", "--debug", "two words"]);
+    // `tarn file.tr ...`: everything after the script goes to the script,
+    // including things that look like tarn flags.
+    let out = tarn(&[script.to_str().unwrap(), "hello", "--debug", "two words"]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(String::from_utf8_lossy(&out.stdout), "3\nhello\n--debug\ntwo words\n");
-    // `isma run file.isma -- x` still works.
-    let out = isma(&["run", script.to_str().unwrap(), "--", "x"]);
+    // `tarn run file.tr -- x` still works.
+    let out = tarn(&["run", script.to_str().unwrap(), "--", "x"]);
     assert_eq!(String::from_utf8_lossy(&out.stdout), "1\nx\n");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -245,9 +245,9 @@ fn python_style_invocation_with_args() {
 fn cache_reuses_and_invalidates() {
     let dir = scratch("cache");
     let cache = dir.join("cache");
-    let script = dir.join("prog.isma");
+    let script = dir.join("prog.tr");
     let run = || {
-        Command::new(ISMA).arg(&script).env("ISMA_CACHE_DIR", &cache).output().unwrap()
+        Command::new(TARN).arg(&script).env("TARN_CACHE_DIR", &cache).output().unwrap()
     };
     std::fs::write(&script, "fn main():\n    print(1)\n").unwrap();
     assert_eq!(String::from_utf8_lossy(&run().stdout), "1\n");
@@ -269,8 +269,8 @@ fn cache_reuses_and_invalidates() {
 fn cache_rebuilds_when_an_imported_file_changes() {
     let dir = scratch("cache-imports");
     let cache = dir.join("cache");
-    let (main, helper) = (dir.join("main.isma"), dir.join("helper.isma"));
-    let run = || Command::new(ISMA).arg(&main).env("ISMA_CACHE_DIR", &cache).output().unwrap();
+    let (main, helper) = (dir.join("main.tr"), dir.join("helper.tr"));
+    let run = || Command::new(TARN).arg(&main).env("TARN_CACHE_DIR", &cache).output().unwrap();
     std::fs::write(&main, "from helper import value\nfn main():\n    print(value())\n").unwrap();
     std::fs::write(&helper, "fn value() -> Int:\n    return 1\n").unwrap();
     assert_eq!(String::from_utf8_lossy(&run().stdout), "1\n");
@@ -281,7 +281,7 @@ fn cache_rebuilds_when_an_imported_file_changes() {
     let out = run();
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(1));
-    assert!(stderr.contains("helper.isma:2:12") && stderr.contains("mismatched types"), "{stderr}");
+    assert!(stderr.contains("helper.tr:2:12") && stderr.contains("mismatched types"), "{stderr}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -289,19 +289,19 @@ fn cache_rebuilds_when_an_imported_file_changes() {
 fn modules_need_no_main_until_run() {
     let dir = scratch("no-main");
     std::fs::create_dir_all(dir.join("function")).unwrap();
-    let math = dir.join("function/math.isma");
+    let math = dir.join("function/math.tr");
     std::fs::write(&math, "fn square(x: Int) -> Int:\n    return x * x\n").unwrap();
-    std::fs::write(dir.join("main.isma"), "import function.math\nfn main():\n    print(math.square(7))\n").unwrap();
+    std::fs::write(dir.join("main.tr"), "import function.math\nfn main():\n    print(math.square(7))\n").unwrap();
     // Checking a module is fine (this is also what the editor does)...
-    let out = isma(&["check", math.to_str().unwrap()]);
+    let out = tarn(&["check", math.to_str().unwrap()]);
     assert!(out.status.success() && out.stderr.is_empty(), "{}", String::from_utf8_lossy(&out.stderr));
     // ...running it is not: it has no entry point.
-    let out = isma(&["run", math.to_str().unwrap()]);
+    let out = tarn(&["run", math.to_str().unwrap()]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(1));
     assert!(stderr.contains("no `main` function found") && stderr.contains("can only be imported as a module"), "{stderr}");
     // The program that imports it runs.
-    let out = isma(&["run", dir.join("main.isma").to_str().unwrap()]);
+    let out = tarn(&["run", dir.join("main.tr").to_str().unwrap()]);
     assert_eq!(String::from_utf8_lossy(&out.stdout), "49\n", "{}", String::from_utf8_lossy(&out.stderr));
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -311,16 +311,16 @@ fn modules_need_no_main_until_run() {
 fn shebang_scripts_run_directly() {
     use std::os::unix::fs::PermissionsExt;
     let dir = scratch("shebang");
-    // Put the freshly built isma first on PATH so `#!/usr/bin/env isma` finds it.
-    let bin = Path::new(ISMA).parent().unwrap();
+    // Put the freshly built tarn first on PATH so `#!/usr/bin/env tarn` finds it.
+    let bin = Path::new(TARN).parent().unwrap();
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
-    let script = dir.join("hello.isma");
-    std::fs::write(&script, "#!/usr/bin/env isma\nfn main():\n    print(f\"hi {args().len()}\")\n").unwrap();
+    let script = dir.join("hello.tr");
+    std::fs::write(&script, "#!/usr/bin/env tarn\nfn main():\n    print(f\"hi {args().len()}\")\n").unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     // Other test threads spawning processes can briefly inherit our write
     // handle to the script, making exec fail with ETXTBSY: retry that case.
     let out = (0..100)
-        .find_map(|_| match Command::new(&script).arg("a").env("PATH", &path).env("ISMA_CACHE_DIR", cache_dir()).output() {
+        .find_map(|_| match Command::new(&script).arg("a").env("PATH", &path).env("TARN_CACHE_DIR", cache_dir()).output() {
             Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
                 std::thread::sleep(std::time::Duration::from_millis(20));
                 None
@@ -337,7 +337,7 @@ fn shebang_scripts_run_directly() {
 fn lint_warnings() {
     run_all(cases("warn"), |f| {
         let want = directive(f, "expect-warning");
-        let out = isma(&["check", f.to_str().unwrap()]);
+        let out = tarn(&["check", f.to_str().unwrap()]);
         let stderr = String::from_utf8_lossy(&out.stderr);
         if !out.status.success() {
             return Err(format!("{}: warnings must not fail compilation:\n{stderr}", f.display()));
@@ -352,9 +352,9 @@ fn lint_warnings() {
 #[test]
 fn underscore_silences_lints_and_can_repeat() {
     let dir = scratch("underscore");
-    let f = dir.join("u.isma");
+    let f = dir.join("u.tr");
     std::fs::write(&f, "fn main():\n    for _ in 0..2:\n        print(1)\n    val _ = 5\n    val _ = 6\n    val _unused = 7\n").unwrap();
-    let out = isma(&["check", f.to_str().unwrap()]);
+    let out = tarn(&["check", f.to_str().unwrap()]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert!(out.stderr.is_empty(), "expected no warnings: {}", String::from_utf8_lossy(&out.stderr));
     let _ = std::fs::remove_dir_all(&dir);
@@ -371,7 +371,7 @@ struct Lsp {
 impl Lsp {
     fn start() -> Lsp {
         use std::process::Stdio;
-        let mut child = Command::new(ISMA).arg("lsp").stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+        let mut child = Command::new(TARN).arg("lsp").stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
         let stdin = child.stdin.take().unwrap();
         let stdout = std::io::BufReader::new(child.stdout.take().unwrap());
         let mut lsp = Lsp { child, stdin, stdout, next_id: 100 };
@@ -423,7 +423,7 @@ impl Lsp {
     /// Open a document and return its published diagnostics.
     fn open(&mut self, uri: &str, text: &str) -> serde_json::Value {
         self.send(serde_json::json!({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
-            "textDocument": {"uri": uri, "languageId": "isma", "version": 1, "text": text}}}));
+            "textDocument": {"uri": uri, "languageId": "tarn", "version": 1, "text": text}}}));
         let diags = self.recv();
         assert_eq!(diags["method"], "textDocument/publishDiagnostics");
         diags
@@ -440,11 +440,11 @@ impl Lsp {
     }
 }
 
-/// Talk to `isma lsp` over stdio exactly like an editor would.
+/// Talk to `tarn lsp` over stdio exactly like an editor would.
 #[test]
 fn language_server_protocol_roundtrip() {
     let mut lsp = Lsp::start();
-    let uri = "file:///tmp/demo.isma";
+    let uri = "file:///tmp/demo.tr";
     let text = "fn main():\n    val n = 1 + 2.0\n    val unused = 3\n";
     let diags = lsp.open(uri, text);
     let list = diags["params"]["diagnostics"].as_array().unwrap();
@@ -465,7 +465,7 @@ fn language_server_protocol_roundtrip() {
 #[test]
 fn language_server_understands_nullable_types() {
     let mut lsp = Lsp::start();
-    let uri = "file:///tmp/nulls.isma";
+    let uri = "file:///tmp/nulls.tr";
     let text = "struct User:\n    name: String\n\nfn find() -> User?:\n    return null\n\nfn main():\n    val u = find()\n    print(u?.)\n    print(u.)\n    if u != null:\n        print(u.name)\n";
     lsp.open(uri, text);
     let labels = |r: &serde_json::Value| -> Vec<String> {
@@ -495,7 +495,7 @@ fn language_server_understands_nullable_types() {
 #[test]
 fn language_server_understands_enums() {
     let mut lsp = Lsp::start();
-    let uri = "file:///tmp/enums.isma";
+    let uri = "file:///tmp/enums.tr";
     let text = "enum Shape:\n    Circle(radius: Float)\n    Empty\n\nfn area(s: Shape) -> Float:\n    match s:\n        case Circle(r):\n            return r\n        case Empty:\n            return 0.0\n\nfn main():\n    print(area(Shape.))\n";
     lsp.open(uri, text);
     // `Shape.|`
@@ -522,11 +522,11 @@ fn language_server_understands_enums() {
 #[test]
 fn language_server_works_across_files() {
     let dir = scratch("lsp-modules");
-    let geometry = dir.join("geometry.isma");
+    let geometry = dir.join("geometry.tr");
     let geometry_text = "# Shapes and sizes.\n\nstruct Point:\n    x: Float\n    y: Float\n\n# The distance from the origin.\nfn norm(p: Point) -> Float:\n    return sqrt(p.x * p.x + p.y * p.y)\n\nfn _helper() -> Int:\n    return 1\n";
     std::fs::write(&geometry, geometry_text).unwrap();
     let main_text = "import geometry as geo\nfrom geometry import Point, norm\n\nfn main():\n    val p = Point(3.0, 4.0)\n    print(norm(p))\n    print(geo.norm(p))\n";
-    let main = dir.join("main.isma");
+    let main = dir.join("main.tr");
     std::fs::write(&main, main_text).unwrap();
     let uri = |p: &Path| format!("file://{}", p.display());
     let (main_uri, geometry_uri) = (uri(&main), uri(&geometry));
@@ -555,7 +555,7 @@ fn language_server_works_across_files() {
     let errors = republished["params"]["diagnostics"].as_array().unwrap();
     let import_error = errors.iter().find(|d| d["message"].as_str().unwrap().contains("an imported file has an error")).unwrap_or_else(|| panic!("{republished}"));
     assert_eq!(import_error["range"]["start"]["line"], 0);
-    assert!(import_error["message"].as_str().unwrap().contains("geometry.isma:9:12: mismatched types"), "{import_error}");
+    assert!(import_error["message"].as_str().unwrap().contains("geometry.tr:9:12: mismatched types"), "{import_error}");
     lsp.stop();
 
     // Completion inside `import` lines, in a fresh session (the files on disk).

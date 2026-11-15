@@ -1,6 +1,6 @@
 //! Editor-facing information collected while type checking: hover text,
 //! go-to-definition links, expression types (for `.` completion), inlay
-//! hints and symbols. Consumed by the language server (`isma lsp`).
+//! hints and symbols. Consumed by the language server (`tarn lsp`).
 
 use crate::span::Span;
 use crate::types::Type;
@@ -64,7 +64,7 @@ pub enum ImportedSymbol {
 #[derive(Debug, Clone)]
 pub struct HoverInfo {
     pub span: Span,
-    /// Isma code shown in a code block, e.g. `fn fib(n: Int) -> Int`.
+    /// Tarn code shown in a code block, e.g. `fn fib(n: Int) -> Int`.
     pub code: String,
     pub doc: Option<String>,
 }

@@ -1,7 +1,7 @@
 # Count the words in a file, or in standard input:
 #
-#     isma wordfreq.isma notes.txt
-#     cat *.md | isma wordfreq.isma
+#     tarn wordfreq.tr notes.txt
+#     cat *.md | tarn wordfreq.tr
 import fs
 
 fn main():

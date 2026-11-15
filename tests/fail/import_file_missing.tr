@@ -1,4 +1,4 @@
-# expect-error: fail/modules/nosuch.isma`
+# expect-error: fail/modules/nosuch.tr`
 import modules.nosuch
 fn main():
     pass

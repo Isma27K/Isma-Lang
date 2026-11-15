@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Times Isma vs Rust (rustc -O) vs Python on the same programs.
+# Times Tarn vs Rust (rustc -O) vs Python on the same programs.
 set -euo pipefail
 cd "$(dirname "$0")"
 mkdir -p out
 cargo build --release -q --manifest-path ../Cargo.toml
-ISMA=../target/release/isma
+TARN=../target/release/tarn
 
 best_of_3() {
     local best=""
@@ -17,18 +17,18 @@ best_of_3() {
     echo "$best"
 }
 
-printf "%-8s %10s %10s %10s\n" bench isma rust python
+printf "%-8s %10s %10s %10s\n" bench tarn rust python
 results=()
 for b in fib sieve strings particles trees maps; do
-    $ISMA build "$b.isma" -o "out/$b-isma"
+    $TARN build "$b.tr" -o "out/$b-tarn"
     rustc -O "$b.rs" -o "out/$b-rust" 2>/dev/null
     expected=$("out/$b-rust")
-    [[ "$("out/$b-isma")" == "$expected" ]] || { echo "MISMATCH in $b"; exit 1; }
-    ti=$(best_of_3 "out/$b-isma")
+    [[ "$("out/$b-tarn")" == "$expected" ]] || { echo "MISMATCH in $b"; exit 1; }
+    ti=$(best_of_3 "out/$b-tarn")
     tr=$(best_of_3 "out/$b-rust")
     if command -v python3 > /dev/null; then tp="$(best_of_3 python3 "$b.py")ms"; else tp="n/a"; fi
     printf "%-8s %8sms %8sms %10s\n" "$b" "$ti" "$tr" "$tp"
-    results+=("\"$b\": {\"isma\": $ti, \"rust\": $tr, \"python\": ${tp%ms}}")
+    results+=("\"$b\": {\"tarn\": $ti, \"rust\": $tr, \"python\": ${tp%ms}}")
 done
 # Machine-readable results (used by docs/media/generate.py for the README chart).
 {

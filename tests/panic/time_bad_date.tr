@@ -1,0 +1,4 @@
+# expect-panic: time_bad_date.tr:4:11: invalid date 2023-02-29: February 2023 has 28 days
+import time
+fn main():
+    print(time.utc(2023, 2, 29, 0, 0, 0).to_iso())

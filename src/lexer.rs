@@ -477,11 +477,11 @@ impl<'a> Lexer<'a> {
                     if at_eol {
                         self.push(Tok::Colon, start, self.pos);
                     }
-                    Diagnostic::error("Isma uses `:` and indentation for blocks, not `{`", span)
+                    Diagnostic::error("Tarn uses `:` and indentation for blocks, not `{`", span)
                         .with_primary("replace this with `:`")
                         .with_help("end the line with `:` and indent the block below it by 4 spaces:\n\nwhile x < 10:\n    x += 1")
                 } else {
-                    Diagnostic::error("Isma blocks end by un-indenting, not with `}`", span)
+                    Diagnostic::error("Tarn blocks end by un-indenting, not with `}`", span)
                         .with_primary("remove this")
                         .with_help("delete the `}`; a block ends where the indentation goes back")
                 };
@@ -491,10 +491,10 @@ impl<'a> Lexer<'a> {
             _ => {
                 let ch = self.take_char();
                 let msg = match ch {
-                    '&' if self.peek() == b'&' => "unexpected `&&`; Isma uses `and`".to_string(),
-                    '|' if self.peek() == b'|' => "unexpected `||`; Isma uses `or`".to_string(),
-                    '!' => "unexpected `!`; Isma uses `not` (and `!!` to assert a value isn't null)".to_string(),
-                    '\'' => "single quotes are not strings in Isma; use double quotes".to_string(),
+                    '&' if self.peek() == b'&' => "unexpected `&&`; Tarn uses `and`".to_string(),
+                    '|' if self.peek() == b'|' => "unexpected `||`; Tarn uses `or`".to_string(),
+                    '!' => "unexpected `!`; Tarn uses `not` (and `!!` to assert a value isn't null)".to_string(),
+                    '\'' => "single quotes are not strings in Tarn; use double quotes".to_string(),
                     _ => format!("unexpected character `{ch}`"),
                 };
                 self.error(msg, start, self.pos);

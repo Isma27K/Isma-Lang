@@ -726,7 +726,7 @@ fn insert_rc(f: &mut Func, sigs: &[Vec<bool>], own: &Ownership) {
 // ---------------------------------------------------------------- in-place append
 
 /// `s + t` where `s` is an owned string that dies right there becomes an
-/// in-place append (`isma_str_append_owned`), which reuses `s`'s buffer when
+/// in-place append (`tarn_str_append_owned`), which reuses `s`'s buffer when
 /// nobody else holds it. This is what makes `out += x` loops linear.
 fn use_owned_append(f: &mut Func, sigs: &[Vec<bool>], own: &Ownership) {
     let (_, live_out) = liveness(f, sigs, own);

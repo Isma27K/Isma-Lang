@@ -1,89 +1,86 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="760" height="1000" viewBox="0 0 760 1000" role="img" aria-label="Benchmark: Isma vs Rust vs Python run times">
-<title>Benchmark: Isma vs Rust vs Python run times</title>
-<style>
-text{font-family:system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif}
-.p{fill:#0b0b0b} .s{fill:#52514e} .axis{stroke:#c3c2b7;stroke-width:1}
-.b0{fill:#2a78d6}.b1{fill:#eb6834}.b2{fill:#1baf7a}
-@media (prefers-color-scheme:dark){.p{fill:#f0efec} .s{fill:#c3c2b7} .axis{stroke:#383835} .b0{fill:#3987e5}.b1{fill:#d95926}.b2{fill:#199e70}}
-</style>
-<text class="p" x="0" y="20" font-size="17" font-weight="600">Run time in milliseconds (lower is better)</text>
-<text class="s" x="0" y="42" font-size="12.5">Best of 3 runs, same machine (AMD Ryzen 5 5500), 2026-11-14. Rust built with rustc -O.</text>
-<rect class="b0" x="0" y="58" width="12" height="12" rx="3"/>
-<text class="s" x="18" y="69" font-size="12.5">Isma</text>
-<rect class="b1" x="70.0" y="58" width="12" height="12" rx="3"/>
-<text class="s" x="88.0" y="69" font-size="12.5">Rust</text>
-<rect class="b2" x="140.0" y="58" width="12" height="12" rx="3"/>
-<text class="s" x="158.0" y="69" font-size="12.5">Python</text>
-<text class="p" x="0" y="96" font-size="13.5" font-weight="600">fib(35): 30 million recursive function calls</text>
-<text class="s" x="0" y="114" font-size="12">Isma is 23× faster than Python; Rust is 1.4× faster than Isma</text>
-<text class="p" x="64" y="143" font-size="12.5" text-anchor="end">Isma</text>
-<path class="b0" d="M76.0 128.0h20.4a4 4 0 0 1 4 4v12.0a4 4 0 0 1 -4 4h-20.4z"><title>Isma: 38 ms</title></path>
-<text class="s" x="108.4" y="143" font-size="12.5">38 ms</text>
-<text class="p" x="64" y="173" font-size="12.5" text-anchor="end">Rust</text>
-<path class="b1" d="M76.0 158.0h14.0a4 4 0 0 1 4 4v12.0a4 4 0 0 1 -4 4h-14.0z"><title>Rust: 28 ms</title></path>
-<text class="s" x="102.0" y="173" font-size="12.5">28 ms</text>
-<text class="p" x="64" y="203" font-size="12.5" text-anchor="end">Python</text>
-<path class="b2" d="M76.0 188.0h556.0a4 4 0 0 1 4 4v12.0a4 4 0 0 1 -4 4h-556.0z"><title>Python: 872 ms</title></path>
-<text class="s" x="644.0" y="203" font-size="12.5">872 ms</text>
-<line class="axis" x1="75.5" y1="124" x2="75.5" y2="212"/>
-<text class="p" x="0" y="248" font-size="13.5" font-weight="600">Sieve of Eratosthenes up to 10 million (List[Bool])</text>
-<text class="s" x="0" y="266" font-size="12">Isma is 41× faster than Python; Rust is 1.2× faster than Isma</text>
-<text class="p" x="64" y="295" font-size="12.5" text-anchor="end">Isma</text>
-<path class="b0" d="M76.0 280.0h9.6a4 4 0 0 1 4 4v12.0a4 4 0 0 1 -4 4h-9.6z"><title>Isma: 49 ms</title></path>
-<text class="s" x="97.6" y="295" font-size="12.5">49 ms</text>
-<text class="p" x="64" y="325" font-size="12.5" text-anchor="end">Rust</text>
-<path class="b1" d="M76.0 310.0h7.4a4 4 0 0 1 4 4v12.0a4 4 0 0 1 -4 4h-7.4z"><title>Rust: 41 ms</title></path>
-<text class="s" x="95.4" y="325" font-size="12.5">41 ms</text>
-<text class="p" x="64" y="355" font-size="12.5" text-anchor="end">Python</text>
-<path class="b2" d="M76.0 340.0h556.0a4 4 0 0 1 4 4v12.0a4 4 0 0 1 -4 4h-556.0z"><title>Python: 2012 ms</title></path>
-<text class="s" x="644.0" y="355" font-size="12.5">2,012 ms</text>
-<line class="axis" x1="75.5" y1="276" x2="75.5" y2="364"/>
-<text class="p" x="0" y="400" font-size="13.5" font-weight="600">Building a 15 MB string from 2 million f-strings</text>
-<text class="s" x="0" y="418" font-size="12">Isma is 2.3× faster than Python; Rust is 1.4× faster than Isma</text>
-<text class="p" x="64" y="447" font-size="12.5" text-anchor="end">Isma</text>
-<path class="b0" d="M76.0 432.0h237.7a4 4 0 0 1 4 4v12.0a4 4 0 0 1 -4 4h-237.7z"><title>Isma: 120 ms</title></path>
-<text class="s" x="325.7" y="447" font-size="12.5">120 ms</text>
-<text class="p" x="64" y="477" font-size="12.5" text-anchor="end">Rust</text>
-<path class="b1" d="M76.0 462.0h163.2a4 4 0 0 1 4 4v12.0a4 4 0 0 1 -4 4h-163.2z"><title>Rust: 83 ms</title></path>
-<text class="s" x="251.2" y="477" font-size="12.5">83 ms</text>
-<text class="p" x="64" y="507" font-size="12.5" text-anchor="end">Python</text>
-<path class="b2" d="M76.0 492.0h556.0a4 4 0 0 1 4 4v12.0a4 4 0 0 1 -4 4h-556.0z"><title>Python: 278 ms</title></path>
-<text class="s" x="644.0" y="507" font-size="12.5">278 ms</text>
-<line class="axis" x1="75.5" y1="428" x2="75.5" y2="516"/>
-<text class="p" x="0" y="552" font-size="13.5" font-weight="600">Moving a Vec2 particle 5 million steps (pos = pos.add(vel))</text>
-<text class="s" x="0" y="570" font-size="12">Isma is 54× faster than Python; Rust is 2.3× faster than Isma</text>
-<text class="p" x="64" y="599" font-size="12.5" text-anchor="end">Isma</text>
-<path class="b0" d="M76.0 584.0h6.4a4 4 0 0 1 4 4v12.0a4 4 0 0 1 -4 4h-6.4z"><title>Isma: 21 ms</title></path>
-<text class="s" x="94.4" y="599" font-size="12.5">21 ms</text>
-<text class="p" x="64" y="629" font-size="12.5" text-anchor="end">Rust</text>
-<path class="b1" d="M76.0 614.0h2.2a2.2320637732506645 2.2320637732506645 0 0 1 2.2320637732506645 2.2320637732506645v15.5a2.2320637732506645 2.2320637732506645 0 0 1 -2.2320637732506645 2.2320637732506645h-2.2z"><title>Rust: 9 ms</title></path>
-<text class="s" x="88.5" y="629" font-size="12.5">9 ms</text>
-<text class="p" x="64" y="659" font-size="12.5" text-anchor="end">Python</text>
-<path class="b2" d="M76.0 644.0h556.0a4 4 0 0 1 4 4v12.0a4 4 0 0 1 -4 4h-556.0z"><title>Python: 1129 ms</title></path>
-<text class="s" x="644.0" y="659" font-size="12.5">1,129 ms</text>
-<line class="axis" x1="75.5" y1="580" x2="75.5" y2="668"/>
-<text class="p" x="0" y="704" font-size="13.5" font-weight="600">Binary trees: building and walking 3 million enum nodes</text>
-<text class="s" x="0" y="722" font-size="12">Isma is 7.8× faster than Python; Isma is 2.2× faster than Rust</text>
-<text class="p" x="64" y="751" font-size="12.5" text-anchor="end">Isma</text>
-<path class="b0" d="M76.0 736.0h68.0a4 4 0 0 1 4 4v12.0a4 4 0 0 1 -4 4h-68.0z"><title>Isma: 41 ms</title></path>
-<text class="s" x="156.0" y="751" font-size="12.5">41 ms</text>
-<text class="p" x="64" y="781" font-size="12.5" text-anchor="end">Rust</text>
-<path class="b1" d="M76.0 766.0h157.5a4 4 0 0 1 4 4v12.0a4 4 0 0 1 -4 4h-157.5z"><title>Rust: 92 ms</title></path>
-<text class="s" x="245.5" y="781" font-size="12.5">92 ms</text>
-<text class="p" x="64" y="811" font-size="12.5" text-anchor="end">Python</text>
-<path class="b2" d="M76.0 796.0h556.0a4 4 0 0 1 4 4v12.0a4 4 0 0 1 -4 4h-556.0z"><title>Python: 319 ms</title></path>
-<text class="s" x="644.0" y="811" font-size="12.5">319 ms</text>
-<line class="axis" x1="75.5" y1="732" x2="75.5" y2="820"/>
-<text class="p" x="0" y="856" font-size="13.5" font-weight="600">Hash maps: 4 million counting updates, Int and String keys</text>
-<text class="s" x="0" y="874" font-size="12">Isma is 4.2× faster than Python; Rust is 1.4× faster than Isma</text>
-<text class="p" x="64" y="903" font-size="12.5" text-anchor="end">Isma</text>
-<path class="b0" d="M76.0 888.0h130.9a4 4 0 0 1 4 4v12.0a4 4 0 0 1 -4 4h-130.9z"><title>Isma: 375 ms</title></path>
-<text class="s" x="218.9" y="903" font-size="12.5">375 ms</text>
-<text class="p" x="64" y="933" font-size="12.5" text-anchor="end">Rust</text>
-<path class="b1" d="M76.0 918.0h95.6a4 4 0 0 1 4 4v12.0a4 4 0 0 1 -4 4h-95.6z"><title>Rust: 277 ms</title></path>
-<text class="s" x="183.6" y="933" font-size="12.5">277 ms</text>
-<text class="p" x="64" y="963" font-size="12.5" text-anchor="end">Python</text>
-<path class="b2" d="M76.0 948.0h556.0a4 4 0 0 1 4 4v12.0a4 4 0 0 1 -4 4h-556.0z"><title>Python: 1557 ms</title></path>
-<text class="s" x="644.0" y="963" font-size="12.5">1,557 ms</text>
-<line class="axis" x1="75.5" y1="884" x2="75.5" y2="972"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="1054" viewBox="0 0 760 1054" role="img" aria-label="Benchmark: Tarn vs Rust vs Python run times">
+<title>Benchmark: Tarn vs Rust vs Python run times</title>
+<rect x=".5" y=".5" width="759" height="1053" rx="18" fill="#ffffff" stroke="#e6e6e6"/>
+<g font-family="Inter,'SF Pro Text','Helvetica Neue',Helvetica,Arial,system-ui,sans-serif">
+<text x="36" y="56" font-size="18" font-weight="500" fill="#111111">Run time, in milliseconds</text>
+<text x="36" y="80" font-size="12.5" fill="#6e6e6e">Lower is better. Best of 3 runs on one machine (AMD Ryzen 5 5500), Rust built with rustc -O.</text>
+<rect x="36" y="98" width="10" height="10" rx="2" fill="#111111"/>
+<text x="52" y="107" font-size="12.5" fill="#6e6e6e">Tarn</text>
+<rect x="106.8" y="98" width="10" height="10" rx="2" fill="#a9a9a9"/>
+<text x="122.8" y="107" font-size="12.5" fill="#6e6e6e">Rust</text>
+<rect x="177.6" y="98" width="10" height="10" rx="2" fill="#dcdcdb"/>
+<text x="193.6" y="107" font-size="12.5" fill="#6e6e6e">Python</text>
+<line x1="36" y1="128" x2="724" y2="128" stroke="#f0f0ef"/>
+<text x="36" y="150" font-size="13.5" font-weight="500" fill="#111111">fib(35): 30 million recursive function calls</text>
+<text x="36" y="169" font-size="12" fill="#a8a8a8">23× faster than Python · Rust is 1.4× faster</text>
+<text x="130" y="196" font-size="12" text-anchor="end" fill="#6e6e6e">Tarn</text>
+<path d="M144.0 185.0h19.7a3 3 0 0 1 3 3v8.0a3 3 0 0 1 -3 3h-19.7z" fill="#111111"><title>Tarn: 38 ms</title></path>
+<text x="174.7" y="196" font-size="12" fill="#6e6e6e">38 ms</text>
+<text x="130" y="220" font-size="12" text-anchor="end" fill="#6e6e6e">Rust</text>
+<path d="M144.0 209.0h13.7a3 3 0 0 1 3 3v8.0a3 3 0 0 1 -3 3h-13.7z" fill="#a9a9a9"><title>Rust: 28 ms</title></path>
+<text x="168.7" y="220" font-size="12" fill="#6e6e6e">28 ms</text>
+<text x="130" y="244" font-size="12" text-anchor="end" fill="#6e6e6e">Python</text>
+<path d="M144.0 233.0h517.0a3 3 0 0 1 3 3v8.0a3 3 0 0 1 -3 3h-517.0z" fill="#dcdcdb"><title>Python: 872 ms</title></path>
+<text x="672.0" y="244" font-size="12" fill="#6e6e6e">872 ms</text>
+<line x1="36" y1="282" x2="724" y2="282" stroke="#f0f0ef"/>
+<text x="36" y="304" font-size="13.5" font-weight="500" fill="#111111">Sieve of Eratosthenes up to 10 million</text>
+<text x="36" y="323" font-size="12" fill="#a8a8a8">41× faster than Python · Rust is 1.2× faster</text>
+<text x="130" y="350" font-size="12" text-anchor="end" fill="#6e6e6e">Tarn</text>
+<path d="M144.0 339.0h9.7a3 3 0 0 1 3 3v8.0a3 3 0 0 1 -3 3h-9.7z" fill="#111111"><title>Tarn: 49 ms</title></path>
+<text x="164.7" y="350" font-size="12" fill="#6e6e6e">49 ms</text>
+<text x="130" y="374" font-size="12" text-anchor="end" fill="#6e6e6e">Rust</text>
+<path d="M144.0 363.0h7.6a3 3 0 0 1 3 3v8.0a3 3 0 0 1 -3 3h-7.6z" fill="#a9a9a9"><title>Rust: 41 ms</title></path>
+<text x="162.6" y="374" font-size="12" fill="#6e6e6e">41 ms</text>
+<text x="130" y="398" font-size="12" text-anchor="end" fill="#6e6e6e">Python</text>
+<path d="M144.0 387.0h517.0a3 3 0 0 1 3 3v8.0a3 3 0 0 1 -3 3h-517.0z" fill="#dcdcdb"><title>Python: 2012 ms</title></path>
+<text x="672.0" y="398" font-size="12" fill="#6e6e6e">2,012 ms</text>
+<line x1="36" y1="436" x2="724" y2="436" stroke="#f0f0ef"/>
+<text x="36" y="458" font-size="13.5" font-weight="500" fill="#111111">Building a 15 MB string from 2 million f-strings</text>
+<text x="36" y="477" font-size="12" fill="#a8a8a8">2.3× faster than Python · Rust is 1.4× faster</text>
+<text x="130" y="504" font-size="12" text-anchor="end" fill="#6e6e6e">Tarn</text>
+<path d="M144.0 493.0h221.5a3 3 0 0 1 3 3v8.0a3 3 0 0 1 -3 3h-221.5z" fill="#111111"><title>Tarn: 120 ms</title></path>
+<text x="376.5" y="504" font-size="12" fill="#6e6e6e">120 ms</text>
+<text x="130" y="528" font-size="12" text-anchor="end" fill="#6e6e6e">Rust</text>
+<path d="M144.0 517.0h152.3a3 3 0 0 1 3 3v8.0a3 3 0 0 1 -3 3h-152.3z" fill="#a9a9a9"><title>Rust: 83 ms</title></path>
+<text x="307.3" y="528" font-size="12" fill="#6e6e6e">83 ms</text>
+<text x="130" y="552" font-size="12" text-anchor="end" fill="#6e6e6e">Python</text>
+<path d="M144.0 541.0h517.0a3 3 0 0 1 3 3v8.0a3 3 0 0 1 -3 3h-517.0z" fill="#dcdcdb"><title>Python: 278 ms</title></path>
+<text x="672.0" y="552" font-size="12" fill="#6e6e6e">278 ms</text>
+<line x1="36" y1="590" x2="724" y2="590" stroke="#f0f0ef"/>
+<text x="36" y="612" font-size="13.5" font-weight="500" fill="#111111">Moving a Vec2 particle 5 million steps</text>
+<text x="36" y="631" font-size="12" fill="#a8a8a8">54× faster than Python · Rust is 2.3× faster</text>
+<text x="130" y="658" font-size="12" text-anchor="end" fill="#6e6e6e">Tarn</text>
+<path d="M144.0 647.0h6.7a3 3 0 0 1 3 3v8.0a3 3 0 0 1 -3 3h-6.7z" fill="#111111"><title>Tarn: 21 ms</title></path>
+<text x="161.7" y="658" font-size="12" fill="#6e6e6e">21 ms</text>
+<text x="130" y="682" font-size="12" text-anchor="end" fill="#6e6e6e">Rust</text>
+<path d="M144.0 671.0h2.1a2.0726306465899023 2.0726306465899023 0 0 1 2.0726306465899023 2.0726306465899023v9.9a2.0726306465899023 2.0726306465899023 0 0 1 -2.0726306465899023 2.0726306465899023h-2.1z" fill="#a9a9a9"><title>Rust: 9 ms</title></path>
+<text x="156.1" y="682" font-size="12" fill="#6e6e6e">9 ms</text>
+<text x="130" y="706" font-size="12" text-anchor="end" fill="#6e6e6e">Python</text>
+<path d="M144.0 695.0h517.0a3 3 0 0 1 3 3v8.0a3 3 0 0 1 -3 3h-517.0z" fill="#dcdcdb"><title>Python: 1129 ms</title></path>
+<text x="672.0" y="706" font-size="12" fill="#6e6e6e">1,129 ms</text>
+<line x1="36" y1="744" x2="724" y2="744" stroke="#f0f0ef"/>
+<text x="36" y="766" font-size="13.5" font-weight="500" fill="#111111">Binary trees: building and walking 3 million enum nodes</text>
+<text x="36" y="785" font-size="12" fill="#a8a8a8">7.8× faster than Python · 2.2× faster than Rust</text>
+<text x="130" y="812" font-size="12" text-anchor="end" fill="#6e6e6e">Tarn</text>
+<path d="M144.0 801.0h63.8a3 3 0 0 1 3 3v8.0a3 3 0 0 1 -3 3h-63.8z" fill="#111111"><title>Tarn: 41 ms</title></path>
+<text x="218.8" y="812" font-size="12" fill="#6e6e6e">41 ms</text>
+<text x="130" y="836" font-size="12" text-anchor="end" fill="#6e6e6e">Rust</text>
+<path d="M144.0 825.0h147.0a3 3 0 0 1 3 3v8.0a3 3 0 0 1 -3 3h-147.0z" fill="#a9a9a9"><title>Rust: 92 ms</title></path>
+<text x="302.0" y="836" font-size="12" fill="#6e6e6e">92 ms</text>
+<text x="130" y="860" font-size="12" text-anchor="end" fill="#6e6e6e">Python</text>
+<path d="M144.0 849.0h517.0a3 3 0 0 1 3 3v8.0a3 3 0 0 1 -3 3h-517.0z" fill="#dcdcdb"><title>Python: 319 ms</title></path>
+<text x="672.0" y="860" font-size="12" fill="#6e6e6e">319 ms</text>
+<line x1="36" y1="898" x2="724" y2="898" stroke="#f0f0ef"/>
+<text x="36" y="920" font-size="13.5" font-weight="500" fill="#111111">Hash maps: 4 million counting updates</text>
+<text x="36" y="939" font-size="12" fill="#a8a8a8">4.2× faster than Python · Rust is 1.4× faster</text>
+<text x="130" y="966" font-size="12" text-anchor="end" fill="#6e6e6e">Tarn</text>
+<path d="M144.0 955.0h122.2a3 3 0 0 1 3 3v8.0a3 3 0 0 1 -3 3h-122.2z" fill="#111111"><title>Tarn: 375 ms</title></path>
+<text x="277.2" y="966" font-size="12" fill="#6e6e6e">375 ms</text>
+<text x="130" y="990" font-size="12" text-anchor="end" fill="#6e6e6e">Rust</text>
+<path d="M144.0 979.0h89.5a3 3 0 0 1 3 3v8.0a3 3 0 0 1 -3 3h-89.5z" fill="#a9a9a9"><title>Rust: 277 ms</title></path>
+<text x="244.5" y="990" font-size="12" fill="#6e6e6e">277 ms</text>
+<text x="130" y="1014" font-size="12" text-anchor="end" fill="#6e6e6e">Python</text>
+<path d="M144.0 1003.0h517.0a3 3 0 0 1 3 3v8.0a3 3 0 0 1 -3 3h-517.0z" fill="#dcdcdb"><title>Python: 1557 ms</title></path>
+<text x="672.0" y="1014" font-size="12" fill="#6e6e6e">1,557 ms</text>
+</g>
 </svg>

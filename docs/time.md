@@ -16,7 +16,7 @@ fn main():
     print(now + time.days(3) > deadline)              # false
 ```
 
-The module is [written in Isma](../stdlib/time.isma) (about 650 lines). Only reading the clock and sleeping go through small C hooks.
+The module is [written in Tarn](../stdlib/time.tr) (about 650 lines). Only reading the clock and sleeping go through small C hooks.
 
 ## Creating a `DateTime`
 
@@ -149,5 +149,5 @@ Print the result of the work you're timing. Otherwise LLVM is free to delete a l
 
 ## How it's tested
 
-- [`tests/run/time_utc.isma`](../tests/run/time_utc.isma) checks every function. Each of its 42 expected lines was computed independently with Python's `datetime`.
+- [`tests/run/time_utc.tr`](../tests/run/time_utc.tr) checks every function. Each of its 42 expected lines was computed independently with Python's `datetime`.
 - During development, the module was cross-checked against Python on 3,000 random timestamps between years 2 and 9998, covering every format code, the weekday, `add_months` clamping and parse round-trips. All 3,000 matched.

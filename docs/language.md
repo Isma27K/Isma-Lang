@@ -1,8 +1,8 @@
-# The Isma language guide
+# The Tarn language guide
 
 [← Back to the README](../README.md) · [`time`](time.md) · [`math`](math.md) · [`fs`](fs.md) · [Installing](install.md)
 
-Isma reads like Python, checks like Kotlin and compiles to native code. This guide covers the whole language as it is today.
+Tarn reads like Python, checks like Kotlin and compiles to native code. This guide covers the whole language as it is today.
 
 - [Running programs](#running-programs)
 - [Variables: `val` and `var`](#variables-val-and-var)
@@ -35,37 +35,37 @@ Isma reads like Python, checks like Kotlin and compiles to native code. This gui
 Every program needs a `fn main():`.
 
 ```bash
-isma hello.isma                  # compile + run, like `python hello.py`
-isma greet.isma Ana Budi         # everything after the script goes to the script
-isma build app.isma -o app       # a standalone native binary; ship it without Isma
-isma check app.isma              # type-check only
-isma build app.isma --emit-llvm  # also write the LLVM IR (app.ll)
-isma build app.isma --emit-mir   # also write the mid-level IR, showing every reference-count operation (app.mir)
-isma run --arc-stats app.isma    # print memory counters when the program exits
-isma run --debug app.isma        # -O0 -g instead of -O3
-isma clean                       # empty the compile cache
+tarn hello.tr                    # compile + run, like `python hello.py`
+tarn greet.tr Ana Budi           # everything after the script goes to the script
+tarn build app.tr -o app         # a standalone native binary; ship it without Tarn
+tarn check app.tr                # type-check only
+tarn build app.tr --emit-llvm    # also write the LLVM IR (app.ll)
+tarn build app.tr --emit-mir     # also write the mid-level IR, showing every reference-count operation (app.mir)
+tarn run --arc-stats app.tr      # print memory counters when the program exits
+tarn run --debug app.tr          # -O0 -g instead of -O3
+tarn clean                       # empty the compile cache
 ```
 
 Scripts can start with a shebang line and be run directly:
 
 ```python
-#!/usr/bin/env isma
+#!/usr/bin/env tarn
 fn main():
     for name in args():
         print(f"Hello, {name}!")
 ```
 
 ```bash
-chmod +x greet.isma
-./greet.isma Ana                 # Hello, Ana!
+chmod +x greet.tr
+./greet.tr Ana                   # Hello, Ana!
 ```
 
-The first run of a script compiles it (about 80 ms). Later runs of the unchanged script reuse the cached binary and start in about **2 ms**. Editing the script, or upgrading Isma, triggers a recompile automatically. The cache lives in `~/.cache/isma`; set `ISMA_CACHE_DIR` to move it.
+The first run of a script compiles it (about 80 ms). Later runs of the unchanged script reuse the cached binary and start in about **2 ms**. Editing the script, or upgrading Tarn, triggers a recompile automatically. The cache lives in `~/.cache/tarn`; set `TARN_CACHE_DIR` to move it.
 
 ## Variables: `val` and `var`
 
 ```python
-val name = "Isma"        # immutable; the type String is inferred
+val name = "Tarn"        # immutable; the type String is inferred
 var count: Int = 0       # mutable; the type is written explicitly
 count += 1
 name = "other"           # error: cannot assign twice to immutable variable `name`
@@ -82,7 +82,7 @@ A `val` at the top of a file, outside any function, is a constant:
 ```python
 val max_players = 8
 val tax_rate = 0.11
-val title = "Isma " + "Quest"            # constants can use operators...
+val title = "Tarn " + "Quest"            # constants can use operators...
 val half = max_players / 2               # ...and other constants
 
 fn main():
@@ -113,7 +113,7 @@ Lists, maps and structs are references: `val b = a` makes `b` point at the same 
 
 ## Strict typing
 
-Isma never converts between types for you:
+Tarn never converts between types for you:
 
 ```python
 val a = 1 + 2.0              # error: `+` cannot be applied to `Int` and `Float`
@@ -125,7 +125,7 @@ print("n = " + 5)            # error. Write f"n = {5}" or "n = " + 5.to_string()
 
 On top of that:
 - every path through a function with a return type must `return`;
-- `==` only works on `Int`, `Float`, `Bool`, `String`, enums without data and their nullable versions (where `null == null`), and on types that define [`fn ==`](#operator-functions). Isma never compares references;
+- `==` only works on `Int`, `Float`, `Bool`, `String`, enums without data and their nullable versions (where `null == null`), and on types that define [`fn ==`](#operator-functions). Tarn never compares references;
 - a `match` must handle every possible value;
 - comparisons don't chain (`a < b < c` is an error);
 - an expression used as a statement must be a call, so a stray `x == 2` on its own line is caught.
@@ -287,7 +287,7 @@ Every `match` must handle every value the type allows. The compiler checks, and 
 
 ```
 Error: this `match` doesn't handle every value: `Rect(_, _)` and `Empty` are not covered
-   ╭─[ shapes.isma:7:11 ]
+   ╭─[ shapes.tr:7:11 ]
    │
  7 │     match s:
    │           ┬
@@ -434,7 +434,7 @@ Using a type that falls short is an error at the call, pointing at the line of g
 
 ```text
 Error: `max` needs `T` to support `<` and `>`, but `Point` doesn't
-    ╭─[ main.isma:11:11 ]
+    ╭─[ main.tr:11:11 ]
  11 │     print(max(Point(1.0, 2.0), Point(3.0, 4.0)).x)
     │           ──────────────────┬──────────────────
     │                             ╰──────────────────── here `T` is `Point`
@@ -598,7 +598,7 @@ You can't use a `T?` where a `T` is needed until you've dealt with the `null`. T
 
 ```
 Error: `user` might be null
-   ╭─[ app.isma:9:11 ]
+   ╭─[ app.tr:9:11 ]
    │
  9 │     print(user.name)
    │           ──┬─
@@ -657,7 +657,7 @@ Null safety costs nothing at run time. A `String?`, `List[T]?` or `User?` is a p
 
 ## Memory
 
-Isma frees memory automatically, without a garbage collector and without pauses. Every string, list and struct counts its references, and it is freed the moment the last one goes away. The compiler works out each value's **last use**, so a value dies right after it, not at the end of the block:
+Tarn frees memory automatically, without a garbage collector and without pauses. Every string, list and struct counts its references, and it is freed the moment the last one goes away. The compiler works out each value's **last use**, so a value dies right after it, not at the end of the block:
 
 ```python
 fn main():
@@ -677,34 +677,34 @@ Most of the counting never happens. The compiler (a Perceus-style optimizer, as 
 To see what's happening:
 
 ```console
-$ isma run --arc-stats bench/particles.isma
+$ tarn run --arc-stats bench/particles.tr
 5000000
 -12497502500
-isma arc: 3 allocations, 3 frees, 0 live, peak 96 bytes, 0 cycle collections freed 0
+tarn arc: 3 allocations, 3 frees, 0 live, peak 96 bytes, 0 cycle collections freed 0
 ```
 
-`isma build app.isma --emit-mir` writes the mid-level IR, with every `dup` (a new reference), `drop` (a reference released) and `drop-reuse` (memory recycled in place) the compiler inserted.
+`tarn build app.tr --emit-mir` writes the mid-level IR, with every `dup` (a new reference), `drop` (a reference released) and `drop-reuse` (memory recycled in place) the compiler inserted.
 
 ## Modules: `import`
 
-Every `.isma` file is a module. A program is one file plus everything it imports.
+Every `.tr` file is a module. A program is one file plus everything it imports.
 
 ### Your own files
 
 ```
 app/
-├── main.isma
-├── geometry.isma
+├── main.tr
+├── geometry.tr
 └── shapes/
-    ├── registry.isma
-    └── util.isma
+    ├── registry.tr
+    └── util.tr
 ```
 
 ```python
-# main.isma
-import geometry                          # geometry.isma, next to this file
+# main.tr
+import geometry                          # geometry.tr, next to this file
 import geometry as geo                   # the same module, under another name
-import shapes.registry                   # shapes/registry.isma, bound as `registry`
+import shapes.registry                   # shapes/registry.tr, bound as `registry`
 from geometry import Point, Shape, area  # names you can use without `geometry.`
 from shapes import util                  # a file of the folder `shapes`
 from geometry import origin as zero      # renamed
@@ -717,19 +717,19 @@ fn main():
 ```
 
 ```python
-# shapes/registry.isma
+# shapes/registry.tr
 from ..geometry import Shape             # `..` is the folder above this file
 from . import util                       # `.` is this file's folder
 ```
 
-- **Where modules are found.** `import a.b` reads `a/b.isma`, starting from the folder of the file that contains the `import`; every file finds its imports the same way, whichever file you run. `from .x` and `from ..x` (`from .. import x`) start from this folder or the one above.
+- **Where modules are found.** `import a.b` reads `a/b.tr`, starting from the folder of the file that contains the `import`; every file finds its imports the same way, whichever file you run. `from .x` and `from ..x` (`from .. import x`) start from this folder or the one above.
 - **What a plain `import` binds.** The last part of the path: `import shapes.registry` gives you `registry.count()`. With `as`, the name you choose.
-- **What a module contains.** Functions, structs and enums. It doesn't need a `main`: `isma check` and the editor check it like any other file, and only `isma run` / `isma build` ask for an entry point. If it has a `fn main()`, that only runs when you run the file itself, so a module can carry its own demo or tests.
+- **What a module contains.** Functions, structs and enums. It doesn't need a `main`: `tarn check` and the editor check it like any other file, and only `tarn run` / `tarn build` ask for an entry point. If it has a `fn main()`, that only runs when you run the file itself, so a module can carry its own demo or tests.
 - **Privacy.** Names starting with `_` are private to their module: functions, types, methods and fields. A struct with private fields can only be created inside its module, so a module can guarantee its structs are valid.
 - **Cycles are fine.** Two modules may import each other, and a module may import the file you run. Modules contain only declarations, so there is no order of initialization to get wrong.
-- **Your files come first.** A `time.isma` next to your file is imported instead of the standard library's `time`.
-- **Errors show where they are.** A type error in `shapes/registry.isma` is reported in that file. In VS Code, it also shows on the `import` line that leads to it.
-- **One program, one binary.** Everything is compiled together into a single native executable, and `isma app.isma` rebuilds when any of its files changes.
+- **Your files come first.** A `time.tr` next to your file is imported instead of the standard library's `time`.
+- **Errors show where they are.** A type error in `shapes/registry.tr` is reported in that file. In VS Code, it also shows on the `import` line that leads to it.
+- **One program, one binary.** Everything is compiled together into a single native executable, and `tarn app.tr` rebuilds when any of its files changes.
 
 `import *` is not supported: name what you use, or import the module.
 
@@ -743,11 +743,11 @@ fn main():
     val t: time.DateTime = now  # module types: module.Type
 ```
 
-- **Written in Isma.** Standard-library modules live in [`stdlib/`](../stdlib) and are compiled together with your program.
+- **Written in Tarn.** Standard-library modules live in [`stdlib/`](../stdlib) and are compiled together with your program.
 - **Construction.** A standard-library struct can only be created through its module's functions, which validate the values. You can't build a `DateTime` for February 30.
 - **Panic locations.** A panic inside a standard-library function is reported at *your* line that called it, like Rust's `#[track_caller]`. (A panic inside your own module is reported where it happened.)
   ```
-  panic at app.isma:4:11: invalid date 2023-02-29: February 2023 has 28 days
+  panic at app.tr:4:11: invalid date 2023-02-29: February 2023 has 28 days
   ```
 
 Available modules:
@@ -776,7 +776,7 @@ Available modules:
 Runtime errors print where they happened and exit with code 101:
 
 ```
-panic at crash.isma:5:15: index 3 out of bounds for list of length 3
+panic at crash.tr:5:15: index 3 out of bounds for list of length 3
 ```
 
 Panics cover:

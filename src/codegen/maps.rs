@@ -11,7 +11,7 @@ impl<'a> Codegen<'a> {
         if !self.map_types.contains(t) {
             self.map_types.push(t.clone());
         }
-        format!("@isma.mapti.{}", mangle(t))
+        format!("@tarn.mapti.{}", mangle(t))
     }
 
     /// A key as a runtime call argument (`i64 k` or `ptr k`).
@@ -62,7 +62,7 @@ impl<'a> Codegen<'a> {
         let ti = self.map_ti(mt);
         let ka = self.key_arg(&k, key);
         let e = self.fresh();
-        self.emit(format!("{e} = call ptr @isma_map_find_{}(ptr {m}, ptr {ti}, {ka})", Self::key_suffix(&k)));
+        self.emit(format!("{e} = call ptr @tarn_map_find_{}(ptr {m}, ptr {ti}, {ka})", Self::key_suffix(&k)));
         e
     }
 
@@ -133,7 +133,7 @@ impl<'a> Codegen<'a> {
             // ---------- maps ----------
             Builtin::MapLen => {
                 let p = self.fresh();
-                self.emit(format!("{p} = getelementptr inbounds %IsmaMap, ptr {}, i32 0, i32 1", vals[0]));
+                self.emit(format!("{p} = getelementptr inbounds %TarnMap, ptr {}, i32 0, i32 1", vals[0]));
                 self.emit(format!("{r} = load i64, ptr {p}"));
             }
             Builtin::MapGet => {
@@ -145,7 +145,7 @@ impl<'a> Codegen<'a> {
                 self.emit_term(format!("br i1 {miss}, label %{bad}, label %{ok}"));
                 self.start_block(&bad);
                 let (shown, quoted) = self.key_text(&k, &vals[1]);
-                self.emit(format!("call void @isma_panic_key(ptr {shown}, i64 {quoted}, {loc})"));
+                self.emit(format!("call void @tarn_panic_key(ptr {shown}, i64 {quoted}, {loc})"));
                 self.emit_term("unreachable");
                 self.start_block(&ok);
                 let x = self.load_value(&e, &k, &v);
@@ -194,7 +194,7 @@ impl<'a> Codegen<'a> {
                 let _ = writeln!(self.allocas, "  {flag} = alloca i64");
                 let ka = self.key_arg(&k, &vals[1]);
                 let e = self.fresh();
-                self.emit(format!("{e} = call ptr @isma_map_upsert_{}(ptr {}, ptr {ti}, {ka}, ptr {flag})", Self::key_suffix(&k), vals[0]));
+                self.emit(format!("{e} = call ptr @tarn_map_upsert_{}(ptr {}, ptr {ti}, {ka}, ptr {flag})", Self::key_suffix(&k), vals[0]));
                 let isnew = self.fresh();
                 self.emit(format!("{isnew} = load i64, ptr {flag}"));
                 let c = self.fresh();
@@ -232,7 +232,7 @@ impl<'a> Codegen<'a> {
                 let ti = self.map_ti(&tys[0]);
                 let ka = self.key_arg(&k, &vals[1]);
                 let e = self.fresh();
-                self.emit(format!("{e} = call ptr @isma_map_remove_{}(ptr {}, ptr {ti}, {ka})", Self::key_suffix(&k), vals[0]));
+                self.emit(format!("{e} = call ptr @tarn_map_remove_{}(ptr {}, ptr {ti}, {ka})", Self::key_suffix(&k), vals[0]));
                 let hit = self.fresh();
                 self.emit(format!("{hit} = icmp ne ptr {e}, null"));
                 let ty = llty(&v.clone().nullable());
@@ -259,12 +259,12 @@ impl<'a> Codegen<'a> {
             }
             Builtin::MapNext => {
                 let ti = self.map_ti(&tys[0]);
-                self.emit(format!("{r} = call i64 @isma_map_next(ptr {}, ptr {ti}, i64 {}, i64 {}, {loc})", vals[0], vals[1], vals[2]));
+                self.emit(format!("{r} = call i64 @tarn_map_next(ptr {}, ptr {ti}, i64 {}, i64 {}, {loc})", vals[0], vals[1], vals[2]));
             }
             Builtin::MapKeyAt | Builtin::MapValueAt => {
                 let (k, v) = map_kv(&tys[0]);
                 let ep = self.fresh();
-                self.emit(format!("{ep} = getelementptr inbounds %IsmaMap, ptr {}, i32 0, i32 4", vals[0]));
+                self.emit(format!("{ep} = getelementptr inbounds %TarnMap, ptr {}, i32 0, i32 4", vals[0]));
                 let ents = self.fresh();
                 self.emit(format!("{ents} = load ptr, ptr {ep}"));
                 let e = self.fresh();
@@ -283,32 +283,32 @@ impl<'a> Codegen<'a> {
                 let mut h = "0".to_string();
                 for p in vals {
                     let n = self.fresh();
-                    self.emit(format!("{n} = call i64 @isma_hash_combine(i64 {h}, i64 {p})"));
+                    self.emit(format!("{n} = call i64 @tarn_hash_combine(i64 {h}, i64 {p})"));
                     h = n;
                 }
                 return h;
             }
 
             // ---------- strings ----------
-            Builtin::StrRepr => self.emit(format!("{r} = call ptr @isma_str_repr(ptr {})", vals[0])),
-            Builtin::StrSplit => self.emit(format!("{r} = call ptr @isma_str_split(ptr {}, ptr {}, {loc})", vals[0], vals[1])),
-            Builtin::StrSplitWhitespace => self.emit(format!("{r} = call ptr @isma_str_split_whitespace(ptr {})", vals[0])),
-            Builtin::StrLines => self.emit(format!("{r} = call ptr @isma_str_lines(ptr {})", vals[0])),
+            Builtin::StrRepr => self.emit(format!("{r} = call ptr @tarn_str_repr(ptr {})", vals[0])),
+            Builtin::StrSplit => self.emit(format!("{r} = call ptr @tarn_str_split(ptr {}, ptr {}, {loc})", vals[0], vals[1])),
+            Builtin::StrSplitWhitespace => self.emit(format!("{r} = call ptr @tarn_str_split_whitespace(ptr {})", vals[0])),
+            Builtin::StrLines => self.emit(format!("{r} = call ptr @tarn_str_lines(ptr {})", vals[0])),
             Builtin::StrTrim | Builtin::StrTrimStart | Builtin::StrTrimEnd => {
                 let (a, z) = match b {
                     Builtin::StrTrim => (1, 1),
                     Builtin::StrTrimStart => (1, 0),
                     _ => (0, 1),
                 };
-                self.emit(format!("{r} = call ptr @isma_str_trim(ptr {}, i64 {a}, i64 {z})", vals[0]));
+                self.emit(format!("{r} = call ptr @tarn_str_trim(ptr {}, i64 {a}, i64 {z})", vals[0]));
             }
             Builtin::StrUpper | Builtin::StrLower => {
                 let up = i64::from(b == Builtin::StrUpper);
-                self.emit(format!("{r} = call ptr @isma_str_case(ptr {}, i64 {up})", vals[0]));
+                self.emit(format!("{r} = call ptr @tarn_str_case(ptr {}, i64 {up})", vals[0]));
             }
-            Builtin::StrReplace => self.emit(format!("{r} = call ptr @isma_str_replace(ptr {}, ptr {}, ptr {}, {loc})", vals[0], vals[1], vals[2])),
+            Builtin::StrReplace => self.emit(format!("{r} = call ptr @tarn_str_replace(ptr {}, ptr {}, ptr {}, {loc})", vals[0], vals[1], vals[2])),
             Builtin::StrFind | Builtin::StrRfind => {
-                let f = if b == Builtin::StrFind { "isma_str_find" } else { "isma_str_rfind" };
+                let f = if b == Builtin::StrFind { "tarn_str_find" } else { "tarn_str_rfind" };
                 let at = self.fresh();
                 self.emit(format!("{at} = call i64 @{f}(ptr {}, ptr {})", vals[0], vals[1]));
                 let has = self.fresh();
@@ -317,20 +317,20 @@ impl<'a> Codegen<'a> {
                 self.emit(format!("{half} = insertvalue {{ i1, i64 }} undef, i1 {has}, 0"));
                 self.emit(format!("{r} = insertvalue {{ i1, i64 }} {half}, i64 {at}, 1"));
             }
-            Builtin::StrCount => self.emit(format!("{r} = call i64 @isma_str_count(ptr {}, ptr {})", vals[0], vals[1])),
-            Builtin::StrRepeat => self.emit(format!("{r} = call ptr @isma_str_repeat(ptr {}, i64 {}, {loc})", vals[0], vals[1])),
+            Builtin::StrCount => self.emit(format!("{r} = call i64 @tarn_str_count(ptr {}, ptr {})", vals[0], vals[1])),
+            Builtin::StrRepeat => self.emit(format!("{r} = call ptr @tarn_str_repeat(ptr {}, i64 {}, {loc})", vals[0], vals[1])),
             Builtin::StrPadStart | Builtin::StrPadEnd => {
                 let start = i64::from(b == Builtin::StrPadStart);
-                self.emit(format!("{r} = call ptr @isma_str_pad(ptr {}, i64 {}, ptr {}, i64 {start}, {loc})", vals[0], vals[1], vals[2]));
+                self.emit(format!("{r} = call ptr @tarn_str_pad(ptr {}, i64 {}, ptr {}, i64 {start}, {loc})", vals[0], vals[1], vals[2]));
             }
 
             // ---------- lists ----------
-            Builtin::ListJoin => self.emit(format!("{r} = call ptr @isma_str_list_join(ptr {}, ptr {})", vals[0], vals[1])),
+            Builtin::ListJoin => self.emit(format!("{r} = call ptr @tarn_str_list_join(ptr {}, ptr {})", vals[0], vals[1])),
             Builtin::ListInsert => {
                 let elem = list_elem(&tys[0]);
-                self.emit(format!("call void @isma_list_insert_slot_check(ptr {}, i64 {}, {loc})", vals[0], vals[1]));
+                self.emit(format!("call void @tarn_list_insert_slot_check(ptr {}, i64 {}, {loc})", vals[0], vals[1]));
                 let slot = self.fresh();
-                self.emit(format!("{slot} = call ptr @isma_list_insert_slot(ptr {}, i64 {}, i64 {})", vals[0], vals[1], elem_size(&elem)));
+                self.emit(format!("{slot} = call ptr @tarn_list_insert_slot(ptr {}, i64 {}, i64 {})", vals[0], vals[1], elem_size(&elem)));
                 let md = self.elem_tbaa(&elem);
                 self.emit(format!("store {} {}, ptr {slot}{md}", llty(&elem), vals[2]));
                 return String::new();
@@ -339,7 +339,7 @@ impl<'a> Codegen<'a> {
                 let elem = list_elem(&tys[0]);
                 let out = format!("%removed{}", self.tmp);
                 let _ = writeln!(self.allocas, "  {out} = alloca {}", llty(&elem));
-                self.emit(format!("call void @isma_list_remove_at(ptr {}, i64 {}, i64 {}, ptr {out}, {loc})", vals[0], vals[1], elem_size(&elem)));
+                self.emit(format!("call void @tarn_list_remove_at(ptr {}, i64 {}, i64 {}, ptr {out}, {loc})", vals[0], vals[1], elem_size(&elem)));
                 self.emit(format!("{r} = load {}, ptr {out}", llty(&elem)));
             }
             Builtin::ListClear => {
@@ -349,7 +349,7 @@ impl<'a> Codegen<'a> {
                     self.emit(format!("call void {f}(ptr {})", vals[0]));
                 } else {
                     let lp = self.fresh();
-                    self.emit(format!("{lp} = getelementptr inbounds %IsmaList, ptr {}, i32 0, i32 1", vals[0]));
+                    self.emit(format!("{lp} = getelementptr inbounds %TarnList, ptr {}, i32 0, i32 1", vals[0]));
                     let md = self.tbaa("list.len");
                     self.emit(format!("store i64 0, ptr {lp}{md}"));
                 }
@@ -357,7 +357,7 @@ impl<'a> Codegen<'a> {
             }
             Builtin::ListReverse => {
                 let elem = list_elem(&tys[0]);
-                self.emit(format!("call void @isma_list_reverse(ptr {}, i64 {})", vals[0], elem_size(&elem)));
+                self.emit(format!("call void @tarn_list_reverse(ptr {}, i64 {})", vals[0], elem_size(&elem)));
                 return String::new();
             }
             Builtin::ListSort => {
@@ -366,7 +366,7 @@ impl<'a> Codegen<'a> {
                     Type::Float => 1,
                     _ => 2,
                 };
-                self.emit(format!("call void @isma_list_sort(ptr {}, i64 {kind})", vals[0]));
+                self.emit(format!("call void @tarn_list_sort(ptr {}, i64 {kind})", vals[0]));
                 return String::new();
             }
 
@@ -403,20 +403,20 @@ impl<'a> Codegen<'a> {
             Builtin::Fs(op) => {
                 use crate::tast::FsOp::*;
                 match op {
-                    Read => self.emit(format!("{r} = call ptr @isma_fs_read(ptr {})", vals[0])),
+                    Read => self.emit(format!("{r} = call ptr @tarn_fs_read(ptr {})", vals[0])),
                     Write => {
                         let z = self.fresh();
                         self.emit(format!("{z} = zext i1 {} to i64", vals[2]));
-                        return call_i1(self, "isma_fs_write", &format!("ptr {}, ptr {}, i64 {z}", vals[0], vals[1]));
+                        return call_i1(self, "tarn_fs_write", &format!("ptr {}, ptr {}, i64 {z}", vals[0], vals[1]));
                     }
-                    Kind => self.emit(format!("{r} = call i64 @isma_fs_kind(ptr {})", vals[0])),
-                    ListDir => self.emit(format!("{r} = call ptr @isma_fs_list_dir(ptr {})", vals[0])),
-                    MakeDir => return call_i1(self, "isma_fs_make_dir", &format!("ptr {}", vals[0])),
-                    Remove => return call_i1(self, "isma_fs_remove", &format!("ptr {}", vals[0])),
-                    Rename => return call_i1(self, "isma_fs_rename", &format!("ptr {}, ptr {}", vals[0], vals[1])),
-                    LastError => self.emit(format!("{r} = call ptr @isma_fs_last_error()")),
-                    Cwd => self.emit(format!("{r} = call ptr @isma_fs_cwd()")),
-                    ReadStdin => self.emit(format!("{r} = call ptr @isma_fs_read_stdin()")),
+                    Kind => self.emit(format!("{r} = call i64 @tarn_fs_kind(ptr {})", vals[0])),
+                    ListDir => self.emit(format!("{r} = call ptr @tarn_fs_list_dir(ptr {})", vals[0])),
+                    MakeDir => return call_i1(self, "tarn_fs_make_dir", &format!("ptr {}", vals[0])),
+                    Remove => return call_i1(self, "tarn_fs_remove", &format!("ptr {}", vals[0])),
+                    Rename => return call_i1(self, "tarn_fs_rename", &format!("ptr {}, ptr {}", vals[0], vals[1])),
+                    LastError => self.emit(format!("{r} = call ptr @tarn_fs_last_error()")),
+                    Cwd => self.emit(format!("{r} = call ptr @tarn_fs_cwd()")),
+                    ReadStdin => self.emit(format!("{r} = call ptr @tarn_fs_read_stdin()")),
                 }
             }
             _ => unreachable!("built-in {b:?} is handled in `builtin`"),
@@ -428,14 +428,14 @@ impl<'a> Codegen<'a> {
     fn hash_value(&mut self, t: &Type, v: &str) -> String {
         let r = self.fresh();
         match t {
-            Type::Int | Type::Enum(_, false) => self.emit(format!("{r} = call i64 @isma_hash_int(i64 {v})")),
+            Type::Int | Type::Enum(_, false) => self.emit(format!("{r} = call i64 @tarn_hash_int(i64 {v})")),
             Type::Bool => {
                 let z = self.fresh();
                 self.emit(format!("{z} = zext i1 {v} to i64"));
-                self.emit(format!("{r} = call i64 @isma_hash_int(i64 {z})"));
+                self.emit(format!("{r} = call i64 @tarn_hash_int(i64 {z})"));
             }
-            Type::Float => self.emit(format!("{r} = call i64 @isma_hash_float(double {v})")),
-            Type::Str => self.emit(format!("{r} = call i64 @isma_hash_str(ptr {v})")),
+            Type::Float => self.emit(format!("{r} = call i64 @tarn_hash_float(double {v})")),
+            Type::Str => self.emit(format!("{r} = call i64 @tarn_hash_str(ptr {v})")),
             Type::Nullable(inner) if is_pair(t) => {
                 let has = self.fresh();
                 self.emit(format!("{has} = extractvalue {} {v}, 0", llty(t)));
@@ -459,14 +459,14 @@ impl<'a> Codegen<'a> {
     /// `clear()` of a map type: release every key and value, then empty it.
     fn map_clear_fn(&mut self, t: &Type) -> String {
         self.map_ti(t);
-        format!("@isma.mapclear.{}", mangle(t))
+        format!("@tarn.mapclear.{}", mangle(t))
     }
 
     fn list_clear_fn(&mut self, t: &Type) -> String {
         if !self.list_clears.contains(t) {
             self.list_clears.push(t.clone());
         }
-        format!("@isma.listclear.{}", mangle(t))
+        format!("@tarn.listclear.{}", mangle(t))
     }
 
     /// The body of a `void (ptr %p, ...)` function running `action` (which can
@@ -474,7 +474,7 @@ impl<'a> Codegen<'a> {
     fn map_each(k: &Type, v: &Type, action: &str) -> String {
         let et = entry_ty(k, v);
         format!(
-            "entry:\n  %usedp = getelementptr inbounds %IsmaMap, ptr %p, i32 0, i32 2\n  %used = load i64, ptr %usedp\n  %entsp = getelementptr inbounds %IsmaMap, ptr %p, i32 0, i32 4\n  %ents = load ptr, ptr %entsp\n  br label %cond\ncond:\n  %i = phi i64 [ 0, %entry ], [ %i1, %next ]\n  %c = icmp slt i64 %i, %used\n  br i1 %c, label %body, label %done\nbody:\n  %e = getelementptr inbounds {et}, ptr %ents, i64 %i\n  %h = load i64, ptr %e\n  %live = icmp sge i64 %h, 0\n  br i1 %live, label %act, label %next\nact:\n{action}  br label %next\nnext:\n  %i1 = add i64 %i, 1\n  br label %cond\ndone:\n"
+            "entry:\n  %usedp = getelementptr inbounds %TarnMap, ptr %p, i32 0, i32 2\n  %used = load i64, ptr %usedp\n  %entsp = getelementptr inbounds %TarnMap, ptr %p, i32 0, i32 4\n  %ents = load ptr, ptr %entsp\n  br label %cond\ncond:\n  %i = phi i64 [ 0, %entry ], [ %i1, %next ]\n  %c = icmp slt i64 %i, %used\n  br i1 %c, label %body, label %done\nbody:\n  %e = getelementptr inbounds {et}, ptr %ents, i64 %i\n  %h = load i64, ptr %e\n  %live = icmp sge i64 %h, 0\n  br i1 %live, label %act, label %next\nact:\n{action}  br label %next\nnext:\n  %i1 = add i64 %i, 1\n  br label %cond\ndone:\n"
         )
     }
 
@@ -506,14 +506,14 @@ impl<'a> Codegen<'a> {
             if is_ref(&k) || is_ref(&v) {
                 let _ = writeln!(
                     out,
-                    "define internal void @isma.drop.{m}(ptr %p) #0 {{\n{}  call void @isma_map_free(ptr %p)\n  ret void\n}}\n",
+                    "define internal void @tarn.drop.{m}(ptr %p) #0 {{\n{}  call void @tarn_map_free(ptr %p)\n  ret void\n}}\n",
                     Self::map_each(&k, &v, &release_all)
                 );
             }
             return;
         }
         let trace = self.entry_refs(&k, &v, |c, ty, name| {
-            c.is_cyclic(ty).then(|| format!("  call void %visit(ptr {name}, ptr @isma.ti.{})", mangle(ty.non_null())))
+            c.is_cyclic(ty).then(|| format!("  call void %visit(ptr {name}, ptr @tarn.ti.{})", mangle(ty.non_null())))
         });
         let acyclic = self.entry_refs(&k, &v, |c, ty, name| {
             (!c.is_cyclic(ty)).then(|| {
@@ -521,14 +521,14 @@ impl<'a> Codegen<'a> {
                 format!("  call void {rel}(ptr {name})")
             })
         });
-        let _ = writeln!(out, "define internal void @isma.trace.{m}(ptr %p, ptr %visit) #0 {{\n{}  ret void\n}}\n", Self::map_each(&k, &v, &trace));
+        let _ = writeln!(out, "define internal void @tarn.trace.{m}(ptr %p, ptr %visit) #0 {{\n{}  ret void\n}}\n", Self::map_each(&k, &v, &trace));
         let _ = writeln!(
             out,
-            "define internal void @isma.drop.{m}(ptr %p) #0 {{\n{}  call void @isma_cyclic_free(ptr %p, ptr @isma.ti.{m})\n  ret void\n}}\n",
+            "define internal void @tarn.drop.{m}(ptr %p) #0 {{\n{}  call void @tarn_cyclic_free(ptr %p, ptr @tarn.ti.{m})\n  ret void\n}}\n",
             Self::map_each(&k, &v, &release_all)
         );
-        let _ = writeln!(out, "define internal void @isma.white.{m}(ptr %p) #0 {{\n{}  call void @isma.mem.{m}(ptr %p)\n  ret void\n}}\n", Self::map_each(&k, &v, &acyclic));
-        let _ = writeln!(out, "define internal void @isma.mem.{m}(ptr %p) #0 {{\n  call void @isma_map_free(ptr %p)\n  ret void\n}}\n");
+        let _ = writeln!(out, "define internal void @tarn.white.{m}(ptr %p) #0 {{\n{}  call void @tarn.mem.{m}(ptr %p)\n  ret void\n}}\n", Self::map_each(&k, &v, &acyclic));
+        let _ = writeln!(out, "define internal void @tarn.mem.{m}(ptr %p) #0 {{\n  call void @tarn_map_free(ptr %p)\n  ret void\n}}\n");
     }
 
     /// Type records of map types, hash/compare functions for user-type keys,
@@ -550,13 +550,13 @@ impl<'a> Codegen<'a> {
                     keys_done.push(k.clone());
                     out.push_str(&self.key_functions(&k));
                 }
-                (format!("@isma.keyhash.{km}"), format!("@isma.keyeq.{km}"))
+                (format!("@tarn.keyhash.{km}"), format!("@tarn.keyeq.{km}"))
             } else {
                 ("null".into(), "null".into())
             };
             let _ = writeln!(
                 out,
-                "@isma.mapti.{m} = internal constant {{ i64, i64, ptr, ptr }} {{ i64 {kind}, i64 ptrtoint (ptr getelementptr ({}, ptr null, i32 1) to i64), ptr {hash}, ptr {eq} }}\n",
+                "@tarn.mapti.{m} = internal constant {{ i64, i64, ptr, ptr }} {{ i64 {kind}, i64 ptrtoint (ptr getelementptr ({}, ptr null, i32 1) to i64), ptr {hash}, ptr {eq} }}\n",
                 entry_ty(&k, &v)
             );
             let release_all = self.entry_refs(&k, &v, |c, ty, name| {
@@ -565,7 +565,7 @@ impl<'a> Codegen<'a> {
             });
             let _ = writeln!(
                 out,
-                "define internal void @isma.mapclear.{m}(ptr %p) #0 {{\n{}  call void @isma_map_reset(ptr %p)\n  ret void\n}}\n",
+                "define internal void @tarn.mapclear.{m}(ptr %p) #0 {{\n{}  call void @tarn_map_reset(ptr %p)\n  ret void\n}}\n",
                 Self::map_each(&k, &v, &release_all)
             );
         }
@@ -574,7 +574,7 @@ impl<'a> Codegen<'a> {
             let rel = self.release_fn(&elem);
             let _ = writeln!(
                 out,
-                "define internal void @isma.listclear.{}(ptr %p) #0 {{\nentry:\n  %lenp = getelementptr inbounds %IsmaList, ptr %p, i32 0, i32 1\n  %len = load i64, ptr %lenp\n  %dp = getelementptr inbounds %IsmaList, ptr %p, i32 0, i32 3\n  %data = load ptr, ptr %dp\n  store i64 0, ptr %lenp\n  br label %cond\ncond:\n  %i = phi i64 [ 0, %entry ], [ %i1, %body ]\n  %c = icmp slt i64 %i, %len\n  br i1 %c, label %body, label %done\nbody:\n  %ep = getelementptr inbounds ptr, ptr %data, i64 %i\n  %e = load ptr, ptr %ep\n  call void {rel}(ptr %e)\n  %i1 = add i64 %i, 1\n  br label %cond\ndone:\n  ret void\n}}\n",
+                "define internal void @tarn.listclear.{}(ptr %p) #0 {{\nentry:\n  %lenp = getelementptr inbounds %TarnList, ptr %p, i32 0, i32 1\n  %len = load i64, ptr %lenp\n  %dp = getelementptr inbounds %TarnList, ptr %p, i32 0, i32 3\n  %data = load ptr, ptr %dp\n  store i64 0, ptr %lenp\n  br label %cond\ncond:\n  %i = phi i64 [ 0, %entry ], [ %i1, %body ]\n  %c = icmp slt i64 %i, %len\n  br i1 %c, label %body, label %done\nbody:\n  %ep = getelementptr inbounds ptr, ptr %data, i64 %i\n  %e = load ptr, ptr %ep\n  call void {rel}(ptr %e)\n  %i1 = add i64 %i, 1\n  br label %cond\ndone:\n  ret void\n}}\n",
                 mangle(&t)
             );
         }
@@ -583,7 +583,7 @@ impl<'a> Codegen<'a> {
         out
     }
 
-    /// `@isma.keyhash.K(ptr) -> i64` and `@isma.keyeq.K(ptr stored, ptr key) -> i64`
+    /// `@tarn.keyhash.K(ptr) -> i64` and `@tarn.keyeq.K(ptr stored, ptr key) -> i64`
     /// for map keys of a user type, calling its `fn hash` and `fn ==`.
     fn key_functions(&mut self, k: &Type) -> String {
         let km = mangle(k);
@@ -594,7 +594,7 @@ impl<'a> Codegen<'a> {
         let Some(mk) = self.prog.map_keys.iter().find(|m| m.sid == sid).copied() else {
             // No map with these keys is ever built (only the type is mentioned).
             return format!(
-                "define internal i64 @isma.keyhash.{km}(ptr %k) #0 {{\n  ret i64 0\n}}\n\ndefine internal i64 @isma.keyeq.{km}(ptr %a, ptr %b) #0 {{\n  ret i64 0\n}}\n\n"
+                "define internal i64 @tarn.keyhash.{km}(ptr %k) #0 {{\n  ret i64 0\n}}\n\ndefine internal i64 @tarn.keyeq.{km}(ptr %a, ptr %b) #0 {{\n  ret i64 0\n}}\n\n"
             );
         };
         let caller = |f: &Func| if f.track_caller { ", ptr @.file.0, i32 0, i32 0" } else { "" };
@@ -613,14 +613,14 @@ impl<'a> Codegen<'a> {
         let rel = self.release_fn(k);
         let mut out = String::new();
         let hdup = if hown { inc(self, "%k") } else { String::new() };
-        let _ = writeln!(out, "define internal i64 @isma.keyhash.{km}(ptr %k) #0 {{\n{hdup}  %h = call i64 @{esc}(ptr %k{hloc})\n  ret i64 %h\n}}\n", esc = hsym);
+        let _ = writeln!(out, "define internal i64 @tarn.keyhash.{km}(ptr %k) #0 {{\n{hdup}  %h = call i64 @{esc}(ptr %k{hloc})\n  ret i64 %h\n}}\n", esc = hsym);
         // The stored key is held for the call, so `==` can't free it even if it changes the map.
         let adup = inc(self, "%a");
         let bdup = if eown_b { inc(self, "%b") } else { String::new() };
         let arel = if eown_a { String::new() } else { format!("  call void {rel}(ptr %a)\n") };
         let _ = writeln!(
             out,
-            "define internal i64 @isma.keyeq.{km}(ptr %a, ptr %b) #0 {{\n{adup}{bdup}  %r = call i1 @{esym}(ptr %a, ptr %b{eloc})\n{arel}  %z = zext i1 %r to i64\n  ret i64 %z\n}}\n"
+            "define internal i64 @tarn.keyeq.{km}(ptr %a, ptr %b) #0 {{\n{adup}{bdup}  %r = call i1 @{esym}(ptr %a, ptr %b{eloc})\n{arel}  %z = zext i1 %r to i64\n  ret i64 %z\n}}\n"
         );
         out
     }

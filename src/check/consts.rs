@@ -25,7 +25,7 @@ impl ConstVal {
         }
     }
 
-    /// As Isma source: `3.0`, `"a\"b"`.
+    /// As Tarn source: `3.0`, `"a\"b"`.
     fn code(&self) -> String {
         match self {
             ConstVal::Int(v) => v.to_string(),
@@ -36,7 +36,7 @@ impl ConstVal {
     }
 }
 
-/// A float as Isma prints it (`3.0`, `0.1`, `inf`).
+/// A float as Tarn prints it (`3.0`, `0.1`, `inf`).
 fn float_code(v: f64) -> String {
     if v.is_infinite() {
         return if v > 0.0 { "inf".into() } else { "-inf".into() };
