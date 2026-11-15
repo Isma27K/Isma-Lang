@@ -1,0 +1,85 @@
+struct Point:
+    x: Int
+    y: Int
+
+    fn ==(self, other: Point) -> Bool:
+        return self.x == other.x and self.y == other.y
+
+    fn hash(self) -> Int:
+        return hash(self.x, self.y)
+
+    fn to_string(self) -> String:
+        return f"({self.x}, {self.y})"
+
+enum Color:
+    Red
+    Green
+    Blue
+
+struct Node:
+    name: String
+    var children: Map[String, Node]
+
+fn count_by[T](xs: List[T]) -> Map[T, Int]:
+    val m: Map[T, Int] = {}
+    for x in xs:
+        m[x] = m.get(x, 0) + 1
+    return m
+
+fn invert[K, V](m: Map[K, V]) -> Map[V, K]:
+    val out: Map[V, K] = {}
+    for k, v in m:
+        out[v] = k
+    return out
+
+fn main():
+    val grid: Map[Point, String] = {}
+    grid[Point(1, 2)] = "a"
+    grid[Point(3, 4)] = "b"
+    grid[Point(1, 2)] = "c"
+    print(grid.len())
+    print(grid[Point(1, 2)])
+    print(Point(3, 4) in grid)
+    print(Point(9, 9) in grid)
+    for p, s in grid:
+        print(f"{p} -> {s}")
+
+    val colors = {Color.Red: 1, Color.Blue: 3}
+    print(colors[Color.Blue])
+    print(colors.get(Color.Green))
+
+    val flags = {true: "yes", false: "no"}
+    print(flags[1 > 0])
+
+    val opt: Map[String, Int?] = {"a": null, "b": 2}
+    print(opt["a"])
+    print(opt.get("a"))
+    print(opt.get("z"))
+    print(opt.get("a", 7))
+
+    val counts = count_by(["x", "y", "x", "z", "x"])
+    for k, v in counts:
+        print(f"{k}: {v}")
+    val by_num = count_by([3, 1, 3])
+    print(by_num[3])
+    val inv = invert({"one": 1, "two": 2})
+    print(inv[2])
+
+    val root = Node("root", {})
+    val child = Node("child", {})
+    root.children["c"] = child
+    child.children["up"] = root
+    print(root.children["c"].children["up"].name)
+
+    val nested: Map[String, Map[String, Int]] = {"a": {"x": 1}}
+    nested["a"]["y"] = 2
+    nested["b"] = {}
+    print(nested["a"].len())
+    print(nested["b"].len())
+    val ks = nested.keys()
+    print(ks.join(","))
+    val vs = {1: "one", 2: "two"}.values()
+    print(vs.join(" "))
+    print(hash(1) == hash(1))
+    print(hash("a", 2) == hash("a", 2))
+    print(hash("a", 2) == hash("a", 3))

@@ -1,0 +1,4 @@
+# expect-warning: duplicate key "a" in a map literal
+fn main():
+    val m = {"a": 1, "a": 2}
+    print(m["a"])

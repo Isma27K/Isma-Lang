@@ -1,0 +1,5 @@
+# expect-error: Isma has no global variables
+var counter = 0
+
+fn main():
+    print(1)

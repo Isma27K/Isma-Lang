@@ -1,0 +1,5 @@
+# expect-panic: integer overflow
+import math
+
+fn main():
+    print(math.factorial(21))

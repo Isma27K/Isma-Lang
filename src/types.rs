@@ -12,6 +12,8 @@ pub enum Type {
     Str,
     Unit,
     List(Box<Type>),
+    /// `Map[K, V]`: a hash map that keeps its keys in insertion order.
+    Map(Box<Type>, Box<Type>),
     Struct(StructId),
     /// A user enum (its id indexes the same table as structs). The flag is
     /// true when some variant carries data: values are then reference-counted
@@ -35,6 +37,7 @@ impl Type {
         match self {
             Type::Error => true,
             Type::List(t) | Type::Nullable(t) => t.is_error(),
+            Type::Map(k, v) => k.is_error() || v.is_error(),
             _ => false,
         }
     }
@@ -80,6 +83,7 @@ impl Type {
         match (self, other) {
             (Type::Error, _) | (_, Type::Error) => true,
             (Type::List(a), Type::List(b)) | (Type::Nullable(a), Type::Nullable(b)) => a.compatible(b),
+            (Type::Map(ak, av), Type::Map(bk, bv)) => ak.compatible(bk) && av.compatible(bv),
             (a, b) => a == b,
         }
     }
@@ -90,6 +94,7 @@ impl Type {
         match self {
             Type::Param(_) => true,
             Type::List(t) | Type::Nullable(t) => t.has_param(generic),
+            Type::Map(k, v) => k.has_param(generic) || v.has_param(generic),
             Type::Struct(id) | Type::Enum(id, _) => generic.get(*id).copied().unwrap_or(false),
             _ => false,
         }
@@ -104,6 +109,7 @@ impl Type {
             Type::Str => "String".into(),
             Type::Unit => "Unit".into(),
             Type::List(t) => format!("List[{}]", t.display(struct_names, param_names)),
+            Type::Map(k, v) => format!("Map[{}, {}]", k.display(struct_names, param_names), v.display(struct_names, param_names)),
             Type::Struct(id) | Type::Enum(id, _) => struct_names[*id].clone(),
             Type::Nullable(t) => format!("{}?", t.display(struct_names, param_names)),
             Type::Param(p) => param_names.get(*p).cloned().unwrap_or_else(|| "T".into()),

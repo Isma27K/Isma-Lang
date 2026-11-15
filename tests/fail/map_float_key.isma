@@ -1,0 +1,4 @@
+# expect-error: `Float` can't be a map key
+fn main():
+    val m: Map[Float, Int] = {}
+    print(m.len())

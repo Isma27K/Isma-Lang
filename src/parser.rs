@@ -195,11 +195,18 @@ impl Parser {
                 Tok::Dedent => {
                     self.bump();
                 }
-                Tok::Val | Tok::Var => {
+                Tok::Val => match self.let_stmt() {
+                    Ok(Stmt { kind: StmtKind::Let { name, ty, value, .. }, span }) => items.push(Item::Const(ConstDecl { name, ty, value, span })),
+                    Ok(_) => unreachable!(),
+                    Err(()) => self.synchronize(),
+                },
+                Tok::Var => {
                     let span = self.span();
                     self.diags.push(
-                        Diagnostic::error("top-level variables are not supported yet", span)
-                            .with_help("move this into a function such as `fn main():`"),
+                        Diagnostic::error("Isma has no global variables", span)
+                            .with_primary("a top-level `var`")
+                            .with_note("a top-level `val` is a constant (a number, `Bool` or `String`), but nothing at the top level can change")
+                            .with_help("keep the value in `main` (or a struct) and pass it to the functions that need it"),
                     );
                     self.synchronize();
                 }
@@ -207,8 +214,8 @@ impl Parser {
                     let span = self.span();
                     let found = self.peek().clone();
                     self.diags.push(
-                        Diagnostic::error(format!("expected `fn`, `struct` or `enum`, found {found}"), span)
-                            .with_note("only functions, structs and enums may appear at the top level")
+                        Diagnostic::error(format!("expected `fn`, `struct`, `enum` or `val`, found {found}"), span)
+                            .with_note("only functions, structs, enums and constants (`val`) may appear at the top level")
                             .with_help("put statements inside `fn main():`"),
                     );
                     self.synchronize();
@@ -970,6 +977,7 @@ impl Parser {
     fn for_stmt(&mut self) -> PResult<Stmt> {
         let start = self.expect(Tok::For)?;
         let var = self.expect_ident("loop variable")?;
+        let second = if self.eat(&Tok::Comma) { Some(self.expect_ident("second loop variable")?) } else { None };
         self.expect(Tok::In)?;
         let first = self.expr()?;
         let iter = if self.at(&Tok::DotDot) || self.at(&Tok::DotDotEq) {
@@ -980,7 +988,7 @@ impl Parser {
             ForIter::Expr(first)
         };
         let body = self.block()?;
-        Ok(Stmt { kind: StmtKind::For { var, iter, body }, span: start.merge(self.prev_span) })
+        Ok(Stmt { kind: StmtKind::For { var, second, iter, body }, span: start.merge(self.prev_span) })
     }
 
     // ---------- expressions ----------
@@ -1045,13 +1053,40 @@ impl Parser {
         })
     }
 
+    /// `in` or `not in` (Python's membership tests, at the level of comparisons).
+    fn at_in(&self) -> Option<bool> {
+        match self.peek() {
+            Tok::In => Some(false),
+            Tok::Not if matches!(self.peek_nth(1), Tok::In) => Some(true),
+            _ => None,
+        }
+    }
+
     fn cmp_expr(&mut self) -> PResult<Expr> {
         let l = self.spaceship_expr()?;
+        if let Some(negated) = self.at_in() {
+            self.bump();
+            if negated {
+                self.bump();
+            }
+            let r = self.spaceship_expr()?;
+            let span = l.span.merge(r.span);
+            let e = Expr { kind: ExprKind::In { item: Box::new(l), container: Box::new(r), negated }, span };
+            if self.cmp_op().is_some() || self.at_in().is_some() {
+                let span = self.span();
+                return self.error_diag(
+                    Diagnostic::error("comparison operators cannot be chained", span)
+                        .with_label(e.span, "this test already produces a `Bool`")
+                        .with_help("split it up, e.g. `a in xs and b in xs`"),
+                );
+            }
+            return Ok(e);
+        }
         if let Some(op) = self.cmp_op() {
             self.bump();
             let r = self.spaceship_expr()?;
             let e = Self::binary(op, l, r);
-            if self.cmp_op().is_some() {
+            if self.cmp_op().is_some() || self.at_in().is_some() {
                 let span = self.span();
                 return self.error_diag(
                     Diagnostic::error("comparison operators cannot be chained", span)
@@ -1339,6 +1374,30 @@ impl Parser {
                 self.expect(Tok::RBracket)?;
                 ExprKind::List(elems)
             }
+            Tok::LBrace => {
+                self.bump();
+                let mut entries = Vec::new();
+                while !self.at(&Tok::RBrace) {
+                    let k = self.expr()?;
+                    if !self.at(&Tok::Colon) {
+                        let span = self.span();
+                        return self.error_diag(
+                            Diagnostic::error(format!("expected `:` after a map key, found {}", self.peek()), span)
+                                .with_primary("expected `:`")
+                                .with_note("map literals pair each key with its value: `{\"a\": 1, \"b\": 2}`")
+                                .with_help("Isma has no set literals; for a list, use `[...]`"),
+                        );
+                    }
+                    self.bump();
+                    let v = self.expr()?;
+                    entries.push((k, v));
+                    if !self.eat(&Tok::Comma) {
+                        break;
+                    }
+                }
+                self.expect(Tok::RBrace)?;
+                ExprKind::Map(entries)
+            }
             _ => return self.unexpected("an expression"),
         };
         Ok(Expr { kind, span: span.merge(self.prev_span) })
@@ -1400,6 +1459,11 @@ mod tests {
                 let ts: Vec<String> = ts.iter().map(|t| if t.args.is_empty() { t.name.name.clone() } else { format!("{}[..]", t.name.name) }).collect();
                 format!("{}<{}>", show(e), ts.join(", "))
             }
+            ExprKind::Map(es) => {
+                let es: Vec<String> = es.iter().map(|(k, v)| format!("{}: {}", show(k), show(v))).collect();
+                format!("{{{}}}", es.join(", "))
+            }
+            ExprKind::In { item, container, negated } => format!("({} {}in {})", show(item), if *negated { "not " } else { "" }, show(container)),
             other => format!("{other:?}"),
         }
     }
@@ -1419,6 +1483,33 @@ mod tests {
         assert_eq!(expr_of("-a * b"), "((-a) * b)");
         assert_eq!(expr_of("a.b(c)[d].e"), "a.b(c)[d].e");
         assert_eq!(expr_of("-5"), "-5");
+    }
+
+    #[test]
+    fn maps_in_and_two_loop_variables() {
+        assert_eq!(expr_of("f({a: 1, b: {c: 2}})"), "f({a: 1, b: {c: 2}})");
+        assert_eq!(expr_of("f({})"), "f({})");
+        assert_eq!(expr_of("not a in b or c not in d + e"), "((not (a in b)) or (c not in (d + e)))");
+        let (_, d) = parse("fn main():\n    a in b in c\n");
+        assert!(d.iter().any(|d| d.message.contains("chained")));
+        let p = parse_ok("fn main():\n    for k, v in m:\n        pass\n");
+        match &first_fn(&p).body[0].kind {
+            StmtKind::For { var, second: Some(v), .. } => assert_eq!((var.name.as_str(), v.name.as_str()), ("k", "v")),
+            other => panic!("{other:?}"),
+        }
+        // A multi-line map literal, and `{` after a value is still a block brace.
+        parse_ok("fn main():\n    val m = {\n        1: 2,\n        3: 4,\n    }\n");
+        let (_, d) = parse("fn main() {\n    pass\n");
+        assert!(d.iter().any(|d| d.message.contains("not `{`")));
+    }
+
+    #[test]
+    fn top_level_constants() {
+        let p = parse_ok("val pi: Float = 3.14\nval name = \"x\"\n");
+        assert!(matches!(&p.items[0], Item::Const(c) if c.name.name == "pi" && c.ty.is_some()));
+        assert!(matches!(&p.items[1], Item::Const(c) if c.name.name == "name" && c.ty.is_none()));
+        let (_, d) = parse("var x = 1\n");
+        assert!(d.iter().any(|d| d.message.contains("no global variables")));
     }
 
     #[test]

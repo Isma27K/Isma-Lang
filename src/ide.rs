@@ -27,6 +27,18 @@ pub struct IdeInfo {
     pub imported: Vec<(String, ImportedSymbol)>,
     /// The names of type parameters, by `ParamId`.
     pub params: Vec<String>,
+    /// Top-level constants (`val pi = 3.14159`), indexed by constant id.
+    pub consts: Vec<ConstSymbol>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConstSymbol {
+    pub name: String,
+    pub ns: usize,
+    pub span: Span,
+    /// `val pi: Float = 3.141592653589793`
+    pub signature: String,
+    pub doc: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -45,6 +57,8 @@ pub enum ImportedSymbol {
     Struct(usize),
     /// A function (index into `functions`).
     Func(usize),
+    /// A constant (index into `consts`).
+    Const(usize),
 }
 
 #[derive(Debug, Clone)]
@@ -211,6 +225,15 @@ impl IdeInfo {
                 takes_args: false,
             });
         }
+        for c in self.consts.iter().filter(|c| c.ns == ns && !c.name.starts_with('_')) {
+            out.push(Member {
+                name: c.name.clone(),
+                signature: c.signature.clone(),
+                doc: c.doc.clone().unwrap_or_default(),
+                kind: MemberKind::Constant,
+                takes_args: false,
+            });
+        }
         out.sort_by(|a, b| a.name.cmp(&b.name));
         out
     }
@@ -222,6 +245,7 @@ pub enum MemberKind {
     Method,
     Function,
     Struct,
+    Constant,
 }
 
 #[derive(Debug, Clone)]
@@ -262,6 +286,31 @@ pub fn builtin_methods(t: &Type, tn: &str, type_name: &dyn Fn(&Type) -> String) 
             method("contains", "fn contains(text: String) -> Bool".into(), "Does the string contain `text`?", true),
             method("starts_with", "fn starts_with(prefix: String) -> Bool".into(), "Does the string start with `prefix`?", true),
             method("ends_with", "fn ends_with(suffix: String) -> Bool".into(), "Does the string end with `suffix`?", true),
+            method("is_empty", "fn is_empty() -> Bool".into(), "Is it `\"\"`?", false),
+            method("lines", "fn lines() -> List[String]".into(), "The lines, without their `\\n` or `\\r\\n`.", false),
+            method(
+                "split",
+                "fn split(separator: String) -> List[String]".into(),
+                "The parts between each `separator`: `\"a,b,,c\".split(\",\")` is `[\"a\", \"b\", \"\", \"c\"]`. Without a separator, `split()` splits on runs of whitespace and drops empty parts.",
+                true,
+            ),
+            method("trim", "fn trim() -> String".into(), "Without whitespace at either end.", false),
+            method("trim_start", "fn trim_start() -> String".into(), "Without whitespace at the start.", false),
+            method("trim_end", "fn trim_end() -> String".into(), "Without whitespace at the end.", false),
+            method("upper", "fn upper() -> String".into(), "In upper case (ASCII letters).", false),
+            method("lower", "fn lower() -> String".into(), "In lower case (ASCII letters).", false),
+            method("replace", "fn replace(old: String, new: String) -> String".into(), "Every `old` replaced by `new`.", true),
+            method("find", "fn find(text: String) -> Int?".into(), "The byte index of the first `text`, or `null`.", true),
+            method("rfind", "fn rfind(text: String) -> Int?".into(), "The byte index of the last `text`, or `null`.", true),
+            method("count", "fn count(text: String) -> Int".into(), "How many times `text` occurs (without overlapping).", true),
+            method("repeat", "fn repeat(n: Int) -> String".into(), "`n` copies, one after another.", true),
+            method(
+                "pad_start",
+                "fn pad_start(width: Int, fill: String = \" \") -> String".into(),
+                "At least `width` characters, adding `fill` at the start: `\"7\".pad_start(3, \"0\")` is `\"007\"`.",
+                true,
+            ),
+            method("pad_end", "fn pad_end(width: Int, fill: String = \" \") -> String".into(), "At least `width` characters, adding `fill` at the end.", true),
             method("to_int", "fn to_int() -> Int".into(), "Parse as an `Int`. Panics if the string is not a valid integer.", false),
             method("to_float", "fn to_float() -> Float".into(), "Parse as a `Float`. Panics if the string is not a valid number.", false),
             method("to_int_or_null", "fn to_int_or_null() -> Int?".into(), "Parse as an `Int`, or `null` if the string is not a valid integer.", false),
@@ -274,6 +323,30 @@ pub fn builtin_methods(t: &Type, tn: &str, type_name: &dyn Fn(&Type) -> String) 
                 method("len", "fn len() -> Int".into(), "Number of elements.", false),
                 method("push", format!("fn push(value: {e})"), "Append an element to the end of the list.", true),
                 method("pop", format!("fn pop() -> {e}"), "Remove and return the last element. Panics if the list is empty.", false),
+                method("is_empty", "fn is_empty() -> Bool".into(), "Does it have no elements?", false),
+                method("insert", format!("fn insert(index: Int, value: {e})"), "Insert at `index` (0 to `len()`), moving the rest up.", true),
+                method("remove_at", format!("fn remove_at(index: Int) -> {e}"), "Remove and return the element at `index`, moving the rest down.", true),
+                method("clear", "fn clear()".into(), "Remove every element.", false),
+                method("contains", format!("fn contains(value: {e}) -> Bool"), "Is `value` in the list (compared with `==`)? Same as `value in xs`.", true),
+                method("index_of", format!("fn index_of(value: {e}) -> Int?"), "The index of the first element equal to `value`, or `null`.", true),
+                method("reverse", "fn reverse()".into(), "Reverse the order of the elements, in place.", false),
+                method("sort", "fn sort()".into(), "Sort in place, smallest first (lists of `Int`, `Float` or `String`).", false),
+                method("join", "fn join(separator: String) -> String".into(), "The elements (strings) with `separator` between them.", true),
+                method("to_string", "fn to_string() -> String".into(), "As written in code: `[1, 2, 3]`.", false),
+            ]
+        }
+        Type::Map(k, v) => {
+            let (k, v) = (type_name(k), type_name(v));
+            vec![
+                method("len", "fn len() -> Int".into(), "Number of entries.", false),
+                method("is_empty", "fn is_empty() -> Bool".into(), "Does it have no entries?", false),
+                method("get", format!("fn get(key: {k}) -> {v}?"), "The value for `key`, or `null` if it isn't there. `get(key, default)` gives `default` instead.", true),
+                method("contains", format!("fn contains(key: {k}) -> Bool"), "Is `key` in the map? Same as `key in m`.", true),
+                method("remove", format!("fn remove(key: {k}) -> {v}?"), "Remove `key`, returning its value (or `null` if it wasn't there).", true),
+                method("keys", format!("fn keys() -> List[{k}]"), "The keys, in insertion order.", false),
+                method("values", format!("fn values() -> List[{v}]"), "The values, in insertion order of their keys.", false),
+                method("clear", "fn clear()".into(), "Remove every entry.", false),
+                method("to_string", "fn to_string() -> String".into(), "As written in code: `{\"a\": 1}`.", false),
             ]
         }
         // A type parameter: generic code can only call `to_string()` on it.
@@ -295,11 +368,15 @@ pub fn builtin_function(name: &str) -> Option<(&'static str, &'static str)> {
         "assert" => ("fn assert(condition: Bool)", "Panic if `condition` is false."),
         "sqrt" => ("fn sqrt(x: Float) -> Float", "Square root."),
         "exit" => ("fn exit(code: Int)", "Exit the program immediately with the given status code."),
+        "hash" => (
+            "fn hash(values...) -> Int",
+            "A hash of one or more values, mixed into one `Int`: `return hash(self.x, self.y)` in a `fn hash(self) -> Int` lets a type be a map key.",
+        ),
         _ => return None,
     })
 }
 
-pub const BUILTIN_FUNCTIONS: &[&str] = &["print", "input", "args", "panic", "assert", "sqrt", "exit"];
+pub const BUILTIN_FUNCTIONS: &[&str] = &["print", "input", "args", "panic", "assert", "sqrt", "exit", "hash"];
 
 pub const KEYWORDS: &[&str] = &[
     "fn", "val", "var", "if", "elif", "else", "while", "for", "in", "break", "continue", "return", "pass", "struct", "enum",
@@ -312,6 +389,7 @@ pub const BUILTIN_TYPES: &[(&str, &str)] = &[
     ("Bool", "`true` or `false`."),
     ("String", "Immutable UTF-8 text."),
     ("List", "`List[T]`: growable, bounds-checked list (reference type)."),
+    ("Map", "`Map[K, V]`: hash map from keys to values, in insertion order (reference type)."),
 ];
 
 /// `fn get(self) -> T` with `T` replaced by `Int` (whole words only), for the

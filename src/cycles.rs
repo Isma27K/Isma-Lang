@@ -2,8 +2,8 @@
 //!
 //! Reference counting alone can't free a cycle (`n.children.push(n)`), so
 //! values of such types are tracked by the cycle collector. The analysis is
-//! on the type graph, whose edges go from a type to the types of its fields
-//! and list elements.
+//! on the type graph, whose edges go from a type to the types of its fields,
+//! list elements and map keys and values.
 //!
 //! A cycle of values needs a reference that was stored *after* its target
 //! existed. An immutable field (a `val` field, any enum variant field) can
@@ -28,6 +28,8 @@ fn children(t: &Type, structs: &[TStruct]) -> Vec<(Type, bool)> {
             structs[*sid].variants().iter().flat_map(|v| &v.fields).filter(|f| refs(&f.ty)).map(|f| (f.ty.non_null().clone(), false)).collect()
         }
         Type::List(e) if refs(e) => vec![(e.non_null().clone(), true)],
+        // Entries are added to a map that already exists, like list elements.
+        Type::Map(k, v) => [k, v].into_iter().filter(|t| refs(t)).map(|t| (t.non_null().clone(), true)).collect(),
         _ => Vec::new(),
     }
 }

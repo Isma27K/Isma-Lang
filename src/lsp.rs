@@ -443,7 +443,14 @@ impl Server {
                     let kind = if st.variants.is_some() { lt::CompletionItemKind::ENUM } else { lt::CompletionItemKind::STRUCT };
                     add(name, kind, Some(format!("{} {}", if st.variants.is_some() { "enum" } else { "struct" }, st.name)), st.doc.clone(), "1");
                 }
+                ImportedSymbol::Const(cid) => {
+                    let c = &doc.ide.consts[cid];
+                    add(name, lt::CompletionItemKind::CONSTANT, Some(c.signature.clone()), c.doc.clone(), "1");
+                }
             }
+        }
+        for c in doc.ide.consts.iter().filter(|c| c.ns == 0) {
+            add(&c.name, lt::CompletionItemKind::CONSTANT, Some(c.signature.clone()), c.doc.clone(), "1");
         }
         for f in doc.ide.functions.iter().filter(|f| f.owner.is_none() && f.ns == 0 && !f.instance) {
             add(&f.name, lt::CompletionItemKind::FUNCTION, Some(f.signature.clone()), f.doc.clone(), "1");
@@ -546,7 +553,11 @@ impl Server {
             && let Some(ns) = a.ide.imported_module("__m")
         {
             for m in a.ide.module_members(ns) {
-                let kind = if m.kind == MemberKind::Function { lt::CompletionItemKind::FUNCTION } else { lt::CompletionItemKind::STRUCT };
+                let kind = match m.kind {
+                    MemberKind::Function => lt::CompletionItemKind::FUNCTION,
+                    MemberKind::Constant => lt::CompletionItemKind::CONSTANT,
+                    _ => lt::CompletionItemKind::STRUCT,
+                };
                 items.push(lt::CompletionItem {
                     label: m.name.clone(),
                     kind: Some(kind),
@@ -645,7 +656,7 @@ impl Server {
 
 fn member_item(m: Member) -> lt::CompletionItem {
     let (insert, format) = match (m.kind, m.takes_args) {
-        (MemberKind::Field | MemberKind::Struct, _) => (m.name.clone(), lt::InsertTextFormat::PLAIN_TEXT),
+        (MemberKind::Field | MemberKind::Struct | MemberKind::Constant, _) => (m.name.clone(), lt::InsertTextFormat::PLAIN_TEXT),
         (_, false) => (format!("{}()", m.name), lt::InsertTextFormat::PLAIN_TEXT),
         (_, true) => (format!("{}($1)", m.name), lt::InsertTextFormat::SNIPPET),
     };
@@ -654,6 +665,7 @@ fn member_item(m: Member) -> lt::CompletionItem {
         MemberKind::Method => lt::CompletionItemKind::METHOD,
         MemberKind::Function => lt::CompletionItemKind::FUNCTION,
         MemberKind::Struct => lt::CompletionItemKind::STRUCT,
+        MemberKind::Constant => lt::CompletionItemKind::CONSTANT,
     };
     lt::CompletionItem {
         label: m.name.clone(),
@@ -1084,9 +1096,38 @@ mod tests {
 
     #[test]
     fn stdlib_is_warning_free() {
-        let a = crate::analyze("import time\nfn main():\n    print(time.now().to_iso())\n");
+        let a = crate::analyze("import time\nimport math\nimport fs\nfn main():\n    print(time.now().to_iso())\n    print(math.pi)\n    print(fs.cwd())\n");
         assert!(a.diagnostics.is_empty(), "{:#?}", a.diagnostics);
         assert!(a.program.is_some());
+    }
+
+    const MAP_SRC: &str = "import math\nval limit = 10\nfn main():\n    val m = {\"a\": 1}\n    print(m.get(\"a\", limit))\n    print(math.pi)\n    m.\n";
+
+    #[test]
+    fn maps_and_constants_in_the_editor() {
+        let (s, uri) = server_with(MAP_SRC);
+        let items = complete(&s, &uri, at(MAP_SRC, "    m.\n", 6));
+        let got: Vec<_> = items.iter().map(|i| (i.label.as_str(), i.detail.clone().unwrap_or_default())).collect();
+        assert!(got.iter().any(|(l, d)| *l == "get" && d.contains("fn get(key: String) -> Int?")), "{got:?}");
+        assert!(got.iter().any(|(l, _)| *l == "keys"), "{got:?}");
+        let hover = |needle: &str, delta: usize| {
+            let h = s.hover(lt::HoverParams { text_document_position_params: tdp(&uri, at(MAP_SRC, needle, delta)), work_done_progress_params: Default::default() });
+            let lt::HoverContents::Markup(m) = h.unwrap().contents else { panic!() };
+            m.value
+        };
+        let shown = hover("limit))", 0);
+        assert!(shown.contains("val limit: Int = 10"), "{shown}");
+        let shown = hover("pi)", 0);
+        assert!(shown.contains("val pi: Float = 3.141592653589793"), "{shown}");
+        let shown = hover("get(", 0);
+        assert!(shown.contains("fn get(key: String) -> Int?"), "{shown}");
+        // `math.` offers its constants as well as its functions.
+        let src = "import math\nfn main():\n    math.\n";
+        let (s, uri) = server_with(src);
+        let items = complete(&s, &uri, at(src, "    math.\n", 9));
+        let kinds: Vec<_> = items.iter().filter(|i| i.label == "pi" || i.label == "sqrt").map(|i| (i.label.as_str(), i.kind)).collect();
+        assert!(kinds.contains(&("pi", Some(lt::CompletionItemKind::CONSTANT))), "{kinds:?}");
+        assert!(kinds.contains(&("sqrt", Some(lt::CompletionItemKind::FUNCTION))), "{kinds:?}");
     }
 
     #[test]

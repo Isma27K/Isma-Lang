@@ -21,3 +21,5 @@ fn new_counter() -> Counter:
 
 fn _secret() -> Int:
     return 42
+
+val _hidden = 7

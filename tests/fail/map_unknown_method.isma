@@ -1,0 +1,4 @@
+# expect-error: no method `put` on type `Map[String, Int]`
+fn main():
+    val m = {"a": 1}
+    m.put("b", 2)

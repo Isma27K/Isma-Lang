@@ -1,0 +1,4 @@
+# expect-error: mismatched types: expected `String`, found `Int`
+fn main():
+    val m = {"a": 1}
+    print(m[1])

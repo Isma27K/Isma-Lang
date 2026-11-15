@@ -1,0 +1,8 @@
+# expect-error: a top-level `val` must be a constant
+fn f() -> Int:
+    return 1
+
+val x = f()
+
+fn main():
+    print(x)

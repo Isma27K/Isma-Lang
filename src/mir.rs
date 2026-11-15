@@ -18,6 +18,7 @@ pub type BlockId = usize;
 pub struct Program {
     pub structs: Vec<TStruct>,
     pub funcs: Vec<Func>,
+    pub map_keys: Vec<crate::tast::MapKey>,
 }
 
 #[derive(Debug)]
@@ -106,6 +107,8 @@ pub enum Rvalue {
     VariantField(VarId, StructId, usize, usize),
     /// A list literal with the given element type.
     ListNew(Type, Vec<Operand>),
+    /// An empty map of the given (`Map`) type, with room for this many entries.
+    MapNew(Type, usize),
 }
 
 /// What a `New` builds.
@@ -180,7 +183,7 @@ impl Func {
 /// A nullable reference is a possibly-null pointer, so it counts too. An enum
 /// does when some variant carries data.
 pub fn is_ref(t: &Type) -> bool {
-    matches!(t.non_null(), Type::Str | Type::List(_) | Type::Struct(_) | Type::Enum(_, true))
+    matches!(t.non_null(), Type::Str | Type::List(_) | Type::Map(..) | Type::Struct(_) | Type::Enum(_, true))
 }
 
 impl Operand {
@@ -203,7 +206,7 @@ impl Rvalue {
             | Rvalue::New(_, args)
             | Rvalue::Reuse(_, _, args)
             | Rvalue::ListNew(_, args) => args.iter().collect(),
-            Rvalue::Field(..) | Rvalue::Index(..) | Rvalue::Tag(_) | Rvalue::VariantField(..) => vec![],
+            Rvalue::Field(..) | Rvalue::Index(..) | Rvalue::Tag(_) | Rvalue::VariantField(..) | Rvalue::MapNew(..) => vec![],
             // (the list / object of a projection is a VarId, see `base`)
         }
     }
@@ -322,6 +325,7 @@ fn print_func(out: &mut String, f: &Func, p: &Program, names: &[String]) {
             format!("{} as {}.{}", var(*o), v.name, v.fields[*i].name)
         }
         Rvalue::ListNew(_, args) => format!("[{}]", ops(args)),
+        Rvalue::MapNew(..) => "{}".to_string(),
     };
     for (b, block) in f.blocks.iter().enumerate() {
         let _ = writeln!(out, "  bb{b}:");

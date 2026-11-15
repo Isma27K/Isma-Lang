@@ -45,6 +45,9 @@ pub enum Tok {
     RParen,
     LBracket,
     RBracket,
+    /// `{` / `}` around a map literal (`{"a": 1}`). Blocks never use braces.
+    LBrace,
+    RBrace,
     Comma,
     Colon,
     Dot,
@@ -154,6 +157,8 @@ impl fmt::Display for Tok {
             Tok::RParen => "`)`",
             Tok::LBracket => "`[`",
             Tok::RBracket => "`]`",
+            Tok::LBrace => "`{`",
+            Tok::RBrace => "`}`",
             Tok::Comma => "`,`",
             Tok::Colon => "`:`",
             Tok::Dot => "`.`",

@@ -1,0 +1,5 @@
+# expect-error: mismatched types: expected `Float`, found `Int`
+val rate: Float = 2
+
+fn main():
+    print(rate)

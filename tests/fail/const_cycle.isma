@@ -1,0 +1,6 @@
+# expect-error: the constant `a` is defined in terms of itself
+val a = b + 1
+val b = a + 1
+
+fn main():
+    print(a)

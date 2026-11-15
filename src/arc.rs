@@ -171,6 +171,18 @@ fn rvalue_roles(f: &Func, rv: &Rvalue, sigs: &[Vec<bool>], r: &mut Roles) {
             add(&args[0], false, r);
             add(&args[1], true, r);
         }
+        // The key and value are stored in the map (or the key is dropped there
+        // when it's already in it).
+        Rvalue::Builtin(Builtin::MapSet, args, _) => {
+            add(&args[0], false, r);
+            add(&args[1], true, r);
+            add(&args[2], true, r);
+        }
+        Rvalue::Builtin(Builtin::ListInsert, args, _) => {
+            add(&args[0], false, r);
+            add(&args[1], false, r);
+            add(&args[2], true, r);
+        }
         Rvalue::Builtin(Builtin::StrAppendOwned, args, _) => {
             add(&args[0], true, r);
             add(&args[1], false, r);
@@ -376,7 +388,8 @@ fn direct_writes(f: &Func, s: &Stmt, calls: &mut Vec<FuncId>) -> Vec<Class> {
     };
     match rv {
         Some(Rvalue::Call(fid, ..)) => calls.push(*fid),
-        Some(Rvalue::Builtin(Builtin::ListPop, args, _)) => out.push(Class::Elem(elem_of(&f.operand_ty(&args[0])))),
+        // Taking an element out, or releasing them all.
+        Some(Rvalue::Builtin(Builtin::ListPop | Builtin::ListRemoveAt | Builtin::ListClear, args, _)) => out.push(Class::Elem(elem_of(&f.operand_ty(&args[0])))),
         _ => {}
     }
     out

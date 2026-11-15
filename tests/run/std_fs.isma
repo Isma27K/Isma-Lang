@@ -1,0 +1,50 @@
+import fs
+import time
+
+fn main():
+    # A fresh folder (tests run in parallel, and twice: also under sanitizers).
+    val root = f"target/fs_test_{time.monotonic_ns()}"
+    val dir = fs.join(root, "a/b")
+    fs.make_dir(dir)
+    fs.make_dir(dir)                        # already there: fine
+    print(fs.is_dir(dir))
+    val file = fs.join(dir, "notes.txt")
+    print(fs.exists(file))
+    fs.write(file, "one\n")
+    fs.append(file, "two\r\nthree")
+    print(fs.read(file).len())
+    print(fs.read_lines(file))
+    print(fs.is_file(file))
+    print(fs.is_dir(file))
+    fs.write(fs.join(dir, "b.txt"), "")
+    fs.make_dir(fs.join(dir, "c"))
+    print(fs.list_dir(dir))
+    print(fs.read(fs.join(dir, "b.txt")).is_empty())
+    fs.rename(file, fs.join(dir, "moved.txt"))
+    print(fs.list_dir(dir))
+    print(fs.read_or_null(file))
+    print(fs.read_or_null(fs.join(dir, "moved.txt"))?.len())
+    for name in fs.list_dir(dir):
+        fs.remove(fs.join(dir, name))
+    fs.remove(dir)
+    fs.remove(fs.join(root, "a"))
+    fs.remove(root)
+    print(fs.exists(root))
+    print(fs.cwd().len() > 0)
+    # paths
+    print(fs.join("out", "a.txt"))
+    print(fs.join("out/", "a.txt"))
+    print(fs.join("out", "/abs"))
+    print(fs.join("", "a.txt"))
+    print(fs.file_name("src/main.isma"))
+    print(fs.file_name("main.isma"))
+    print(fs.file_name("src/dir/"))
+    print(fs.parent("src/main.isma"))
+    print(fs.parent("main.isma"))
+    print(fs.parent("/main.isma"))
+    print(fs.extension("main.isma"))
+    print(fs.extension("a.tar.gz"))
+    print(fs.extension("Makefile"))
+    print(fs.extension(".bashrc"))
+    print(fs.stem("src/main.isma"))
+    print(fs.stem(".bashrc"))

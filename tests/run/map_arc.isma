@@ -1,0 +1,61 @@
+# Reference counting through maps: values replaced, removed, cleared and
+# taken out, keys built at run time, and maps inside structs and maps.
+struct Item:
+    name: String
+    var tags: List[String]
+
+struct Registry:
+    var by_name: Map[String, Item]
+    var parent: Registry?
+
+fn label(i: Int) -> String:
+    return f"item-{i}"
+
+fn main():
+    val items: Map[String, Item] = {}
+    for i in 0..50:
+        items[label(i)] = Item(label(i), [f"t{i}"])
+    # Replacing a value with itself, and with another map's value.
+    val first = items[label(0)]
+    items[label(0)] = first
+    items[label(0)] = items[label(1)]
+    print(items[label(0)].name)
+    print(first.name)
+    # A removed value lives on while it's used.
+    val gone = items.remove(label(2)) ?: Item("none", [])
+    items[label(3)].tags.push("extra")
+    print(f"{gone.name} {gone.tags} {items[label(3)].tags}")
+    # Defaults that are references.
+    val fallback = Item("fallback", [])
+    print(items.get("nope", fallback).name)
+    print(items.get(label(4), fallback).name)
+    # Nullable values.
+    val notes: Map[String, String?] = {"a": null, "b": "bee"}
+    notes["a"] = "ay"
+    notes["b"] = null
+    print(notes)
+    # Maps of maps, cleared from the inside.
+    val nested: Map[Int, Map[String, List[Int]]] = {}
+    for i in 0..10:
+        nested[i] = {"xs": [i, i * 2]}
+    nested[3]["xs"].push(99)
+    nested[4].clear()
+    print(f"{nested[3]} {nested[4]} {nested.len()}")
+    nested.clear()
+    print(nested.len())
+    # keys() and values() copy references out.
+    val ks = items.keys()
+    val vs = items.values()
+    items.clear()
+    print(f"{ks.len()} {vs.len()} {vs[0].name}")
+    # A registry that points at itself through a map (a cycle).
+    val root = Registry({}, null)
+    val child = Registry({}, root)
+    root.by_name["x"] = Item("x", [])
+    child.by_name["y"] = Item("y", [])
+    root.parent = child
+    print(root.parent?.parent?.by_name?.get("x")?.name ?: "?")
+    # A map holding itself.
+    val maps: Map[String, Registry] = {"root": root}
+    root.by_name = {}
+    print(maps["root"].by_name.len())

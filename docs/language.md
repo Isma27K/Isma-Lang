@@ -1,11 +1,12 @@
 # The Isma language guide
 
-[← Back to the README](../README.md) · [The `time` module](time.md) · [Installing](install.md)
+[← Back to the README](../README.md) · [`time`](time.md) · [`math`](math.md) · [`fs`](fs.md) · [Installing](install.md)
 
 Isma reads like Python, checks like Kotlin and compiles to native code. This guide covers the whole language as it is today.
 
 - [Running programs](#running-programs)
 - [Variables: `val` and `var`](#variables-val-and-var)
+- [Constants](#constants)
 - [Types](#types)
 - [Strict typing](#strict-typing)
 - [Warnings (lints)](#warnings-lints)
@@ -16,6 +17,7 @@ Isma reads like Python, checks like Kotlin and compiles to native code. This gui
 - [Operator functions](#operator-functions)
 - [Generics](#generics)
 - [Lists](#lists)
+- [Maps](#maps)
 - [Strings and f-strings](#strings-and-f-strings)
 - [Null safety](#null-safety)
 - [Memory](#memory)
@@ -73,6 +75,25 @@ name = "other"           # error: cannot assign twice to immutable variable `nam
 - Declaring a name twice in the same block is an error, but an inner block may shadow an outer name.
 - `_` is a throwaway name: `val _ = compute()` and `for _ in 0..3:` are fine, and `_` can be declared any number of times.
 
+## Constants
+
+A `val` at the top of a file, outside any function, is a constant:
+
+```python
+val max_players = 8
+val tax_rate = 0.11
+val title = "Isma " + "Quest"            # constants can use operators...
+val half = max_players / 2               # ...and other constants
+
+fn main():
+    print(f"{title}: up to {max_players} players")
+```
+
+- **Numbers, `Bool`s and `String`s only**, made of literals, operators and other constants (of the same module, or imported ones such as `math.pi`). They are worked out when compiling, so `val big = 9223372036854775807 + 1` is a compile error, and every use is replaced by the value: constants cost nothing at run time.
+- **Order doesn't matter.** A constant can use one defined further down; one defined in terms of itself is an error.
+- **Modules share them** like functions: `math.pi`, or `from math import pi`. A name starting with `_` is private.
+- **There are no global variables.** A top-level `var` is an error: keep changing state in `main` (or a struct) and pass it along.
+
 ## Types
 
 | Type | Notes |
@@ -82,12 +103,13 @@ name = "other"           # error: cannot assign twice to immutable variable `nam
 | `Bool` | `true` / `false`. |
 | `String` | Immutable UTF-8. `+` concatenates. |
 | `List[T]` | Growable and bounds-checked. A reference type. |
+| `Map[K, V]` | A hash map from keys to values, in insertion order. A reference type. See [Maps](#maps). |
 | structs | User-defined. A reference type, like Python and Kotlin objects. |
 | enums | User-defined: one of several variants, which may carry data. See [Enums and `match`](#enums-and-match). |
 | `T?` | A `T` or `null`, e.g. `Int?`, `String?`, `User?`. See [Null safety](#null-safety). |
 | generic types | Your own structs and enums with type parameters, written like `Box[Int]` or `Pair[String, Float]`. See [Generics](#generics). |
 
-Lists and structs are references: `val b = a` makes `b` point at the same list as `a`. Memory is managed for you, see [Memory](#memory).
+Lists, maps and structs are references: `val b = a` makes `b` point at the same list as `a`. Memory is managed for you, see [Memory](#memory).
 
 ## Strict typing
 
@@ -161,7 +183,13 @@ for i in 1..=10:     # 1 to 10
     ...
 for x in my_list:    # each element
     ...
+for i, x in my_list: # the index too: 0, 1, 2...
+    ...
+for k, v in my_map:  # a map's keys and values, in insertion order
+    ...
 ```
+
+`x in xs` and `x not in xs` test membership: a key of a map, an element of a list (compared with `==`), or a substring of a string.
 
 `break`, `continue`, `return` and `pass` work as in Python. A block may also sit on the same line: `if x > 0: return x`. Blocks use `:` plus indentation (4 spaces); braces are a compile error with a hint.
 
@@ -397,8 +425,10 @@ There are no bounds to declare. The compiler works out what each type parameter 
 | `a + b`, `-`, `*`, `/`, `%` (also `total += x`) | that operator, giving a `T` | `Int`, `Float`; `String` for `+` |
 | `-a` | `-` | `Int`, `Float` |
 | `print(a)`, `f"{a}"`, `a.to_string()` | `to_string` | `Int`, `Float`, `Bool`, `String`, enums without data |
+| `hash(a)` | `hash` | `Int`, `Float`, `Bool`, `String`, enums without data |
+| `Map[T, V]` (a `T` as a map key) | `==` and `hash` | `Int`, `Bool`, `String`, enums without data |
 
-Your own types qualify by defining the matching [operator functions](#operator-functions) or `fn to_string(self) -> String`; for arithmetic, it's the one that takes and returns the type itself (`fn +(self, other: Vec2) -> Vec2`). Generic code can also store a `T` in lists and fields, return it, compare it with `null`, and pass it to other generic code, which passes on what *that* code needs. What it can't do is read fields or call other methods on a `T`: it could be any type.
+Your own types qualify by defining the matching [operator functions](#operator-functions), `fn to_string(self) -> String` or `fn hash(self) -> Int`; for arithmetic, it's the one that takes and returns the type itself (`fn +(self, other: Vec2) -> Vec2`). Generic code can also store a `T` in lists and fields, return it, compare it with `null`, and pass it to other generic code, which passes on what *that* code needs. What it can't do is read fields or call other methods on a `T`: it could be any type.
 
 Using a type that falls short is an error at the call, pointing at the line of generic code that needs more:
 
@@ -437,14 +467,89 @@ xs.push(4)
 xs[0] = 10
 val last = xs.pop()
 print(xs.len())
+print(xs)                            # [10, 1, 2]
+print(2 in xs)                       # true
+xs.sort()                            # [1, 2, 10]
 xs[99]                               # panic: index 99 out of bounds for list of length 3
 ```
 
 | List method | |
 |---|---|
-| `len() -> Int` | Number of elements |
+| `len() -> Int`, `is_empty() -> Bool` | Number of elements; are there none? |
 | `push(value)` | Append to the end |
 | `pop() -> T` | Remove and return the last element (panics if the list is empty) |
+| `insert(i, value)` | Insert at index `i` (`0` to `len()`), moving the rest up |
+| `remove_at(i) -> T` | Remove and return the element at `i`, moving the rest down |
+| `clear()` | Remove every element |
+| `contains(x) -> Bool` | Is `x` in the list? The same as `x in xs`. Elements are compared with `==`, so they need it (a struct needs [`fn ==`](#operator-functions)) |
+| `index_of(x) -> Int?` | The index of the first element equal to `x`, or `null` |
+| `reverse()` | Reverse the order, in place |
+| `sort()` | Sort in place, smallest first. For lists of `Int`, `Float` and `String` |
+| `join(sep) -> String` | For a `List[String]`: the strings with `sep` between them. `["a", "b"].join(", ")` is `"a, b"` |
+| `to_string() -> String` | The list as you'd write it, `[1, 2, 3]`. `print(xs)` and `f"{xs}"` use it |
+
+A list prints the way you'd write it in code: `[1, 2, 3]`, `["a", "b"]` (strings quoted), `[[1], []]`, `[1, null]`. Any list whose elements can be printed can be printed.
+
+## Maps
+
+A `Map[K, V]` maps keys of type `K` to values of type `V`, like a Python `dict` or a Kotlin `MutableMap`:
+
+```python
+val ages = {"ana": 31, "budi": 25}       # Map[String, Int]
+val empty: Map[String, Int] = {}         # an empty map needs a type annotation
+ages["citra"] = 40                       # add, or replace
+ages["ana"] += 1                         # update (panics if the key is missing)
+print(ages["budi"])                      # 25 (panics if the key is missing)
+print(ages.get("dewi"))                  # null: `get` gives a `V?`
+print(ages.get("dewi", 0))               # 0: or a default
+print("ana" in ages)                     # true
+ages.remove("budi")
+for name, age in ages:                   # in insertion order
+    print(f"{name} is {age}")
+print(ages)                              # {"ana": 32, "citra": 40}
+```
+
+Counting is the classic use:
+
+```python
+val counts: Map[String, Int] = {}
+for word in text.split():
+    counts[word] = counts.get(word, 0) + 1
+```
+
+| Map method | |
+|---|---|
+| `m[k]` | The value for `k`. Panics if `k` isn't in the map: `key "dewi" not found in map` |
+| `m[k] = v` | Set the value for `k` (adding the key if it's new). `m[k] += v` updates an existing one |
+| `get(k) -> V?` | The value, or `null` if `k` isn't there |
+| `get(k, default) -> V` | The value, or `default` if `k` isn't there |
+| `contains(k) -> Bool` | Is `k` in the map? The same as `k in m` |
+| `remove(k) -> V?` | Remove `k`, returning its value (`null` if it wasn't there) |
+| `len() -> Int`, `is_empty() -> Bool` | Number of entries; are there none? |
+| `keys() -> List[K]`, `values() -> List[V]` | New lists, in insertion order |
+| `clear()` | Remove every entry |
+| `to_string() -> String` | The map as you'd write it, `{"a": 1}`. `print(m)` and `f"{m}"` use it |
+
+- **Insertion order.** Looping over a map, `keys()`, `values()` and printing all go in the order the keys were first added, as in Python. Replacing a value keeps the key's place; removing a key and adding it again moves it to the end.
+- **Looping.** `for k in m:` gives the keys, `for k, v in m:` the keys and values. Adding or removing keys inside the loop panics with `map changed size during iteration`; changing the values of existing keys is fine.
+- **Keys** can be `Int`, `Bool`, `String`, enums without data, and your own structs and enums that define `fn ==` and `fn hash`. `hash(...)` combines the hashes of the fields that `==` compares:
+
+  ```python
+  struct Point:
+      x: Int
+      y: Int
+
+      fn ==(self, other: Point) -> Bool:
+          return self.x == other.x and self.y == other.y
+
+      fn hash(self) -> Int:
+          return hash(self.x, self.y)
+
+  val grid = {Point(0, 0): "start", Point(3, 4): "goal"}
+  ```
+
+  `Float` keys are refused (`0.1 + 0.2 != 0.3`, and NaN isn't equal to itself), and so are nullable keys and lists or maps as keys.
+- **Speed.** Maps are hash tables in the runtime, the same design as Python's dicts: entries are kept in an array, in order, with an index of open-addressing slots to find them. Keys and values are stored inline (an `Int` value is 8 bytes, no boxing), lookups with `Int` and `String` keys don't call back into your code, and an update right after a lookup of the same key (`m[k] = m.get(k, 0) + 1`, `m[k] += 1`) doesn't search again.
 
 ## Strings and f-strings
 
@@ -460,10 +565,20 @@ for c in "héllo".chars():
 
 | String method | |
 |---|---|
-| `len() -> Int` | Length in bytes |
+| `len() -> Int`, `is_empty() -> Bool` | Length in bytes; is it `""`? |
 | `chars() -> List[String]` | Each character as a one-character string |
+| `lines() -> List[String]` | The lines, without their `\n` or `\r\n` |
+| `split(sep) -> List[String]` | The parts between each `sep`: `"a,b,,c".split(",")` is `["a", "b", "", "c"]` |
+| `split() -> List[String]` | The words: split on runs of whitespace, with no empty parts |
 | `substring(start, end) -> String` | Bytes `start..end`. Panics if out of range or splitting a character |
-| `contains(s)`, `starts_with(s)`, `ends_with(s)` | `-> Bool` |
+| `contains(s)`, `starts_with(s)`, `ends_with(s)` | `-> Bool`. `s in text` is the same as `text.contains(s)` |
+| `find(s) -> Int?`, `rfind(s) -> Int?` | The byte index of the first (last) `s`, or `null` |
+| `count(s) -> Int` | How many times `s` occurs, without overlapping |
+| `replace(old, new) -> String` | Every `old` replaced by `new` |
+| `trim()`, `trim_start()`, `trim_end()` | Without whitespace at both ends, the start, or the end |
+| `upper()`, `lower()` | In upper or lower case (ASCII letters) |
+| `repeat(n) -> String` | `n` copies: `"ab".repeat(3)` is `"ababab"` |
+| `pad_start(width)`, `pad_end(width)` | At least `width` characters, adding spaces (or a given character: `"7".pad_start(3, "0")` is `"007"`) |
 | `to_int()`, `to_float()`, `to_string()` | Conversions. Parsing panics on bad input |
 | `to_int_or_null()`, `to_float_or_null()` | `-> Int?` / `-> Float?`: `null` instead of a panic on bad input |
 
@@ -635,19 +750,26 @@ fn main():
   panic at app.isma:4:11: invalid date 2023-02-29: February 2023 has 28 days
   ```
 
-Available modules: [`time`](time.md).
+Available modules:
+
+| Module | |
+|---|---|
+| [`time`](time.md) | UTC dates and times, durations, clocks |
+| [`math`](math.md) | Constants (`pi`, `e`, `inf`), powers and logarithms, trigonometry, rounding, `min`/`max`/`clamp`, `gcd` |
+| [`fs`](fs.md) | Reading and writing files, folders, paths |
 
 ## Built-in functions
 
 | Function | |
 |---|---|
-| `print(x)` | Print an `Int`, `Float`, `Bool`, `String`, enum without data (its variant's name) or a value whose type has a `fn to_string(self) -> String` method, followed by a newline. A nullable one prints `null` when it is null |
+| `print(x)` | Print an `Int`, `Float`, `Bool`, `String`, enum without data (its variant's name), a value whose type has a `fn to_string(self) -> String` method, or a list or map of those, followed by a newline. A nullable one prints `null` when it is null |
 | `input() -> String` | Read one line from stdin, without the newline |
 | `args() -> List[String]` | Command-line arguments passed to the program |
 | `sqrt(x: Float) -> Float` | Square root |
 | `assert(cond: Bool)` | Panic if `cond` is false |
 | `panic(msg: String)` | Stop the program with a message |
 | `exit(code: Int)` | Exit the process |
+| `hash(a, b, ...) -> Int` | A hash of the values, mixed into one `Int` (for [`fn hash`](#maps)). Works on numbers, `Bool`, `String`, enums, nullable values, and types with `fn hash(self) -> Int` |
 
 ## Panics
 
@@ -659,17 +781,20 @@ panic at crash.isma:5:15: index 3 out of bounds for list of length 3
 
 Panics cover:
 - integer overflow and division by zero;
-- out-of-bounds indexing and `pop()` on an empty list;
+- out-of-bounds indexing, `pop()` on an empty list, `insert`/`remove_at` out of range;
+- `m[k]` with a key that isn't in the map, and adding or removing keys while looping over the map;
 - a failed `assert`, a failed parse (`"abc".to_int()`), and `panic(...)`;
 - `x!!` when `x` is null.
 
 ## Known limitations
 
 - **No packages to install.** Modules come from your own folders and the standard library; there is no package manager or search path.
-- **No top-level constants.** Everything lives inside functions.
+- **No global variables.** Top-level `val`s are [constants](#constants) (numbers, `Bool`s and `String`s); everything that changes lives in functions.
 - **Byte-based strings.** `String.len()` and `substring()` count bytes, and there's no `s[i]` indexing; use `chars()`.
 - **No negative indexing.** `xs[-1]` panics.
 - **Operators look at the left operand.** `2.0 * v` can't use `Vec2`'s `fn *`; write `v * 2.0`.
 - **`==` from `fn ==` needs non-null values.** Check for `null` first (a smart cast then does the rest).
 - **`match` is a statement.** It doesn't produce a value; assign or `return` inside its cases.
-- **No interfaces yet.** Generic code can use operators and `to_string` on a `T`, but no fields or other methods.
+- **No interfaces yet.** Generic code can use operators, `to_string` and `hash` on a `T`, but no fields or other methods.
+- **No sets or tuples yet.** Use a `Map[K, Bool]` for a set, and a struct for a pair.
+- **`sort()` only sorts lists of `Int`, `Float` and `String`.**

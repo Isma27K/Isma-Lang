@@ -1,0 +1,5 @@
+# expect-panic: map changed size during iteration
+fn main():
+    val m = {1: 1, 2: 2}
+    for k, v in m:
+        m.remove(k + 1)

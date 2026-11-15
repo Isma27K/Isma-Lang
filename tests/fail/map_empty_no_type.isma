@@ -1,0 +1,4 @@
+# expect-error: cannot infer the key and value types of an empty map
+fn main():
+    val m = {}
+    print(m.len())

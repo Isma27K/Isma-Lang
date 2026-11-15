@@ -1,4 +1,4 @@
-// Isma runtime v0.2
+// Isma runtime v0.3
 // Linked into every Isma program. Kept deliberately small.
 
 #include <errno.h>
@@ -729,6 +729,777 @@ void *isma_list_pop_slot(IsmaList *l, int64_t elem_size, const char *file, int l
     if (l->len == 0) isma_die(file, line, col, "pop from empty list");
     l->len--;
     return l->data + l->len * elem_size;
+}
+
+// ---------------------------------------------------------------- list utilities
+
+void isma_list_insert_slot_check(IsmaList *l, int64_t i, const char *file, int line, int col) {
+    if (i < 0 || i > l->len) {
+        char buf[128];
+        snprintf(buf, sizeof buf, "insert index %lld out of bounds for list of length %lld", (long long)i, (long long)l->len);
+        isma_die(file, line, col, buf);
+    }
+}
+
+// Room for one element at index `i` (already checked), moving the rest up.
+void *isma_list_insert_slot(IsmaList *l, int64_t i, int64_t elem_size) {
+    isma_list_push_slot(l, elem_size);
+    char *at = l->data + i * elem_size;
+    memmove(at + elem_size, at, (size_t)((l->len - 1 - i) * elem_size));
+    return at;
+}
+
+// Takes element `i` out (into `out`), moving the rest down.
+void isma_list_remove_at(IsmaList *l, int64_t i, int64_t elem_size, void *out, const char *file, int line, int col) {
+    if (i < 0 || i >= l->len) {
+        char buf[128];
+        snprintf(buf, sizeof buf, "index %lld out of bounds for list of length %lld", (long long)i, (long long)l->len);
+        isma_die(file, line, col, buf);
+    }
+    char *at = l->data + i * elem_size;
+    memcpy(out, at, (size_t)elem_size);
+    memmove(at, at + elem_size, (size_t)((l->len - 1 - i) * elem_size));
+    l->len--;
+}
+
+void isma_list_reverse(IsmaList *l, int64_t elem_size) {
+    char tmp[16];
+    for (int64_t i = 0, j = l->len - 1; i < j; i++, j--) {
+        char *a = l->data + i * elem_size, *b = l->data + j * elem_size;
+        memcpy(tmp, a, (size_t)elem_size);
+        memcpy(a, b, (size_t)elem_size);
+        memcpy(b, tmp, (size_t)elem_size);
+    }
+}
+
+static int cmp_int(const void *a, const void *b) {
+    int64_t x = *(const int64_t *)a, y = *(const int64_t *)b;
+    return (x > y) - (x < y);
+}
+// NaN sorts last, like Python's sorted() would if it were consistent.
+static int cmp_float(const void *a, const void *b) {
+    double x = *(const double *)a, y = *(const double *)b;
+    if (isnan(x) || isnan(y)) return isnan(x) - isnan(y);
+    return (x > y) - (x < y);
+}
+int64_t isma_str_cmp(IsmaStr *a, IsmaStr *b);
+static int cmp_str(const void *a, const void *b) { return (int)isma_str_cmp(*(IsmaStr *const *)a, *(IsmaStr *const *)b); }
+
+// Sort in place: kind 0 Int, 1 Float, 2 String. (qsort isn't stable, but
+// equal Ints, Floats and Strings are indistinguishable.)
+void isma_list_sort(IsmaList *l, int64_t kind) {
+    if (l->len < 2) return;
+    qsort(l->data, (size_t)l->len, 8, kind == 0 ? cmp_int : kind == 1 ? cmp_float : cmp_str);
+}
+
+// ---------------------------------------------------------------- more string utilities
+
+IsmaStr *isma_str_list_join(IsmaList *l, IsmaStr *sep) {
+    IsmaStr **parts = (IsmaStr **)l->data;
+    if (l->len == 1) return str_dup(parts[0]);
+    int64_t n = 0;
+    for (int64_t i = 0; i < l->len; i++) n += parts[i]->len + (i > 0 ? sep->len : 0);
+    IsmaStr *s = str_new(n);
+    char *p = s->data;
+    for (int64_t i = 0; i < l->len; i++) {
+        if (i > 0) {
+            memcpy(p, sep->data, (size_t)sep->len);
+            p += sep->len;
+        }
+        memcpy(p, parts[i]->data, (size_t)parts[i]->len);
+        p += parts[i]->len;
+    }
+    return s;
+}
+
+static void list_push_str(IsmaList *l, const char *data, int64_t len) {
+    IsmaStr **slot = isma_list_push_slot(l, (int64_t)sizeof(IsmaStr *));
+    *slot = str_from(data, len);
+}
+
+static int64_t find_from(IsmaStr *h, IsmaStr *n, int64_t from) {
+    if (n->len == 0) return from;
+    for (int64_t i = from; i + n->len <= h->len; i++)
+        if (h->data[i] == n->data[0] && memcmp(h->data + i, n->data, (size_t)n->len) == 0) return i;
+    return -1;
+}
+
+IsmaList *isma_str_split(IsmaStr *s, IsmaStr *sep, const char *file, int line, int col) {
+    if (sep->len == 0) isma_die(file, line, col, "split() with an empty separator; use chars() to split into characters");
+    IsmaList *l = isma_list_new((int64_t)sizeof(IsmaStr *), 0);
+    int64_t start = 0;
+    for (;;) {
+        int64_t at = find_from(s, sep, start);
+        if (at < 0) break;
+        list_push_str(l, s->data + start, at - start);
+        start = at + sep->len;
+    }
+    list_push_str(l, s->data + start, s->len - start);
+    return l;
+}
+
+static int is_space(unsigned char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v'; }
+
+// Like Python's split() without arguments: runs of whitespace separate words,
+// and there are no empty words.
+IsmaList *isma_str_split_whitespace(IsmaStr *s) {
+    IsmaList *l = isma_list_new((int64_t)sizeof(IsmaStr *), 0);
+    int64_t i = 0;
+    while (i < s->len) {
+        while (i < s->len && is_space((unsigned char)s->data[i])) i++;
+        int64_t start = i;
+        while (i < s->len && !is_space((unsigned char)s->data[i])) i++;
+        if (i > start) list_push_str(l, s->data + start, i - start);
+    }
+    return l;
+}
+
+// Lines without their "\n" or "\r\n"; a final newline doesn't start another line.
+IsmaList *isma_str_lines(IsmaStr *s) {
+    IsmaList *l = isma_list_new((int64_t)sizeof(IsmaStr *), 0);
+    int64_t start = 0;
+    for (int64_t i = 0; i < s->len; i++) {
+        if (s->data[i] == '\n') {
+            int64_t end = i > start && s->data[i - 1] == '\r' ? i - 1 : i;
+            list_push_str(l, s->data + start, end - start);
+            start = i + 1;
+        }
+    }
+    if (start < s->len) list_push_str(l, s->data + start, s->len - start);
+    return l;
+}
+
+static IsmaStr *str_slice(IsmaStr *s, int64_t a, int64_t b) {
+    if (a == 0 && b == s->len) return str_dup(s);
+    return str_from(s->data + a, b - a);
+}
+
+IsmaStr *isma_str_trim(IsmaStr *s, int64_t start, int64_t end) {
+    int64_t a = 0, b = s->len;
+    if (start)
+        while (a < b && is_space((unsigned char)s->data[a])) a++;
+    if (end)
+        while (b > a && is_space((unsigned char)s->data[b - 1])) b--;
+    return str_slice(s, a, b);
+}
+
+// ASCII letters only; other characters are left alone.
+IsmaStr *isma_str_case(IsmaStr *s, int64_t upper) {
+    int64_t i = 0;
+    for (; i < s->len; i++) {
+        char c = s->data[i];
+        if (upper ? (c >= 'a' && c <= 'z') : (c >= 'A' && c <= 'Z')) break;
+    }
+    if (i == s->len) return str_dup(s);
+    IsmaStr *r = str_from(s->data, s->len);
+    for (; i < r->len; i++) {
+        char c = r->data[i];
+        if (upper && c >= 'a' && c <= 'z') r->data[i] = (char)(c - 32);
+        if (!upper && c >= 'A' && c <= 'Z') r->data[i] = (char)(c + 32);
+    }
+    return r;
+}
+
+IsmaStr *isma_str_replace(IsmaStr *s, IsmaStr *from, IsmaStr *to, const char *file, int line, int col) {
+    if (from->len == 0) isma_die(file, line, col, "replace() with an empty string to find");
+    int64_t count = 0;
+    for (int64_t at = find_from(s, from, 0); at >= 0; at = find_from(s, from, at + from->len)) count++;
+    if (count == 0) return str_dup(s);
+    IsmaStr *r = str_new(s->len + count * (to->len - from->len));
+    char *p = r->data;
+    int64_t start = 0;
+    for (int64_t at = find_from(s, from, 0); at >= 0; at = find_from(s, from, start)) {
+        memcpy(p, s->data + start, (size_t)(at - start));
+        p += at - start;
+        memcpy(p, to->data, (size_t)to->len);
+        p += to->len;
+        start = at + from->len;
+    }
+    memcpy(p, s->data + start, (size_t)(s->len - start));
+    return r;
+}
+
+// The string as it's written in Isma code, quotes and escapes included.
+IsmaStr *isma_str_repr(IsmaStr *s) {
+    int64_t n = 2;
+    for (int64_t i = 0; i < s->len; i++) {
+        unsigned char c = (unsigned char)s->data[i];
+        n += (c == '"' || c == '\\' || c == '\n' || c == '\t' || c == '\r' || c == 0) ? 2 : 1;
+    }
+    IsmaStr *r = str_new(n);
+    char *p = r->data;
+    *p++ = '"';
+    for (int64_t i = 0; i < s->len; i++) {
+        char c = s->data[i];
+        const char *esc = c == '"' ? "\\\"" : c == '\\' ? "\\\\" : c == '\n' ? "\\n" : c == '\t' ? "\\t" : c == '\r' ? "\\r" : c == 0 ? "\\0" : NULL;
+        if (esc) {
+            *p++ = esc[0];
+            *p++ = esc[1];
+        } else {
+            *p++ = c;
+        }
+    }
+    *p++ = '"';
+    return r;
+}
+
+// Byte index of the first `n` in `h`, or -1.
+int64_t isma_str_find(IsmaStr *h, IsmaStr *n) { return find_from(h, n, 0); }
+
+// Byte index of the last `n` in `h`, or -1.
+int64_t isma_str_rfind(IsmaStr *h, IsmaStr *n) {
+    for (int64_t i = h->len - n->len; i >= 0; i--)
+        if (memcmp(h->data + i, n->data, (size_t)n->len) == 0) return i;
+    return -1;
+}
+
+// Non-overlapping occurrences (an empty string: one more than the length, like Python).
+int64_t isma_str_count(IsmaStr *h, IsmaStr *n) {
+    if (n->len == 0) return h->len + 1;
+    int64_t c = 0, at = find_from(h, n, 0);
+    while (at >= 0) {
+        c++;
+        at = find_from(h, n, at + n->len);
+    }
+    return c;
+}
+
+IsmaStr *isma_str_repeat(IsmaStr *s, int64_t n, const char *file, int line, int col) {
+    if (n < 0) {
+        char buf[96];
+        snprintf(buf, sizeof buf, "repeat(%lld): the count can't be negative", (long long)n);
+        isma_die(file, line, col, buf);
+    }
+    if (n == 1) return str_dup(s);
+    if (s->len > 0 && n > ((int64_t)1 << 40) / s->len) isma_die(file, line, col, "repeat(): the result would be too large");
+    IsmaStr *r = str_new(s->len * n);
+    for (int64_t i = 0; i < n; i++) memcpy(r->data + i * s->len, s->data, (size_t)s->len);
+    return r;
+}
+
+static int64_t utf8_count(IsmaStr *s) {
+    int64_t n = 0;
+    for (int64_t i = 0; i < s->len; i++) n += ((unsigned char)s->data[i] & 0xC0) != 0x80;
+    return n;
+}
+
+// Pad to `width` characters with copies of `fill` (one character) on the left or right.
+IsmaStr *isma_str_pad(IsmaStr *s, int64_t width, IsmaStr *fill, int64_t at_start, const char *file, int line, int col) {
+    if (utf8_count(fill) != 1) isma_die(file, line, col, "pad_start()/pad_end(): the fill must be exactly one character");
+    int64_t have = utf8_count(s);
+    if (have >= width) return str_dup(s);
+    int64_t k = width - have;
+    IsmaStr *r = str_new(s->len + k * fill->len);
+    char *p = r->data;
+    if (!at_start) {
+        memcpy(p, s->data, (size_t)s->len);
+        p += s->len;
+    }
+    for (int64_t i = 0; i < k; i++, p += fill->len) memcpy(p, fill->data, (size_t)fill->len);
+    if (at_start) memcpy(p, s->data, (size_t)s->len);
+    return r;
+}
+
+// ---------------------------------------------------------------- hashing
+
+// splitmix64's finalizer: every input bit affects every output bit.
+static inline uint64_t mix64(uint64_t x) {
+    x ^= x >> 30;
+    x *= 0xbf58476d1ce4e5b9ULL;
+    x ^= x >> 27;
+    x *= 0x94d049bb133111ebULL;
+    x ^= x >> 31;
+    return x;
+}
+
+static uint64_t hash_bytes(const char *p, int64_t n) {
+    uint64_t h = 0x9E3779B97F4A7C15ULL ^ (uint64_t)n;
+    while (n >= 8) {
+        uint64_t w;
+        memcpy(&w, p, 8);
+        h = (h ^ w) * 0xbf58476d1ce4e5b9ULL;
+        h ^= h >> 29;
+        p += 8;
+        n -= 8;
+    }
+    if (n > 0) {
+        uint64_t w = 0;
+        memcpy(&w, p, (size_t)n);
+        h = (h ^ w) * 0x94d049bb133111ebULL;
+    }
+    return mix64(h);
+}
+
+int64_t isma_hash_int(int64_t v) { return (int64_t)mix64((uint64_t)v); }
+
+int64_t isma_hash_float(double d) {
+    if (d == 0) d = 0; // -0.0 == 0.0
+    if (isnan(d)) d = NAN;
+    uint64_t bits;
+    memcpy(&bits, &d, 8);
+    return (int64_t)mix64(bits);
+}
+
+int64_t isma_hash_str(IsmaStr *s) { return (int64_t)hash_bytes(s->data, s->len); }
+
+// `hash(a, b)`: fold each part's hash into the running one.
+int64_t isma_hash_combine(int64_t h, int64_t part) { return (int64_t)mix64((uint64_t)h * 31 + (uint64_t)part); }
+
+// ---------------------------------------------------------------- maps
+// A map keeps its entries in an array in insertion order, so looping over
+// one is deterministic (like Python's dicts), and finds them through an
+// open-addressing index of entry numbers (linear probing, at most 2/3 full).
+// An entry is { hash, key, value }; the compiler picks the layout and tells
+// the runtime its size. The runtime looks only at hashes and keys: a key is
+// an Int-like number (kind 0), a String (kind 1), or an object of a user
+// type that compiler-generated functions hash and compare (kind 2). A
+// removed entry stays in the array with hash -1 until the next rebuild.
+// Keys and values are reference counted by the generated code, not here.
+
+typedef struct {
+    int64_t kind;
+    int64_t stride;
+    int64_t (*hash)(void *key);
+    int64_t (*eq)(void *stored, void *key); // `stored` is the key in the map
+} IsmaMapType;
+
+typedef struct {
+    int64_t rc;
+    int64_t len;  // live entries
+    int64_t used; // entries[0..used) are live or removed
+    int64_t cap;  // entries allocated
+    char *entries;
+    int64_t *index; // mask + 1 slots: SLOT_EMPTY, SLOT_REMOVED, or a tag (see `slot_tag`)
+    int64_t mask;
+    // The last lookup, so the update that usually follows it (`m[k] = m.get(k, 0) + 1`,
+    // `m[k] += 1`) skips the search: the entry found (or -1), or for a missing
+    // Int-like key, the key, its hash and the free slot where it would go.
+    int64_t hint_ix;
+    int64_t hint_missing; // 1 if the fields below describe a missing key
+    int64_t hint_key;
+    int64_t hint_hash;
+    int64_t hint_slot;
+} IsmaMap;
+
+#define SLOT_EMPTY (-1)
+#define SLOT_REMOVED (-2)
+
+// A used index slot holds the entry's number and the top bits of its hash, so
+// a search can skip other keys without reading their entries (a cache miss each).
+static inline int64_t slot_tag(uint64_t h, int64_t ix) { return (int64_t)((h >> 32) << 32 | (uint64_t)ix); }
+static inline int64_t slot_ix(int64_t v) { return v & 0xffffffff; }
+static inline int slot_matches(int64_t v, uint64_t h) { return ((uint64_t)v >> 32) == (h >> 32); }
+#define MAP_MAX_ENTRIES ((int64_t)1 << 30)
+
+static inline int64_t entry_hash(const char *e) { return *(const int64_t *)e; }
+
+static uint64_t key_hash(const IsmaMapType *t, int64_t ikey, void *pkey) {
+    uint64_t h;
+    switch (t->kind) {
+    case 0: h = mix64((uint64_t)ikey); break;
+    case 1: h = hash_bytes(((IsmaStr *)pkey)->data, ((IsmaStr *)pkey)->len); break;
+    default: h = mix64((uint64_t)t->hash(pkey)); break;
+    }
+    return h & (uint64_t)INT64_MAX; // live entries have a hash >= 0
+}
+
+// Find `key` (with hash `h`): its entry number, or -1 with *slot set to where
+// it would go. User `==` may run, and may even change the map; then the
+// search starts over.
+static int64_t map_lookup(IsmaMap *m, const IsmaMapType *t, uint64_t h, int64_t ikey, void *pkey, int64_t *slot) {
+restart:
+    if (!m->index) {
+        *slot = -1;
+        return -1;
+    }
+    int64_t *index = m->index;
+    char *ents = m->entries;
+    uint64_t mask = (uint64_t)m->mask;
+    uint64_t i = h & mask;
+    int64_t tomb = -1;
+    for (;;) {
+        int64_t v = index[i];
+        if (v == SLOT_EMPTY) {
+            *slot = tomb >= 0 ? tomb : (int64_t)i;
+            return -1;
+        }
+        if (v == SLOT_REMOVED) {
+            if (tomb < 0) tomb = (int64_t)i;
+        } else if (slot_matches(v, h)) {
+            int64_t ix = slot_ix(v);
+            char *e = ents + ix * t->stride;
+            if ((uint64_t)entry_hash(e) == h) {
+                int eq;
+                if (t->kind == 0) {
+                    eq = *(int64_t *)(e + 8) == ikey;
+                } else if (t->kind == 1) {
+                    IsmaStr *a = *(IsmaStr **)(e + 8), *b = pkey;
+                    eq = a == b || (a->len == b->len && memcmp(a->data, b->data, (size_t)a->len) == 0);
+                } else {
+                    eq = t->eq(*(void **)(e + 8), pkey) != 0;
+                    if (m->index != index || m->entries != ents) goto restart;
+                }
+                if (eq) {
+                    *slot = (int64_t)i;
+                    return ix;
+                }
+            }
+        }
+        i = (i + 1) & mask;
+    }
+}
+
+// Make room for `need` entries: a fresh index and entry array holding only
+// the live entries (in order). Hashes are stored, so nothing is rehashed.
+static void map_rebuild(IsmaMap *m, const IsmaMapType *t, int64_t need) {
+    if (need > MAP_MAX_ENTRIES) {
+        fputs("fatal: map too large\n", stderr);
+        exit(134);
+    }
+    int64_t cap = need < 5 ? 5 : need;
+    int64_t slots = 8;
+    while (slots * 2 / 3 < cap) slots *= 2;
+    cap = slots * 2 / 3;
+    char *ents = malloc((size_t)(cap * t->stride));
+    int64_t *index = malloc((size_t)slots * sizeof(int64_t));
+    if (!ents || !index) oom();
+    memset(index, 0xff, (size_t)slots * sizeof(int64_t));
+    int64_t n = 0;
+    uint64_t mask = (uint64_t)slots - 1;
+    for (int64_t i = 0; i < m->used; i++) {
+        char *e = m->entries + i * t->stride;
+        int64_t h = entry_hash(e);
+        if (h < 0) continue;
+        memcpy(ents + n * t->stride, e, (size_t)t->stride);
+        uint64_t j = (uint64_t)h & mask;
+        while (index[j] != SLOT_EMPTY) j = (j + 1) & mask;
+        index[j] = slot_tag((uint64_t)h, n);
+        n++;
+    }
+    free(m->entries);
+    free(m->index);
+    m->hint_ix = -1;
+    m->hint_missing = 0;
+    m->entries = ents;
+    m->index = index;
+    m->mask = (int64_t)mask;
+    m->cap = cap;
+    m->used = n;
+    m->len = n;
+}
+
+IsmaMap *isma_map_new(const IsmaMapType *t, int64_t n) {
+    IsmaMap *m = isma_alloc((int64_t)sizeof(IsmaMap));
+    m->rc = 1;
+    m->len = m->used = m->cap = 0;
+    m->entries = NULL;
+    m->index = NULL;
+    m->mask = 0;
+    m->hint_ix = -1;
+    m->hint_missing = 0;
+    if (n > 0) map_rebuild(m, t, n);
+    return m;
+}
+
+// Frees the map (its keys and values were already released).
+void isma_map_free(void *p) {
+    IsmaMap *m = p;
+    free(m->entries);
+    free(m->index);
+    isma_free(m, (int64_t)sizeof(IsmaMap));
+}
+
+// `clear()`, after the keys and values were released.
+void isma_map_reset(IsmaMap *m) {
+    m->len = m->used = 0;
+    m->hint_ix = -1;
+    m->hint_missing = 0;
+    if (m->index) memset(m->index, 0xff, (size_t)(m->mask + 1) * sizeof(int64_t));
+}
+
+// Is the live entry `e` the one for this key? (User `==` may run.)
+static int entry_is(IsmaMap *m, const IsmaMapType *t, char *e, int64_t ikey, void *pkey) {
+    if (entry_hash(e) < 0) return 0;
+    if (t->kind == 0) return *(int64_t *)(e + 8) == ikey;
+    if (t->kind == 1) {
+        IsmaStr *a = *(IsmaStr **)(e + 8), *b = pkey;
+        return a == b || (a->len == b->len && memcmp(a->data, b->data, (size_t)a->len) == 0);
+    }
+    char *ents = m->entries;
+    int r = t->eq(*(void **)(e + 8), pkey) != 0;
+    return r && m->entries == ents && entry_hash(e) >= 0;
+}
+
+static void *map_find(IsmaMap *m, const IsmaMapType *t, int64_t ikey, void *pkey) {
+    if (m->len == 0) return NULL;
+    uint64_t h = key_hash(t, ikey, pkey);
+    int64_t slot, ix = map_lookup(m, t, h, ikey, pkey, &slot);
+    m->hint_ix = ix;
+    m->hint_missing = ix < 0 && t->kind == 0 && slot >= 0;
+    if (m->hint_missing) {
+        m->hint_key = ikey;
+        m->hint_hash = (int64_t)h;
+        m->hint_slot = slot;
+    }
+    return ix < 0 ? NULL : m->entries + ix * t->stride;
+}
+
+void *isma_map_find_i(IsmaMap *m, const IsmaMapType *t, int64_t key) { return map_find(m, t, key, NULL); }
+void *isma_map_find_p(IsmaMap *m, const IsmaMapType *t, void *key) { return map_find(m, t, 0, key); }
+
+// The entry for `key`, adding it (with the key stored, the value not yet)
+// when it's new: then *is_new is 1.
+static void *map_upsert(IsmaMap *m, const IsmaMapType *t, int64_t ikey, void *pkey, int64_t *is_new) {
+    // Right after a lookup of the same key, nothing needs to be searched.
+    int64_t hint = m->hint_ix;
+    if (hint >= 0 && hint < m->used) {
+        char *e = m->entries + hint * t->stride;
+        if (entry_is(m, t, e, ikey, pkey)) {
+            *is_new = 0;
+            return e;
+        }
+    }
+    uint64_t h;
+    int64_t slot, ix;
+    if (m->hint_missing && m->hint_key == ikey && m->used < m->cap) {
+        h = (uint64_t)m->hint_hash;
+        slot = m->hint_slot;
+        ix = -1;
+    } else {
+        h = key_hash(t, ikey, pkey); // first: it may run user code
+        ix = map_lookup(m, t, h, ikey, pkey, &slot);
+    }
+    m->hint_missing = 0;
+    if (ix >= 0) {
+        *is_new = 0;
+        return m->entries + ix * t->stride;
+    }
+    if (m->used == m->cap) {
+        map_rebuild(m, t, m->len * 2);
+        uint64_t mask = (uint64_t)m->mask, j = h & mask;
+        while (m->index[j] != SLOT_EMPTY) j = (j + 1) & mask;
+        slot = (int64_t)j;
+    }
+    int64_t n = m->used++;
+    char *e = m->entries + n * t->stride;
+    *(int64_t *)e = (int64_t)h;
+    if (t->kind == 0)
+        *(int64_t *)(e + 8) = ikey;
+    else
+        *(void **)(e + 8) = pkey;
+    m->index[slot] = slot_tag(h, n);
+    m->len++;
+    m->hint_ix = n;
+    *is_new = 1;
+    return e;
+}
+
+void *isma_map_upsert_i(IsmaMap *m, const IsmaMapType *t, int64_t key, int64_t *is_new) { return map_upsert(m, t, key, NULL, is_new); }
+void *isma_map_upsert_p(IsmaMap *m, const IsmaMapType *t, void *key, int64_t *is_new) { return map_upsert(m, t, 0, key, is_new); }
+
+// Unlink `key`'s entry and return it (its key and value are the caller's now), or NULL.
+static void *map_remove(IsmaMap *m, const IsmaMapType *t, int64_t ikey, void *pkey) {
+    if (m->len == 0) return NULL;
+    int64_t slot, ix = map_lookup(m, t, key_hash(t, ikey, pkey), ikey, pkey, &slot);
+    if (ix < 0) return NULL;
+    m->index[slot] = SLOT_REMOVED;
+    char *e = m->entries + ix * t->stride;
+    *(int64_t *)e = -1;
+    m->len--;
+    m->hint_ix = -1;
+    m->hint_missing = 0;
+    return e;
+}
+
+void *isma_map_remove_i(IsmaMap *m, const IsmaMapType *t, int64_t key) { return map_remove(m, t, key, NULL); }
+void *isma_map_remove_p(IsmaMap *m, const IsmaMapType *t, void *key) { return map_remove(m, t, 0, key); }
+
+// The number of the first live entry at or after `i`, or -1. `len` is the
+// size the map had when the loop started.
+int64_t isma_map_next(IsmaMap *m, const IsmaMapType *t, int64_t i, int64_t len, const char *file, int line, int col) {
+    if (m->len != len) isma_die(file, line, col, "map changed size during iteration");
+    for (; i < m->used; i++)
+        if (entry_hash(m->entries + i * t->stride) >= 0) return i;
+    return -1;
+}
+
+// `m[k]` for a missing key. `shown` is the key as text (or NULL), quoted if a String.
+void isma_panic_key(IsmaStr *shown, int64_t quoted, const char *file, int line, int col) {
+    char buf[200];
+    if (!shown)
+        snprintf(buf, sizeof buf, "key not found in map");
+    else if (quoted)
+        snprintf(buf, sizeof buf, "key \"%.*s\" not found in map", shown->len > 64 ? 64 : (int)shown->len, shown->data);
+    else
+        snprintf(buf, sizeof buf, "key %.*s not found in map", shown->len > 64 ? 64 : (int)shown->len, shown->data);
+    isma_die(file, line, col, buf);
+}
+
+// ---------------------------------------------------------------- files (for the fs module)
+
+static char fs_error[512];
+
+static void fs_fail(const char *what, IsmaStr *path) {
+    snprintf(fs_error, sizeof fs_error, "%s %.*s: %s", what, path->len > 300 ? 300 : (int)path->len, path->data, strerror(errno));
+}
+
+// A NUL-terminated copy of an Isma string (paths can't contain NUL).
+static char *cpath(IsmaStr *s) {
+    char *p = malloc((size_t)s->len + 1);
+    if (!p) oom();
+    memcpy(p, s->data, (size_t)s->len);
+    p[s->len] = 0;
+    return p;
+}
+
+static IsmaStr *read_all(FILE *f) {
+    IsmaStr *s = str_alloc(4096 - (int64_t)sizeof(IsmaStr));
+    for (;;) {
+        if (s->len == s->cap) {
+            IsmaStr *g = str_alloc(s->cap * 2);
+            g->len = s->len;
+            memcpy(g->data, s->data, (size_t)s->len);
+            isma_str_free(s);
+            s = g;
+        }
+        size_t n = fread(s->data + s->len, 1, (size_t)(s->cap - s->len), f);
+        if (n == 0) break;
+        s->len += (int64_t)n;
+    }
+    return s;
+}
+
+IsmaStr *isma_fs_read(IsmaStr *path) {
+    char *p = cpath(path);
+    FILE *f = fopen(p, "rb");
+    free(p);
+    if (!f) {
+        fs_fail("cannot read", path);
+        return NULL;
+    }
+    IsmaStr *s = read_all(f);
+    int bad = ferror(f);
+    fclose(f);
+    if (bad) {
+        fs_fail("cannot read", path);
+        isma_str_free(s);
+        return NULL;
+    }
+    return s;
+}
+
+int64_t isma_fs_write(IsmaStr *path, IsmaStr *text, int64_t append) {
+    char *p = cpath(path);
+    FILE *f = fopen(p, append ? "ab" : "wb");
+    free(p);
+    if (!f) {
+        fs_fail("cannot write", path);
+        return 0;
+    }
+    size_t n = fwrite(text->data, 1, (size_t)text->len, f);
+    int bad = n != (size_t)text->len || ferror(f);
+    if (fclose(f) != 0) bad = 1;
+    if (bad) fs_fail("cannot write", path);
+    return !bad;
+}
+
+#include <sys/stat.h>
+#include <dirent.h>
+#include <unistd.h>
+
+// 0: doesn't exist, 1: a file, 2: a directory, 3: something else.
+int64_t isma_fs_kind(IsmaStr *path) {
+    char *p = cpath(path);
+    struct stat st;
+    int r = stat(p, &st);
+    free(p);
+    if (r != 0) return 0;
+    return S_ISREG(st.st_mode) ? 1 : S_ISDIR(st.st_mode) ? 2 : 3;
+}
+
+static int cmp_names(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+
+// The names in a directory (without "." and ".."), sorted, or NULL.
+IsmaList *isma_fs_list_dir(IsmaStr *path) {
+    char *p = cpath(path);
+    DIR *d = opendir(p);
+    free(p);
+    if (!d) {
+        fs_fail("cannot list", path);
+        return NULL;
+    }
+    char **names = NULL;
+    int64_t n = 0, cap = 0;
+    struct dirent *ent;
+    while ((ent = readdir(d)) != NULL) {
+        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) continue;
+        if (n == cap) {
+            cap = cap ? cap * 2 : 16;
+            names = realloc(names, (size_t)cap * sizeof(char *));
+            if (!names) oom();
+        }
+        names[n++] = strdup(ent->d_name);
+    }
+    closedir(d);
+    qsort(names, (size_t)n, sizeof(char *), cmp_names);
+    IsmaList *l = isma_list_new((int64_t)sizeof(IsmaStr *), n);
+    for (int64_t i = 0; i < n; i++) {
+        list_push_str(l, names[i], (int64_t)strlen(names[i]));
+        free(names[i]);
+    }
+    free(names);
+    return l;
+}
+
+// Like `mkdir -p`: creates missing parents; an existing directory is fine.
+int64_t isma_fs_make_dir(IsmaStr *path) {
+    char *p = cpath(path);
+    for (char *q = p + 1; *q; q++) {
+        if (*q != '/') continue;
+        *q = 0;
+        if (mkdir(p, 0777) != 0 && errno != EEXIST) {
+            *q = '/';
+            free(p);
+            fs_fail("cannot create directory", path);
+            return 0;
+        }
+        *q = '/';
+    }
+    int ok = mkdir(p, 0777) == 0 || (errno == EEXIST && isma_fs_kind(path) == 2);
+    free(p);
+    if (!ok) fs_fail("cannot create directory", path);
+    return ok;
+}
+
+// A file, or an empty directory.
+int64_t isma_fs_remove(IsmaStr *path) {
+    char *p = cpath(path);
+    int ok = remove(p) == 0;
+    free(p);
+    if (!ok) fs_fail("cannot remove", path);
+    return ok;
+}
+
+int64_t isma_fs_rename(IsmaStr *from, IsmaStr *to) {
+    char *a = cpath(from), *b = cpath(to);
+    int ok = rename(a, b) == 0;
+    free(a);
+    free(b);
+    if (!ok) fs_fail("cannot rename", from);
+    return ok;
+}
+
+IsmaStr *isma_fs_last_error(void) { return str_from(fs_error, (int64_t)strlen(fs_error)); }
+
+IsmaStr *isma_fs_cwd(void) {
+    char buf[4096];
+    if (!getcwd(buf, sizeof buf)) return str_new(0);
+    return str_from(buf, (int64_t)strlen(buf));
+}
+
+IsmaStr *isma_fs_read_stdin(void) {
+    fflush(stdout);
+    return read_all(stdin);
 }
 
 // ---------------------------------------------------------------- entry

@@ -5,5 +5,6 @@
   "sieve": {"isma": 49, "rust": 41, "python": 2012},
   "strings": {"isma": 120, "rust": 83, "python": 278},
   "particles": {"isma": 21, "rust": 9, "python": 1129},
-  "trees": {"isma": 41, "rust": 92, "python": 319}
+  "trees": {"isma": 41, "rust": 92, "python": 319},
+  "maps": {"isma": 375, "rust": 277, "python": 1557}
 }

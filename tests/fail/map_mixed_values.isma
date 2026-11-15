@@ -1,0 +1,4 @@
+# expect-error: map values must all have the same type: expected `Int`, found `String`
+fn main():
+    val m = {"a": 1, "b": "two"}
+    print(m.len())

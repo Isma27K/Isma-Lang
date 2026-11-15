@@ -12,11 +12,14 @@ use crate::tast::*;
 use crate::types::*;
 use std::collections::{HashMap, HashSet};
 
+mod consts;
 mod generics;
+mod maps;
+use consts::*;
 use generics::*;
 
-const BUILTINS: &[&str] = &["print", "input", "args", "panic", "assert", "sqrt", "exit"];
-const RESERVED_TYPES: &[&str] = &["Int", "Float", "Bool", "String", "List", "Unit"];
+const BUILTINS: &[&str] = &["print", "input", "args", "panic", "assert", "sqrt", "exit", "hash"];
+const RESERVED_TYPES: &[&str] = &["Int", "Float", "Bool", "String", "List", "Map", "Unit"];
 
 struct FuncSig {
     name: String,
@@ -132,6 +135,7 @@ struct ImportInfo {
 enum Imported {
     Struct(StructId),
     Func(FuncId),
+    Const(usize),
 }
 
 /// `from geometry import Point`: a name of another module usable unqualified in one file.
@@ -312,6 +316,11 @@ pub struct Checker {
     endless_fns: HashSet<FuncId>,
     /// Hovers on generic functions (declaration, span), which get what their type parameters must support.
     generic_hovers: Vec<(FuncId, Span)>,
+    /// User types used as map keys, with their `fn hash` and `fn ==`.
+    map_keys: Vec<MapKey>,
+    /// Top-level constants, and their ids by (namespace, name).
+    consts: Vec<ConstDef>,
+    const_index: HashMap<(usize, String), usize>,
 }
 
 /// Type-check: `Ok((program, warnings))` or `Err(errors and warnings)`.
@@ -374,6 +383,9 @@ pub fn analyze(files: &[SourceFile]) -> Analysis {
         endless: HashSet::new(),
         endless_fns: HashSet::new(),
         generic_hovers: Vec::new(),
+        map_keys: Vec::new(),
+        consts: Vec::new(),
+        const_index: HashMap::new(),
     };
     for (ns, f) in files.iter().enumerate().skip(1) {
         let doc = c.leading_comment(ns);
@@ -385,7 +397,7 @@ pub fn analyze(files: &[SourceFile]) -> Analysis {
     let funcs = c.program(&units, files);
     c.finish_ide();
     let has_errors = c.diags.iter().any(|d| d.is_error());
-    let program = if has_errors { None } else { Some(TProgram { structs: c.structs, funcs }) };
+    let program = if has_errors { None } else { Some(TProgram { structs: c.structs, funcs, map_keys: c.map_keys }) };
     Analysis { program, diagnostics: c.diags, ide: c.ide }
 }
 
@@ -824,6 +836,7 @@ impl Checker {
             for item in &program.items {
                 match item {
                     Item::Import(_) => {}
+                    Item::Const(c) => self.declare_const(c, ns),
                     Item::Struct(s) => {
                         let Some(&sid) = self.struct_index.get(&(ns, s.name.name.clone())) else { continue };
                         if self.struct_spans[sid] != s.name.span {
@@ -930,12 +943,18 @@ impl Checker {
                         if let Some(self_span) = f.self_param {
                             self.err(Diagnostic::error("`self` is only allowed in methods inside a `struct`", self_span));
                         }
-                        if BUILTINS.contains(&name.as_str()) {
+                        // (The standard library may: `math.sqrt` is the built-in `sqrt` too.)
+                        if BUILTINS.contains(&name.as_str()) && self.ns_kinds[ns] != FileKind::Std {
                             self.err(Diagnostic::error(format!("`{name}` is a built-in function and cannot be redefined"), f.name.span));
                             continue;
                         }
                         if self.struct_index.contains_key(&(ns, name.clone())) {
                             self.err(Diagnostic::error(format!("`{name}` is already the name of a struct"), f.name.span));
+                            continue;
+                        }
+                        if let Some(&cid) = self.const_index.get(&(ns, name.clone())) {
+                            let prev = self.consts[cid].span;
+                            self.err(Diagnostic::error(format!("`{name}` is already the name of a constant"), f.name.span).with_label(prev, "defined here"));
                             continue;
                         }
                         if let Some(&prev) = self.func_index.get(&(ns, name.clone())) {
@@ -963,6 +982,7 @@ impl Checker {
         // `from m import function`, and names that don't exist.
         self.resolve_name_imports(&mut pending, true);
         self.import_conflicts();
+        self.eval_consts(units);
 
         // `main` checks. A file without `main` is fine here: it's a module.
         // (Building or running one is refused by the driver, see `crate::missing_main`.)
@@ -1146,6 +1166,7 @@ impl Checker {
             let target = match (self.struct_index.get(&key), self.func_index.get(&key)) {
                 (Some(&sid), _) => Imported::Struct(sid),
                 (None, Some(&fid)) if functions => Imported::Func(fid),
+                (None, None) if functions && self.const_index.contains_key(&key) => Imported::Const(self.const_index[&key]),
                 (None, _) if !functions => {
                     pending.push(p);
                     continue;
@@ -1165,6 +1186,7 @@ impl Checker {
         let home = match n.target {
             Imported::Struct(sid) => self.struct_ns[sid],
             Imported::Func(fid) => self.ide.functions[fid].ns,
+            Imported::Const(cid) => self.consts[cid].ns,
         };
         let from = &self.ns_names[home];
         Some(format!("`{module}` imports `{name}` from the `{from}` module, but doesn't define it: import it from `{from}`"))
@@ -1182,6 +1204,7 @@ impl Checker {
             .func_index
             .keys()
             .chain(self.struct_index.keys())
+            .chain(self.const_index.keys())
             .filter(|(ns, n)| *ns == p.module_ns && !is_private(n))
             .map(|(_, n)| n.clone())
             .collect();
@@ -1230,6 +1253,7 @@ impl Checker {
                     self.hover(span, code, doc);
                     self.ide.definitions.push((span, self.funcs[fid].span));
                 }
+                Imported::Const(cid) => self.const_hover(cid, span),
             }
         }
         self.names.insert((p.ns, p.binding.name.clone()), NameImport { target, span: p.binding.span, used: private });
@@ -1237,6 +1261,7 @@ impl Checker {
             let kind = match target {
                 Imported::Struct(sid) => ImportedSymbol::Struct(sid),
                 Imported::Func(fid) => ImportedSymbol::Func(fid),
+                Imported::Const(cid) => ImportedSymbol::Const(cid),
             };
             self.ide.imported.push((p.binding.name.clone(), kind));
         }
@@ -1248,7 +1273,7 @@ impl Checker {
         let defined = |c: &Checker, key: &(usize, String)| match (c.struct_index.get(key), c.func_index.get(key)) {
             (Some(&sid), _) => Some(c.struct_spans[sid]),
             (None, Some(&fid)) => Some(c.funcs[fid].span),
-            _ => None,
+            _ => c.const_index.get(key).map(|&id| c.consts[id].span),
         };
         let keys: Vec<(usize, String)> = self.imports.keys().chain(self.names.keys()).cloned().collect();
         for key in keys {
@@ -1662,6 +1687,7 @@ impl Checker {
                 let inner = self.resolve_type(&t.args[0]);
                 Type::List(Box::new(inner))
             }
+            "Map" => self.resolve_map_type(t),
             _ => {
                 if let Some(sid) = self.visible_struct(name) {
                     self.ide.definitions.push((t.name.span, self.struct_spans[sid]));
@@ -1678,6 +1704,7 @@ impl Checker {
                     "bool" | "Boolean" => Some("Bool"),
                     "str" | "string" | "Str" => Some("String"),
                     "list" | "Vec" | "Array" => Some("List"),
+                    "dict" | "Dict" | "HashMap" | "MutableMap" | "map" => Some("Map"),
                     _ => None,
                 };
                 let ns = self.ns;
@@ -1821,8 +1848,8 @@ impl Checker {
                 let mut d = Diagnostic::warning(format!("`{}` is declared `var` but never reassigned", m.name), m.span)
                     .with_primary("never reassigned")
                     .with_help(format!("use `val {}` instead", m.name));
-                if matches!(self.locals[id].ty, Type::List(_) | Type::Struct(_)) {
-                    d = d.with_note("`val` only stops rebinding the name; you can still change the contents (`push`, field assignment)");
+                if matches!(self.locals[id].ty, Type::List(_) | Type::Map(..) | Type::Struct(_)) {
+                    d = d.with_note("`val` only stops rebinding the name; you can still change the contents (`push`, `m[k] = v`, field assignment)");
                 }
                 self.diags.push(d);
             }
@@ -2018,6 +2045,7 @@ impl Checker {
             Type::Bool => "false",
             Type::Str => "\"\"",
             Type::List(_) => "[]",
+            Type::Map(..) => "{}",
             _ => "<default>",
         };
         let (help, assert) = match how {
@@ -2116,6 +2144,7 @@ impl Checker {
                 Type::Int => d.with_help("compare explicitly, e.g. `x != 0`"),
                 Type::Str => d.with_help("compare explicitly, e.g. `s.len() > 0`"),
                 Type::List(_) => d.with_help("compare explicitly, e.g. `xs.len() > 0`"),
+                Type::Map(..) => d.with_help("compare explicitly, e.g. `not m.is_empty()`"),
                 _ => d,
             };
             self.err(d);
@@ -2227,8 +2256,15 @@ impl Checker {
                 }
                 TStmt::While { cond: c, body: b }
             }
-            StmtKind::For { var, iter, body } => match iter {
+            StmtKind::For { var, second, iter, body } => match iter {
                 ForIter::Range { start, end, inclusive } => {
+                    if let Some(sv) = second {
+                        self.err(
+                            Diagnostic::error("a range gives one value per step", sv.span)
+                                .with_primary("no second value")
+                                .with_help(format!("use one loop variable: `for {} in ...`", var.name)),
+                        );
+                    }
                     let ts = self.expr(start, Some(&Type::Int));
                     let te = self.expr(end, Some(&Type::Int));
                     for t in [&ts, &te] {
@@ -2255,10 +2291,13 @@ impl Checker {
                 }
                 ForIter::Expr(e) => {
                     let tl = self.expr(e, None);
+                    if matches!(tl.ty, Type::Map(..)) {
+                        return Some(self.for_map(var, second.as_ref(), tl, body, e.span));
+                    }
                     let elem = match &tl.ty {
                         Type::List(t) => (**t).clone(),
                         Type::Error => Type::Error,
-                        Type::Nullable(inner) if matches!(**inner, Type::List(_)) => {
+                        Type::Nullable(inner) if matches!(**inner, Type::List(_) | Type::Map(..)) => {
                             self.null_use_error(&tl, NullUse::Value);
                             Type::Error
                         }
@@ -2269,26 +2308,37 @@ impl Checker {
                             d = match other {
                                 Type::Int => d.with_help("to loop over numbers use a range, e.g. `for i in 0..n:`"),
                                 Type::Str => d.with_note("iterating over strings is not supported yet"),
-                                _ => d.with_note("only `List[T]` and ranges (`a..b`) can be iterated"),
+                                _ => d.with_note("only lists, maps and ranges (`a..b`) can be iterated"),
                             };
                             self.err(d);
                             Type::Error
                         }
                     };
                     self.scopes.push(HashMap::new());
-                    if var.name != "_" && !elem.is_error() {
+                    // `for i, x in xs:`: the index, then the element.
+                    let (ivar, evar) = match second {
+                        Some(sv) => (Some(var), sv),
+                        None => (None, var),
+                    };
+                    if let Some(iv) = ivar
+                        && iv.name != "_"
+                    {
+                        self.ide.inlay_hints.push((iv.span.end, ": Int".into()));
+                    }
+                    if evar.name != "_" && !elem.is_error() {
                         let hint = format!(": {}", self.tn(&elem));
-                        self.ide.inlay_hints.push((var.span.end, hint));
+                        self.ide.inlay_hints.push((evar.span.end, hint));
                     }
                     self.forget_assigned_in(body);
                     let before = self.nonnull.clone();
-                    let v = self.declare_local(var, elem, LocalKind::LoopVar);
+                    let index = ivar.map(|iv| self.declare_local(iv, Type::Int, LocalKind::LoopVar));
+                    let v = self.declare_local(evar, elem, LocalKind::LoopVar);
                     self.loop_depth += 1;
                     let b = self.block(body, true);
                     self.loop_depth -= 1;
                     self.scopes.pop();
                     self.nonnull = before;
-                    TStmt::ForList { var: v, list: tl, body: b }
+                    TStmt::ForList { var: v, index, list: tl, body: b }
                 }
             },
             StmtKind::Match { scrutinee, arms } => self.match_stmt(scrutinee, arms),
@@ -2919,6 +2969,8 @@ impl Checker {
                         return None;
                     };
                     (place, ty)
+                } else if matches!(tl.ty, Type::Map(..)) {
+                    self.map_place(tl, index, target.span)
                 } else {
                     let ti = self.expr(index, Some(&Type::Int));
                     let elem = self.index_elem_type(&tl, &ti, target.span);
@@ -2929,7 +2981,7 @@ impl Checker {
                 self.err(
                     Diagnostic::error("invalid assignment target", target.span)
                         .with_primary("cannot assign to this")
-                        .with_note("you can assign to variables, `var` fields and list elements"),
+                        .with_note("you can assign to variables, `var` fields, list elements and map entries"),
                 );
                 let _ = self.expr(value, None);
                 return None;
@@ -3270,6 +3322,9 @@ impl Checker {
     }
 
     fn index_elem_type(&mut self, list: &TExpr, index: &TExpr, span: Span) -> Type {
+        if list.ty.is_error() {
+            return Type::Error;
+        }
         if index.ty == Type::Int.nullable() {
             self.null_use_error(index, NullUse::Value);
         } else if !index.ty.compatible(&Type::Int) {
@@ -3340,6 +3395,9 @@ impl Checker {
                     self.local_use(id, decl, span, smart);
                     self.local_meta[id].used = true;
                     return self.narrow(Self::mk(TExprKind::Local(id), ty, span));
+                }
+                if let Some(id) = self.visible_const(name) {
+                    return self.const_value(id, span);
                 }
                 if let Some(module_ns) = self.imported_module(name) {
                     self.module_hover(module_ns, span);
@@ -3442,6 +3500,14 @@ impl Checker {
             }
             ExprKind::Call { callee, args } => self.call(callee, args, span, expected),
             ExprKind::Field(obj, field) => {
+                if let ExprKind::Name(m) = &obj.kind
+                    && self.lookup(m).is_none()
+                    && let Some(module_ns) = self.imported_module(m)
+                    && let Some(t) = self.module_const(module_ns, m, field, span)
+                {
+                    self.module_hover(module_ns, obj.span);
+                    return t;
+                }
                 if let Some((sid, targs)) = self.enum_ref(obj) {
                     return self.variant_value(sid, field, None, targs, expected, span);
                 }
@@ -3494,10 +3560,20 @@ impl Checker {
                 };
                 Self::mk(TExprKind::Jump(Box::new(stmt)), Type::Unit, span)
             }
+            ExprKind::Map(entries) => self.map_literal(entries, expected, span),
+            ExprKind::In { item, container, negated } => self.in_expr(item, container, *negated, span),
             ExprKind::Index(list, index) => {
                 let tl = self.expr(list, None);
                 if user_type(&tl.ty).is_some() {
                     return self.user_index(tl, index, span);
+                }
+                if matches!(tl.ty, Type::Map(..)) {
+                    return self.map_index(tl, index, span);
+                }
+                if matches!(&tl.ty, Type::Nullable(m) if matches!(**m, Type::Map(..))) {
+                    self.null_use_error(&tl, NullUse::Index);
+                    let _ = self.expr(index, None);
+                    return Self::error_expr(span);
                 }
                 let ti = self.expr(index, Some(&Type::Int));
                 let elem = self.index_elem_type(&tl, &ti, span);
@@ -3602,7 +3678,7 @@ impl Checker {
             other => {
                 let other = other.clone();
                 let mut d_ty = other.clone();
-                if matches!(other, Type::List(_) | Type::Str) && field.name == "len" {
+                if matches!(other, Type::List(_) | Type::Map(..) | Type::Str) && field.name == "len" {
                     d_ty = Type::Error;
                     self.err(Diagnostic::error("`len` is a method", field.span).with_help("call it with `.len()`"));
                 }
@@ -3673,6 +3749,33 @@ impl Checker {
     }
 
     /// Convert a value to String for f-strings.
+    /// Can a value of type `t` be printed and put in f-strings?
+    fn formattable(&mut self, t: &Type) -> bool {
+        match t {
+            Type::Int | Type::Float | Type::Bool | Type::Str | Type::Enum(_, false) | Type::Null | Type::Param(_) | Type::Error => true,
+            Type::Nullable(inner) => self.formattable(inner),
+            Type::List(e) => self.formattable(e),
+            Type::Map(k, v) => self.formattable(k) && self.formattable(v),
+            _ => self.user_to_string(t).is_some(),
+        }
+    }
+
+    /// An element of a list or map as text: strings are quoted, as in code.
+    fn repr(&mut self, t: TExpr, span: Span) -> TExpr {
+        match &t.ty {
+            Type::Str => Self::mk(TExprKind::Builtin(Builtin::StrRepr, vec![t]), Type::Str, span),
+            Type::Nullable(inner) if **inner == Type::Str => {
+                let binder = self.hidden_local(Type::Str);
+                let it = Self::mk(TExprKind::Local(binder), Type::Str, span);
+                let body = Self::mk(TExprKind::Builtin(Builtin::StrRepr, vec![it]), Type::Str, span);
+                let safe = Self::mk(TExprKind::SafeCall { recv: Box::new(t), binder, body: Box::new(body) }, Type::Str.nullable(), span);
+                let null = Self::mk(TExprKind::Str("null".into()), Type::Str, span);
+                Self::mk(TExprKind::Elvis(Box::new(safe), Box::new(null)), Type::Str, span)
+            }
+            _ => self.stringify(t, span),
+        }
+    }
+
     fn stringify(&mut self, t: TExpr, span: Span) -> TExpr {
         if matches!(t.ty.non_null(), Type::Param(_)) {
             self.require(&t.ty, Need::Format, span);
@@ -3684,10 +3787,28 @@ impl Checker {
         match &t.ty {
             Type::Str => t,
             Type::Int | Type::Float | Type::Bool | Type::Enum(_, false) => Self::mk(TExprKind::Builtin(Builtin::ToStr, vec![t]), Type::Str, span),
+            // `[1, 2, 3]`, `{"a": 1}`
+            Type::List(e) if self.formattable(e) => {
+                let e = (**e).clone();
+                let elem = self.hidden_local(e.clone());
+                let it = Self::mk(TExprKind::Local(elem), e, span);
+                let each = self.repr(it, span);
+                Self::mk(TExprKind::ListFormat { list: Box::new(t), elem, each: Box::new(each) }, Type::Str, span)
+            }
+            Type::Map(k, v) if self.formattable(k) && self.formattable(v) => {
+                let (k, v) = ((**k).clone(), (**v).clone());
+                let key = self.hidden_local(k.clone());
+                let value = self.hidden_local(v.clone());
+                let ks = Self::mk(TExprKind::Local(key), k, span);
+                let vs = Self::mk(TExprKind::Local(value), v, span);
+                let key_str = self.repr(ks, span);
+                let value_str = self.repr(vs, span);
+                Self::mk(TExprKind::MapFormat { map: Box::new(t), key, value, key_str: Box::new(key_str), value_str: Box::new(value_str) }, Type::Str, span)
+            }
             Type::Error => t,
             Type::Null => Self::mk(TExprKind::Str("null".into()), Type::Str, span),
             // `x?.to_string() ?: "null"`
-            Type::Nullable(inner) if inner.is_primitive() || self.user_to_string(inner).is_some() => {
+            Type::Nullable(inner) if self.formattable(inner) => {
                 let inner = (**inner).clone();
                 let binder = self.hidden_local(inner.clone());
                 let it = Self::mk(TExprKind::Local(binder), inner, span);
@@ -3699,7 +3820,7 @@ impl Checker {
             other => {
                 let found = self.tn(other);
                 let mut d = Diagnostic::error(format!("cannot format a value of type `{found}` in an f-string"), span)
-                    .with_note("numbers, `Bool`, `String`, enums without data, and types with a `fn to_string(self) -> String` method can be formatted");
+                    .with_note("numbers, `Bool`, `String`, enums without data, types with a `fn to_string(self) -> String` method, and lists and maps of those can be formatted");
                 if let Some(sid) = user_type(other).filter(|s| self.can_extend(*s)) {
                     let kw = if self.structs[sid].variants.is_some() { "enum" } else { "struct" };
                     let short = found.rsplit('.').next().unwrap_or(&found).to_string();
@@ -3806,7 +3927,7 @@ impl Checker {
                 (Type::Enum(..), _) | (_, Type::Enum(..)) if op.is_comparison() => d
                     .with_note("`==` works on enums whose variants carry no data; this one's do")
                     .with_help("use `match` to look at the variant and its data"),
-                (Type::Struct(_) | Type::List(_), _) if op.is_comparison() => {
+                (Type::Struct(_) | Type::List(_) | Type::Map(..), _) if op.is_comparison() => {
                     d.with_note("`==` is only defined for `Int`, `Float`, `Bool`, `String` and enums without data")
                 }
                 _ => d,
@@ -4100,6 +4221,11 @@ impl Checker {
         let (_, params, ret) = crate::stdlib::INTRINSICS.iter().find(|(n, _, _)| *n == name).unwrap();
         let ty_of = |t: &str| match t {
             "Int" => Type::Int,
+            "Float" => Type::Float,
+            "Bool" => Type::Bool,
+            "String" => Type::Str,
+            "String?" => Type::Str.nullable(),
+            "List[String]?" => Type::List(Box::new(Type::Str)).nullable(),
             _ => Type::Unit,
         };
         if !self.arity(args, params.len(), &format!("`{name}`"), span) {
@@ -4115,7 +4241,21 @@ impl Checker {
         let b = match name {
             "__realtime_ns" => Builtin::RealtimeNs,
             "__monotonic_ns" => Builtin::MonotonicNs,
-            _ => Builtin::SleepNs,
+            "__sleep_ns" => Builtin::SleepNs,
+            "__sqrt" => Builtin::Sqrt,
+            "__pow" => Builtin::MathPow,
+            "__atan2" => Builtin::MathAtan2,
+            "__fs_read" => Builtin::Fs(FsOp::Read),
+            "__fs_write" => Builtin::Fs(FsOp::Write),
+            "__fs_kind" => Builtin::Fs(FsOp::Kind),
+            "__fs_list_dir" => Builtin::Fs(FsOp::ListDir),
+            "__fs_make_dir" => Builtin::Fs(FsOp::MakeDir),
+            "__fs_remove" => Builtin::Fs(FsOp::Remove),
+            "__fs_rename" => Builtin::Fs(FsOp::Rename),
+            "__fs_last_error" => Builtin::Fs(FsOp::LastError),
+            "__fs_cwd" => Builtin::Fs(FsOp::Cwd),
+            "__fs_read_stdin" => Builtin::Fs(FsOp::ReadStdin),
+            _ => Builtin::MathUnary(MathFn::ALL.iter().find(|(n, _)| *n == name).expect("unknown intrinsic").1),
         };
         Self::mk(TExprKind::Builtin(b, targs), ty_of(ret), span)
     }
@@ -4161,6 +4301,9 @@ impl Checker {
     }
 
     fn builtin_call(&mut self, name: &str, args: &[Arg], span: Span) -> TExpr {
+        if name == "hash" {
+            return self.hash_call(args, span);
+        }
         let what = format!("`{name}`");
         let (n, param, ret, b) = match name {
             "print" => (1, None, Type::Unit, Builtin::Print),
@@ -4185,6 +4328,7 @@ impl Checker {
                     || t.ty.is_nullable() && t.ty.non_null().is_primitive()
                     || matches!(t.ty, Type::Enum(_, false))
                     || matches!(t.ty.non_null(), Type::Param(_))
+                    || matches!(t.ty.non_null(), Type::List(_) | Type::Map(..)) && self.formattable(&t.ty)
                     || self.user_to_string(t.ty.non_null()).is_some() =>
                 {
                     t = self.stringify(t, a.value.span)
@@ -4193,13 +4337,15 @@ impl Checker {
                     if !t.ty.is_primitive() && !t.ty.is_error() {
                         let found = self.tn(&t.ty);
                         let mut d = Diagnostic::error(format!("`print` cannot print a value of type `{found}`"), a.value.span)
-                            .with_note("`print` accepts numbers, `Bool`, `String`, enums without data, and types with a `fn to_string(self) -> String` method");
+                            .with_note("`print` accepts numbers, `Bool`, `String`, enums without data, types with a `fn to_string(self) -> String` method, and lists and maps of those");
                         d = match user_type(&t.ty).filter(|s| self.can_extend(*s)) {
                             Some(sid) => {
                                 let kw = if self.structs[sid].variants.is_some() { "enum" } else { "struct" };
                                 let short = found.rsplit('.').next().unwrap_or(&found).trim_end_matches('?').to_string();
                                 d.with_help(format!("give `{kw} {short}` a method `fn to_string(self) -> String`, or print its fields"))
                             }
+                            None if matches!(t.ty, Type::Map(..)) => d.with_help("print each entry: `for k, v in m: print(f\"{k}: {v}\")`"),
+                            None if matches!(t.ty, Type::List(_)) => d.with_help("print each element in a loop, or `xs.join(\", \")` a list of strings"),
                             None => d.with_help("print individual fields, or use an f-string"),
                         };
                         self.err(d);
@@ -4295,6 +4441,79 @@ impl Checker {
             (Type::Str, "to_float") => simple(self, recv, Builtin::StrToFloat, Type::Float, args),
             (Type::Str, "to_int_or_null") => simple(self, recv, Builtin::StrToIntOrNull, Type::Int.nullable(), args),
             (Type::Str, "to_float_or_null") => simple(self, recv, Builtin::StrToFloatOrNull, Type::Float.nullable(), args),
+            (Type::Str, "split") if args.is_empty() => simple(self, recv, Builtin::StrSplitWhitespace, Type::List(Box::new(Type::Str)), args),
+            (Type::Str, "split") => self.builtin_method(recv, Builtin::StrSplit, &[Type::Str], Type::List(Box::new(Type::Str)), method, args, span),
+            (Type::Str, "lines") => simple(self, recv, Builtin::StrLines, Type::List(Box::new(Type::Str)), args),
+            (Type::Str, "trim") => simple(self, recv, Builtin::StrTrim, Type::Str, args),
+            (Type::Str, "trim_start") => simple(self, recv, Builtin::StrTrimStart, Type::Str, args),
+            (Type::Str, "trim_end") => simple(self, recv, Builtin::StrTrimEnd, Type::Str, args),
+            (Type::Str, "upper") => simple(self, recv, Builtin::StrUpper, Type::Str, args),
+            (Type::Str, "lower") => simple(self, recv, Builtin::StrLower, Type::Str, args),
+            (Type::Str, "replace") => self.builtin_method(recv, Builtin::StrReplace, &[Type::Str, Type::Str], Type::Str, method, args, span),
+            (Type::Str, "find") => self.builtin_method(recv, Builtin::StrFind, &[Type::Str], Type::Int.nullable(), method, args, span),
+            (Type::Str, "rfind") => self.builtin_method(recv, Builtin::StrRfind, &[Type::Str], Type::Int.nullable(), method, args, span),
+            (Type::Str, "count") => self.builtin_method(recv, Builtin::StrCount, &[Type::Str], Type::Int, method, args, span),
+            (Type::Str, "repeat") => self.builtin_method(recv, Builtin::StrRepeat, &[Type::Int], Type::Str, method, args, span),
+            (Type::Str, "pad_start" | "pad_end") => {
+                let b = if m == "pad_start" { Builtin::StrPadStart } else { Builtin::StrPadEnd };
+                if args.len() == 1 {
+                    // The fill defaults to a space.
+                    let mut t = self.builtin_method(recv, b, &[Type::Int], Type::Str, method, args, span);
+                    if let TExprKind::Builtin(_, a) = &mut t.kind {
+                        a.push(Self::mk(TExprKind::Str(" ".into()), Type::Str, span));
+                    }
+                    t
+                } else {
+                    self.builtin_method(recv, b, &[Type::Int, Type::Str], Type::Str, method, args, span)
+                }
+            }
+            (Type::Str | Type::List(_), "is_empty") => {
+                let b = if rty == Type::Str { Builtin::StrLen } else { Builtin::ListLen };
+                let len = simple(self, recv, b, Type::Int, args);
+                self.is_zero(len, span)
+            }
+            (Type::List(_) | Type::Map(..), "to_string") if self.formattable(&rty) => {
+                if !self.arity(args, 0, &what, span) {
+                    return Self::error_expr(span);
+                }
+                self.stringify(recv, span)
+            }
+            (Type::Map(..), _) => self.map_method(recv, method, args, span),
+            (Type::List(_), "contains" | "index_of") => self.list_search_method(recv, method, args, span),
+            (Type::List(elem), "join") if **elem == Type::Str => self.builtin_method(recv, Builtin::ListJoin, &[Type::Str], Type::Str, method, args, span),
+            (Type::List(elem), "join") => {
+                let tn = self.tn(elem);
+                self.err(
+                    Diagnostic::error(format!("`join` needs a `List[String]`, found `List[{tn}]`"), method.span)
+                        .with_primary("not a list of strings")
+                        .with_help("turn the elements into strings first, e.g. with `to_string()` in a loop"),
+                );
+                for a in args {
+                    let _ = self.expr(&a.value, None);
+                }
+                Self::error_expr(span)
+            }
+            (Type::List(_), "clear") => simple(self, recv, Builtin::ListClear, Type::Unit, args),
+            (Type::List(_), "reverse") => simple(self, recv, Builtin::ListReverse, Type::Unit, args),
+            (Type::List(elem), "sort") => {
+                if !matches!(**elem, Type::Int | Type::Float | Type::Str | Type::Error) {
+                    let tn = self.tn(elem);
+                    self.err(
+                        Diagnostic::error(format!("`sort` works on lists of `Int`, `Float` and `String`, not `{tn}`"), method.span)
+                            .with_primary("can't sort these yet"),
+                    );
+                    return Self::error_expr(span);
+                }
+                simple(self, recv, Builtin::ListSort, Type::Unit, args)
+            }
+            (Type::List(elem), "remove_at") => {
+                let elem = (**elem).clone();
+                self.builtin_method(recv, Builtin::ListRemoveAt, &[Type::Int], elem, method, args, span)
+            }
+            (Type::List(elem), "insert") => {
+                let elem = (**elem).clone();
+                self.builtin_method(recv, Builtin::ListInsert, &[Type::Int, elem], Type::Unit, method, args, span)
+            }
             (Type::List(_), "len") => simple(self, recv, Builtin::ListLen, Type::Int, args),
             (Type::List(elem), "pop") => {
                 let elem = (**elem).clone();
@@ -4362,8 +4581,8 @@ impl Checker {
                     Type::Int => "`to_string()`, `to_float()`",
                     Type::Float => "`to_string()`, `to_int()`",
                     Type::Bool => "`to_string()`",
-                    Type::Str => "`len()`, `chars()`, `substring(start, end)`, `contains(s)`, `starts_with(s)`, `ends_with(s)`, `to_int()`, `to_float()`, `to_int_or_null()`, `to_float_or_null()`, `to_string()`",
-                    Type::List(_) => "`len()`, `push(x)`, `pop()`",
+                    Type::Str => "`len()`, `is_empty()`, `chars()`, `lines()`, `split(sep)`, `substring(start, end)`, `contains(s)`, `find(s)`, `rfind(s)`, `count(s)`, `starts_with(s)`, `ends_with(s)`, `replace(old, new)`, `trim()`, `trim_start()`, `trim_end()`, `upper()`, `lower()`, `repeat(n)`, `pad_start(width)`, `pad_end(width)`, `to_int()`, `to_float()`, `to_int_or_null()`, `to_float_or_null()`, `to_string()`",
+                    Type::List(_) => "`len()`, `is_empty()`, `push(x)`, `pop()`, `insert(i, x)`, `remove_at(i)`, `clear()`, `contains(x)`, `index_of(x)`, `reverse()`, `sort()`, `join(sep)`",
                     _ => "none",
                 };
                 self.err(
@@ -4437,7 +4656,9 @@ fn contains_break(stmts: &[TStmt]) -> bool {
                 || match place {
                     Place::Local(_) => false,
                     Place::Field { obj, .. } => expr_breaks(obj),
-                    Place::Index { list, index, .. } | Place::Custom { obj: list, index, .. } => expr_breaks(list) || expr_breaks(index),
+                    Place::Index { list, index, .. } | Place::Custom { obj: list, index, .. } | Place::MapEntry { map: list, key: index, .. } => {
+                        expr_breaks(list) || expr_breaks(index)
+                    }
                 }
         }
         TStmt::If { branches, else_block } => {
@@ -4446,7 +4667,7 @@ fn contains_break(stmts: &[TStmt]) -> bool {
         // A nested loop's header is evaluated outside of it, but breaks in its body target it.
         TStmt::While { cond, .. } => expr_breaks(cond),
         TStmt::ForRange { start, end, .. } => expr_breaks(start) || expr_breaks(end),
-        TStmt::ForList { list, .. } => expr_breaks(list),
+        TStmt::ForList { list, .. } | TStmt::ForMap { map: list, .. } => expr_breaks(list),
         TStmt::Match { scrutinee, arms } => {
             expr_breaks(scrutinee) || arms.iter().any(|a| a.guard.as_ref().is_some_and(expr_breaks) || contains_break(&a.body))
         }
@@ -4469,9 +4690,12 @@ fn expr_breaks(e: &TExpr) -> bool {
         TExprKind::Binary(_, a, b) | TExprKind::And(a, b) | TExprKind::Or(a, b) | TExprKind::Index(a, b) | TExprKind::Elvis(a, b) => {
             expr_breaks(a) || expr_breaks(b)
         }
-        TExprKind::SafeCall { recv, body, .. } => expr_breaks(recv) || expr_breaks(body),
+        TExprKind::SafeCall { recv, body, .. } | TExprKind::Let(_, recv, body) => expr_breaks(recv) || expr_breaks(body),
         TExprKind::Neg(x) | TExprKind::Not(x) | TExprKind::Field(x, ..) | TExprKind::IsNull(x) | TExprKind::Wrap(x) | TExprKind::Unwrap(x) | TExprKind::NotNull(x) => {
             expr_breaks(x)
         }
+        TExprKind::MapLit(entries) => entries.iter().any(|(k, v)| expr_breaks(k) || expr_breaks(v)),
+        TExprKind::ListFind { list, value, .. } => expr_breaks(list) || expr_breaks(value),
+        TExprKind::ListFormat { list, .. } | TExprKind::MapFormat { map: list, .. } => expr_breaks(list),
     }
 }

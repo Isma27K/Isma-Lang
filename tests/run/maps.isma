@@ -1,0 +1,37 @@
+fn main():
+    val ages = {"ana": 31, "budi": 25}
+    ages["citra"] = 40
+    ages["ana"] += 1
+    print(ages["ana"])
+    print(ages.len())
+    print("budi" in ages)
+    print("dewi" not in ages)
+    print(ages.get("dewi") ?: -1)
+    print(ages.get("dewi", 0))
+    for name, age in ages:
+        print(f"{name}: {age}")
+    val removed = ages.remove("budi")
+    print(removed)
+    print(ages.remove("nobody"))
+    for k in ages:
+        print(k)
+    print(ages.keys().len())
+    val counts: Map[String, Int] = {}
+    for w in "the cat and the hat and the bat".split(" "):
+        counts[w] = counts.get(w, 0) + 1
+    for w, c in counts:
+        print(f"{w}={c}")
+    val squares: Map[Int, Int] = {}
+    for i in 0..1000:
+        squares[i] = i * i
+    var total = 0
+    for i in 0..1000:
+        total += squares[i]
+    print(total)
+    for i in 0..990:
+        squares.remove(i)
+    print(squares.len())
+    for k, v in squares:
+        print(f"{k} {v}")
+    squares.clear()
+    print(squares.len())

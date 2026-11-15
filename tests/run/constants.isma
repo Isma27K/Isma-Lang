@@ -1,0 +1,30 @@
+import math
+import mylib.util as util
+from mylib.util import greeting
+
+# Constants are worked out when compiling, from literals and other constants.
+val answer = 42
+val half = answer / 2
+val tau = math.pi * 2.0
+val name = "Isma"
+val banner = "== " + name + " =="
+val big = answer > 40 and not (half == 0)
+val neg = -answer
+val circle = later * 2
+val later = 10
+val _private = 1.5
+
+fn main():
+    print(answer)
+    print(half)
+    print(tau == math.tau)
+    print(banner)
+    print(big)
+    print(neg)
+    print(circle)
+    print(_private)
+    print(f"{name} {answer + 1}")
+    print(util.version)
+    print(greeting)
+    val xs = [answer, half]
+    print(xs)

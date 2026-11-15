@@ -15,6 +15,8 @@ pub struct Lexer<'a> {
     diags: Vec<Diagnostic>,
     indent_stack: Vec<usize>,
     bracket_depth: usize,
+    /// Open `{` of map literals (a `}` without one is a stray block brace).
+    map_braces: usize,
     at_line_start: bool,
     /// Expression mode: no layout tokens at all (f-string interpolations).
     expr_mode: bool,
@@ -48,6 +50,7 @@ impl<'a> Lexer<'a> {
             diags: Vec::new(),
             indent_stack: vec![0],
             bracket_depth: 0,
+            map_braces: 0,
             at_line_start: !expr_mode,
             expr_mode,
         }
@@ -461,6 +464,8 @@ impl<'a> Lexer<'a> {
             (b'=', _) => (Tok::Assign, 1),
             (b'<', _) => (Tok::Lt, 1),
             (b'>', _) => (Tok::Gt, 1),
+            (b'{', _) if self.brace_opens_map() => (Tok::LBrace, 1),
+            (b'}', _) if self.map_braces > 0 => (Tok::RBrace, 1),
             (b'{', _) | (b'}', _) => {
                 self.pos += 1;
                 // Treat `{` at the end of a line as `:` so the rest still parses.
@@ -499,10 +504,45 @@ impl<'a> Lexer<'a> {
         match tok {
             Tok::LParen | Tok::LBracket => self.bracket_depth += 1,
             Tok::RParen | Tok::RBracket => self.bracket_depth = self.bracket_depth.saturating_sub(1),
+            Tok::LBrace => {
+                self.bracket_depth += 1;
+                self.map_braces += 1;
+            }
+            Tok::RBrace => {
+                self.bracket_depth = self.bracket_depth.saturating_sub(1);
+                self.map_braces -= 1;
+            }
             _ => {}
         }
         self.pos += len;
         self.push(tok, start, self.pos);
+    }
+
+    /// Is this `{` the start of a map literal? It is where a value can start
+    /// (after `=`, `(`, `,`, `return`, an operator...). After something that
+    /// ends a value (`if x {`, `fn main() {`, `else {`) it's a block brace
+    /// from another language, which gets an error explaining `:`.
+    fn brace_opens_map(&self) -> bool {
+        !matches!(
+            self.tokens.last().map(|t| &t.tok),
+            Some(
+                Tok::Ident(_)
+                    | Tok::Int(_)
+                    | Tok::Float(_)
+                    | Tok::Str(_)
+                    | Tok::FStr(_)
+                    | Tok::RParen
+                    | Tok::RBracket
+                    | Tok::RBrace
+                    | Tok::True
+                    | Tok::False
+                    | Tok::Null
+                    | Tok::Else
+                    | Tok::BangBang
+                    | Tok::Arrow
+                    | Tok::Question
+            )
+        )
     }
 }
 

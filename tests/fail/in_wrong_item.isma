@@ -1,0 +1,3 @@
+# expect-error: `Int` can't be in a `List[String]`
+fn main():
+    print(1 in ["a"])

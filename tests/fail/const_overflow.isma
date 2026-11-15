@@ -1,0 +1,5 @@
+# expect-error: this constant overflows `Int`
+val big = 9223372036854775807 + 1
+
+fn main():
+    print(big)

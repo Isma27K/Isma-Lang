@@ -20,6 +20,16 @@ pub enum Item {
     Enum(EnumDecl),
     /// `import time`, `import shapes.circle as c`, `from ..geometry import Point`
     Import(Import),
+    /// `val pi = 3.14159`: a constant, worked out when compiling.
+    Const(ConstDecl),
+}
+
+#[derive(Debug)]
+pub struct ConstDecl {
+    pub name: Ident,
+    pub ty: Option<TypeExpr>,
+    pub value: Expr,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]
@@ -149,7 +159,9 @@ pub enum StmtKind {
     Expr(Expr),
     If { branches: Vec<(Expr, Block)>, else_block: Option<Block> },
     While { cond: Expr, body: Block },
-    For { var: Ident, iter: ForIter, body: Block },
+    /// `for x in xs:`, or with two names: `for i, x in xs:` (index and
+    /// element) and `for k, v in m:` (key and value).
+    For { var: Ident, second: Option<Ident>, iter: ForIter, body: Block },
     Match { scrutinee: Expr, arms: Vec<MatchArm> },
     Break,
     Continue,
@@ -232,6 +244,10 @@ pub enum ExprKind {
     /// type arguments explicitly.
     TypeApply(Box<Expr>, Vec<TypeExpr>),
     List(Vec<Expr>),
+    /// `{"a": 1, "b": 2}`, or `{}`.
+    Map(Vec<(Expr, Expr)>),
+    /// `x in xs` / `x not in xs`.
+    In { item: Box<Expr>, container: Box<Expr>, negated: bool },
     Null,
     /// `x!!`
     NotNull(Box<Expr>),

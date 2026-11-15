@@ -1,0 +1,4 @@
+# expect-error: `Int?` can't be a map key
+fn main():
+    val m: Map[Int?, String] = {}
+    print(m.len())

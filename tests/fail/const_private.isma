@@ -1,0 +1,5 @@
+# expect-error: `lib._hidden` is private to the `lib` module
+import modules.lib as lib
+
+fn main():
+    print(lib._hidden)

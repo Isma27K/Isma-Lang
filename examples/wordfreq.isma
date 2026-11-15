@@ -1,0 +1,35 @@
+# Count the words in a file, or in standard input:
+#
+#     isma wordfreq.isma notes.txt
+#     cat *.md | isma wordfreq.isma
+import fs
+
+fn main():
+    var text = ""
+    if args().len() > 0:
+        text = fs.read(args()[0])
+    else:
+        text = fs.read_stdin()
+
+    val counts: Map[String, Int] = {}
+    for word in text.lower().split():
+        val w = word.trim()
+        if not w.is_empty():
+            counts[w] = counts.get(w, 0) + 1
+
+    # The 10 most common, most frequent first (ties alphabetically).
+    val words = counts.keys()
+    words.sort()
+    for rank in 1..=10:
+        var best = ""
+        var best_n = 0
+        for w in words:
+            val n = counts[w]
+            if n > best_n:
+                best = w
+                best_n = n
+        if best_n == 0:
+            break
+        print(f"{rank.to_string().pad_start(2)}. {best.pad_end(16)} {best_n}")
+        counts[best] = 0
+    print(f"{words.len()} different words")

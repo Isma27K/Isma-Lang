@@ -1,0 +1,57 @@
+struct P:
+    x: Int
+    fn ==(self, other: P) -> Bool:
+        return self.x == other.x
+
+fn main():
+    val s = "  Hello, World!  "
+    print(f"[{s.trim()}] [{s.trim_start()}] [{s.trim_end()}]")
+    print(s.upper())
+    print(s.lower())
+    val parts = "a,b,,c".split(",")
+    print(parts.len())
+    print(parts.join("|"))
+    print("  the   quick\tbrown \n fox ".split().join("+"))
+    print("line1\nline2\r\nline3\n".lines().join("/"))
+    print("banana".replace("an", "AN"))
+    print("banana".count("a"))
+    print("banana".find("na") ?: -1)
+    print("banana".find("x") ?: -1)
+    print("ab".repeat(3))
+    print("7".pad_start(3, "0"))
+    print("ab".pad_end(5) + "|")
+    print("héllo".pad_start(7, "·"))
+    print("".is_empty())
+    print("x".is_empty())
+    print("ell" in "hello")
+    print("z" not in "hello")
+    val xs = [5, 3, 8, 1]
+    print(3 in xs)
+    print(xs.contains(9))
+    print(xs.index_of(8) ?: -1)
+    xs.sort()
+    print(xs[0])
+    xs.reverse()
+    print(xs[0])
+    xs.insert(0, 100)
+    xs.insert(5, 200)
+    print(xs.len())
+    print(xs.remove_at(1))
+    print(xs[0])
+    print(xs.is_empty())
+    val words = ["pear", "apple", "fig"]
+    words.sort()
+    print(words.join(" "))
+    words.clear()
+    print(words.len())
+    val ps = [P(1), P(2)]
+    print(P(2) in ps)
+    print(ps.index_of(P(5)) == null)
+    for i, w in ["a", "b", "c"]:
+        print(f"{i}:{w}")
+    val fs = [2.5, -1.0, 3.25]
+    fs.sort()
+    print(fs[0])
+    val opt: List[Int?] = [1, null, 3]
+    print(null in opt)
+    print(opt.index_of(3) ?: -1)

@@ -1,0 +1,9 @@
+# expect-error: `count` needs `T` to support being a map key (`==` and `hash`), but `Float` doesn't
+fn count[T](xs: List[T]) -> Int:
+    val seen: Map[T, Bool] = {}
+    for x in xs:
+        seen[x] = true
+    return seen.len()
+
+fn main():
+    print(count([1.5, 2.5]))

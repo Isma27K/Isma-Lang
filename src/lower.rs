@@ -13,7 +13,7 @@ use crate::types::*;
 
 pub fn lower(prog: &TProgram) -> Program {
     let funcs = prog.funcs.iter().map(|f| Lower::func(prog, f)).collect();
-    Program { structs: prog.structs.clone(), funcs }
+    Program { structs: prog.structs.clone(), funcs, map_keys: prog.map_keys.clone() }
 }
 
 struct Lower<'a> {
@@ -186,6 +186,22 @@ impl<'a> Lower<'a> {
                         };
                         self.push(Stmt::Eval(Rvalue::Call(*set, vec![Operand::Var(o), i, v], *span)));
                     }
+                    tast::Place::MapEntry { map, key, span: kspan } => {
+                        let Type::Map(_, vt) = &map.ty else { unreachable!() };
+                        let vt = (**vt).clone();
+                        let m = self.operand(map);
+                        let m = self.as_var(m, &map.ty);
+                        let k = self.operand(key);
+                        let v = match op {
+                            None => v,
+                            Some(op) => {
+                                let cur = self.temp(vt.clone());
+                                self.push(Stmt::Assign(cur, Rvalue::Builtin(Builtin::MapGet, vec![Operand::Var(m), k.clone()], *kspan)));
+                                self.compound(*op, &vt, Operand::Var(cur), v, *span)
+                            }
+                        };
+                        self.push(Stmt::Eval(Rvalue::Builtin(Builtin::MapSet, vec![Operand::Var(m), k, v], *kspan)));
+                    }
                 }
             }
             TStmt::Expr(e) => self.effect(e),
@@ -254,17 +270,21 @@ impl<'a> Lower<'a> {
                 self.goto(lc);
                 self.cur = le;
             }
-            TStmt::ForList { var, list, body } => {
+            TStmt::ForMap { key, value, map, body, span } => {
+                let m = self.operand(map);
+                let m = self.iterated(m, &map.ty);
+                self.map_loop(m, *span, |l, i| {
+                    l.push(Stmt::Assign(*key, Rvalue::Builtin(Builtin::MapKeyAt, vec![Operand::Var(m), Operand::Var(i)], Default::default())));
+                    if let Some(v) = value {
+                        l.push(Stmt::Assign(*v, Rvalue::Builtin(Builtin::MapValueAt, vec![Operand::Var(m), Operand::Var(i)], Default::default())));
+                    }
+                    l.stmts(body);
+                });
+            }
+            TStmt::ForList { var, index, list, body } => {
                 let l = self.operand(list);
                 // Iterate over the list the expression evaluated to, even if the body rebinds the variable.
-                let l = match l {
-                    Operand::Var(v) if self.vars[v].kind != VarKind::Temp && self.reassigned[v] => {
-                        let t = self.temp(list.ty.clone());
-                        self.push(Stmt::Assign(t, Rvalue::Use(Operand::Var(v))));
-                        t
-                    }
-                    other => self.as_var(other, &list.ty),
-                };
+                let l = self.iterated(l, &list.ty);
                 let ctr = self.temp(Type::Int);
                 self.push(Stmt::Assign(ctr, Rvalue::Use(Operand::Int(0))));
                 let lc = self.new_block();
@@ -278,6 +298,9 @@ impl<'a> Lower<'a> {
                 self.push(Stmt::Assign(c, Rvalue::Binary(BinOp::Lt, Type::Int, Operand::Var(ctr), Operand::Var(len), Default::default())));
                 self.term(Term::Branch(Operand::Var(c), lb, le));
                 self.cur = lb;
+                if let Some(ix) = index {
+                    self.push(Stmt::Assign(*ix, Rvalue::Use(Operand::Var(ctr))));
+                }
                 self.push(Stmt::Assign(*var, Rvalue::Index(l, Operand::Var(ctr), None)));
                 self.loops.push((ls, le));
                 self.stmts(body);
@@ -328,6 +351,62 @@ impl<'a> Lower<'a> {
                 }
             }
         }
+    }
+
+    /// `acc = acc + part` on strings (in place when `acc` is the only reference).
+    fn append(&mut self, acc: VarId, part: Operand) {
+        self.push(Stmt::Assign(acc, Rvalue::Binary(BinOp::Add, Type::Str, Operand::Var(acc), part, Default::default())));
+    }
+
+    /// `", "` before every item but the first (`n` counts the items so far).
+    fn separator(&mut self, acc: VarId, n: VarId) {
+        let c = self.temp(Type::Bool);
+        self.push(Stmt::Assign(c, Rvalue::Binary(BinOp::Gt, Type::Int, Operand::Var(n), Operand::Int(0), Default::default())));
+        let (sep, done) = (self.new_block(), self.new_block());
+        self.term(Term::Branch(Operand::Var(c), sep, done));
+        self.cur = sep;
+        self.append(acc, Operand::Str(", ".into()));
+        self.start(done);
+    }
+
+    /// The value a `for` loop goes over, kept in a variable of its own if the
+    /// loop body might rebind the variable it came from.
+    fn iterated(&mut self, o: Operand, ty: &Type) -> VarId {
+        match o {
+            Operand::Var(v) if self.vars[v].kind != VarKind::Temp && self.reassigned[v] => {
+                let t = self.temp(ty.clone());
+                self.push(Stmt::Assign(t, Rvalue::Use(Operand::Var(v))));
+                t
+            }
+            other => self.as_var(other, ty),
+        }
+    }
+
+    /// Loop over the entries of map `m` in insertion order: `each(self, i)`
+    /// builds the body for the entry at index `i` (a `continue` there goes
+    /// to the next entry). Adding or removing keys meanwhile panics at `span`.
+    fn map_loop(&mut self, m: VarId, span: Span, each: impl FnOnce(&mut Self, VarId)) {
+        let len = self.temp(Type::Int);
+        self.push(Stmt::Assign(len, Rvalue::Builtin(Builtin::MapLen, vec![Operand::Var(m)], Default::default())));
+        let i = self.temp(Type::Int);
+        self.push(Stmt::Assign(i, Rvalue::Use(Operand::Int(0))));
+        let lc = self.new_block();
+        let lb = self.new_block();
+        let ls = self.new_block();
+        let le = self.new_block();
+        self.start(lc);
+        self.push(Stmt::Assign(i, Rvalue::Builtin(Builtin::MapNext, vec![Operand::Var(m), Operand::Var(i), Operand::Var(len)], span)));
+        let c = self.temp(Type::Bool);
+        self.push(Stmt::Assign(c, Rvalue::Binary(BinOp::Ge, Type::Int, Operand::Var(i), Operand::Int(0), Default::default())));
+        self.term(Term::Branch(Operand::Var(c), lb, le));
+        self.cur = lb;
+        self.loops.push((ls, le));
+        each(self, i);
+        self.loops.pop();
+        self.start(ls);
+        self.push(Stmt::Assign(i, Rvalue::Builtin(Builtin::Inc, vec![Operand::Var(i)], Default::default())));
+        self.goto(lc);
+        self.cur = le;
     }
 
     /// An expression evaluated for its side effects.
@@ -555,9 +634,118 @@ impl<'a> Lower<'a> {
             }
             // `s.to_string()` on a String is the string itself.
             TExprKind::Builtin(Builtin::ToStr, args) if args[0].ty == Type::Str => Rvalue::Use(self.operand(&args[0])),
+            // `m.keys()` / `m.values()`: a list, filled in a loop over the map.
+            TExprKind::Builtin(b @ (Builtin::MapKeys | Builtin::MapValues), args) => {
+                let m = self.operand(&args[0]);
+                let m = self.as_var(m, &args[0].ty);
+                let Type::List(elem) = &e.ty else { unreachable!() };
+                let out = self.temp(e.ty.clone());
+                self.push(Stmt::Assign(out, Rvalue::ListNew((**elem).clone(), Vec::new())));
+                let at = if *b == Builtin::MapKeys { Builtin::MapKeyAt } else { Builtin::MapValueAt };
+                let elem = (**elem).clone();
+                self.map_loop(m, e.span, |l, i| {
+                    let x = l.temp(elem);
+                    l.push(Stmt::Assign(x, Rvalue::Builtin(at, vec![Operand::Var(m), Operand::Var(i)], Default::default())));
+                    l.push(Stmt::Eval(Rvalue::Builtin(Builtin::ListPush, vec![Operand::Var(out), Operand::Var(x)], Default::default())));
+                });
+                Rvalue::Use(Operand::Var(out))
+            }
             TExprKind::Builtin(b, args) => {
                 let a = self.operands(args);
                 Rvalue::Builtin(*b, a, e.span)
+            }
+            TExprKind::Let(id, value, body) => {
+                let r = self.rvalue(value);
+                self.push(Stmt::Assign(*id, r));
+                self.rvalue(body)
+            }
+            TExprKind::MapLit(entries) => {
+                let m = self.temp(e.ty.clone());
+                self.push(Stmt::Assign(m, Rvalue::MapNew(e.ty.clone(), entries.len())));
+                for (k, v) in entries {
+                    let ko = self.operand(k);
+                    let vo = self.operand(v);
+                    self.push(Stmt::Eval(Rvalue::Builtin(Builtin::MapSet, vec![Operand::Var(m), ko, vo], k.span)));
+                }
+                Rvalue::Use(Operand::Var(m))
+            }
+            TExprKind::ListFormat { list, elem, each } => {
+                let l = self.operand(list);
+                let l = self.as_var(l, &list.ty);
+                let acc = self.temp(Type::Str);
+                self.push(Stmt::Assign(acc, Rvalue::Use(Operand::Str("[".into()))));
+                let ctr = self.temp(Type::Int);
+                self.push(Stmt::Assign(ctr, Rvalue::Use(Operand::Int(0))));
+                let (lc, lb, ls, le) = (self.new_block(), self.new_block(), self.new_block(), self.new_block());
+                self.start(lc);
+                let len = self.temp(Type::Int);
+                self.push(Stmt::Assign(len, Rvalue::Builtin(Builtin::ListLen, vec![Operand::Var(l)], Default::default())));
+                let c = self.temp(Type::Bool);
+                self.push(Stmt::Assign(c, Rvalue::Binary(BinOp::Lt, Type::Int, Operand::Var(ctr), Operand::Var(len), Default::default())));
+                self.term(Term::Branch(Operand::Var(c), lb, le));
+                self.cur = lb;
+                self.separator(acc, ctr);
+                self.push(Stmt::Assign(*elem, Rvalue::Index(l, Operand::Var(ctr), None)));
+                let part = self.operand(each);
+                self.append(acc, part);
+                self.start(ls);
+                self.push(Stmt::Assign(ctr, Rvalue::Builtin(Builtin::Inc, vec![Operand::Var(ctr)], Default::default())));
+                self.goto(lc);
+                self.cur = le;
+                self.append(acc, Operand::Str("]".into()));
+                Rvalue::Use(Operand::Var(acc))
+            }
+            TExprKind::MapFormat { map, key, value, key_str, value_str } => {
+                let m = self.operand(map);
+                let m = self.as_var(m, &map.ty);
+                let acc = self.temp(Type::Str);
+                self.push(Stmt::Assign(acc, Rvalue::Use(Operand::Str("{".into()))));
+                let n = self.temp(Type::Int);
+                self.push(Stmt::Assign(n, Rvalue::Use(Operand::Int(0))));
+                self.map_loop(m, e.span, |l, i| {
+                    l.separator(acc, n);
+                    l.push(Stmt::Assign(n, Rvalue::Builtin(Builtin::Inc, vec![Operand::Var(n)], Default::default())));
+                    l.push(Stmt::Assign(*key, Rvalue::Builtin(Builtin::MapKeyAt, vec![Operand::Var(m), Operand::Var(i)], Default::default())));
+                    l.push(Stmt::Assign(*value, Rvalue::Builtin(Builtin::MapValueAt, vec![Operand::Var(m), Operand::Var(i)], Default::default())));
+                    let ks = l.operand(key_str);
+                    l.append(acc, ks);
+                    l.append(acc, Operand::Str(": ".into()));
+                    let vs = l.operand(value_str);
+                    l.append(acc, vs);
+                });
+                self.append(acc, Operand::Str("}".into()));
+                Rvalue::Use(Operand::Var(acc))
+            }
+            TExprKind::ListFind { list, value, elem, needle, test, index } => {
+                let l = self.operand(list);
+                let l = self.as_var(l, &list.ty);
+                let n = self.rvalue(value);
+                self.push(Stmt::Assign(*needle, n));
+                let res = self.temp(e.ty.clone());
+                let init = if *index { Operand::Null(e.ty.clone()) } else { Operand::Bool(false) };
+                self.push(Stmt::Assign(res, Rvalue::Use(init)));
+                let ctr = self.temp(Type::Int);
+                self.push(Stmt::Assign(ctr, Rvalue::Use(Operand::Int(0))));
+                let (lc, lb, found, ls, le) = (self.new_block(), self.new_block(), self.new_block(), self.new_block(), self.new_block());
+                self.start(lc);
+                let len = self.temp(Type::Int);
+                self.push(Stmt::Assign(len, Rvalue::Builtin(Builtin::ListLen, vec![Operand::Var(l)], Default::default())));
+                let c = self.temp(Type::Bool);
+                self.push(Stmt::Assign(c, Rvalue::Binary(BinOp::Lt, Type::Int, Operand::Var(ctr), Operand::Var(len), Default::default())));
+                self.term(Term::Branch(Operand::Var(c), lb, le));
+                self.cur = lb;
+                self.push(Stmt::Assign(*elem, Rvalue::Index(l, Operand::Var(ctr), None)));
+                let t = self.operand(test);
+                self.term(Term::Branch(t, found, ls));
+                self.cur = found;
+                let hit = if *index { self.wrap(Operand::Var(ctr), &Type::Int) } else { Rvalue::Use(Operand::Bool(true)) };
+                self.push(Stmt::Assign(res, hit));
+                self.goto(le);
+                self.cur = ls;
+                self.push(Stmt::Assign(ctr, Rvalue::Builtin(Builtin::Inc, vec![Operand::Var(ctr)], Default::default())));
+                self.goto(lc);
+                self.cur = le;
+                Rvalue::Use(Operand::Var(res))
             }
             TExprKind::Binary(op, l, r) if l.ty.is_nullable() => {
                 // `==` / `!=` on nullable primitives: equal when both are null,
@@ -758,7 +946,9 @@ fn mark_reassigned(stmts: &[TStmt], out: &mut [bool]) {
                     mark_reassigned(b, out);
                 }
             }
-            TStmt::While { body, .. } | TStmt::ForRange { body, .. } | TStmt::ForList { body, .. } => mark_reassigned(body, out),
+            TStmt::While { body, .. } | TStmt::ForRange { body, .. } | TStmt::ForList { body, .. } | TStmt::ForMap { body, .. } => {
+                mark_reassigned(body, out)
+            }
             TStmt::Match { arms, .. } => {
                 for a in arms {
                     mark_reassigned(&a.body, out);

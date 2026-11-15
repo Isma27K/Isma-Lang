@@ -1,0 +1,33 @@
+struct P:
+    x: Int
+    fn to_string(self) -> String:
+        return f"P{self.x}"
+
+fn show[T](xs: List[T]) -> String:
+    return f"{xs}"
+
+fn main():
+    print([1, 2, 3])
+    print(["a", "b\"c", "line\n"])
+    val empty: List[Int] = []
+    print(empty)
+    print([[1, 2], [3]])
+    print({"a": 1, "b": 2})
+    val e2: Map[String, Int] = {}
+    print(e2)
+    print({1: ["x"], 2: []})
+    print([P(1), P(2)])
+    print([1.5, 2.0])
+    print([true, false])
+    val n: List[Int?] = [1, null]
+    print(n)
+    val ns: List[String?] = ["a", null]
+    print(ns)
+    print(f"xs = {[1, 2]}")
+    print(show([3, 4]))
+    print(show(["q"]))
+    val maybe: List[Int]? = null
+    print(maybe)
+    val m = {"k": {"inner": 1.5}}
+    print(m)
+    print(m.to_string().len())

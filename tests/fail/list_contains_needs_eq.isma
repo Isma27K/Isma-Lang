@@ -1,0 +1,7 @@
+# expect-error: `contains` compares elements with `==`, but `Point` doesn't support it
+struct Point:
+    x: Int
+
+fn main():
+    val ps = [Point(1)]
+    print(ps.contains(Point(1)))

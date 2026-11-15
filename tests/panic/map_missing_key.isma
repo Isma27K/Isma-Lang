@@ -1,0 +1,4 @@
+# expect-panic: key "pear" not found in map
+fn main():
+    val prices = {"apple": 3}
+    print(prices["pear"])

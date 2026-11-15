@@ -308,6 +308,7 @@ def benchmark_svg(results: dict) -> str:
         ("strings", "Building a 15 MB string from 2 million f-strings"),
         ("particles", "Moving a Vec2 particle 5 million steps (pos = pos.add(vel))"),
         ("trees", "Binary trees: building and walking 3 million enum nodes"),
+        ("maps", "Hash maps: 4 million counting updates, Int and String keys"),
     ]
     out, y = [], 0
     out.append(f'<text class="p" x="0" y="20" font-size="17" font-weight="600">Run time in milliseconds (lower is better)</text>')

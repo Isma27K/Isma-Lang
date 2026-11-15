@@ -1,0 +1,3 @@
+# expect-error: `in` needs a map, a list or a string on its right, found `Int`
+fn main():
+    print(3 in 5)

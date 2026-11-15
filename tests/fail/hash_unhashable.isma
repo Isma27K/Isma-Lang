@@ -1,0 +1,3 @@
+# expect-error: cannot hash a value of type `List[Int]`
+fn main():
+    print(hash([1]))

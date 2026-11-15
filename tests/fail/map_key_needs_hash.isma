@@ -1,0 +1,11 @@
+# expect-error: `Point` can't be a map key
+struct Point:
+    x: Int
+    y: Int
+
+    fn ==(self, other: Point) -> Bool:
+        return self.x == other.x and self.y == other.y
+
+fn main():
+    val seen = {Point(1, 2): true}
+    print(seen.len())

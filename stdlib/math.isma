@@ -1,0 +1,238 @@
+# Mathematics: constants, powers and logarithms, trigonometry and rounding.
+#
+#     import math
+#
+#     print(math.pi)                      # 3.141592653589793
+#     print(math.sqrt(2.0))               # 1.4142135623730951
+#     print(math.floor(2.7))              # 2.0
+#     print(math.round(2.5).to_int())     # 3
+#     print(math.max(3, 7))               # 7
+#     print(math.gcd(12, 18))             # 6
+#
+# The functions on `Float`s follow IEEE 754, like C and Python: `math.sqrt(-1.0)`
+# is NaN and `math.ln(0.0)` is `-inf`, not a panic. `min`, `max`, `clamp` and
+# `abs` work on any type that can be compared (and, for `abs`, negated).
+
+# π, the ratio of a circle's circumference to its diameter.
+val pi = 3.141592653589793
+
+# τ = 2π, a full turn in radians.
+val tau = 6.283185307179586
+
+# e, the base of natural logarithms.
+val e = 2.718281828459045
+
+# Positive infinity. `-math.inf` is negative infinity.
+val inf = 1.0 / 0.0
+
+# "Not a number", like the result of `0.0 / 0.0`. It isn't equal to anything,
+# not even itself: test for it with `math.is_nan(x)`.
+val nan = 0.0 / 0.0
+
+# The largest `Int`: 9223372036854775807.
+val max_int = 9223372036854775807
+
+# The smallest `Int`: -9223372036854775808.
+val min_int = -9223372036854775808
+
+# ---------------------------------------------------------------- powers and logarithms
+
+# The square root (NaN for negative numbers).
+fn sqrt(x: Float) -> Float:
+    return __sqrt(x)
+
+# The cube root (negative for negative numbers).
+fn cbrt(x: Float) -> Float:
+    return __cbrt(x)
+
+# `x` to the power `y`.
+fn pow(x: Float, y: Float) -> Float:
+    return __pow(x, y)
+
+# `e` to the power `x`.
+fn exp(x: Float) -> Float:
+    return __exp(x)
+
+# The natural logarithm (base e).
+fn ln(x: Float) -> Float:
+    return __ln(x)
+
+# The logarithm of `x` in the given base: `math.log(8.0, 2.0)` is 3.0.
+fn log(x: Float, base: Float) -> Float:
+    return __ln(x) / __ln(base)
+
+# The base-2 logarithm.
+fn log2(x: Float) -> Float:
+    return __log2(x)
+
+# The base-10 logarithm.
+fn log10(x: Float) -> Float:
+    return __log10(x)
+
+# The length of the hypotenuse: `sqrt(x * x + y * y)`.
+fn hypot(x: Float, y: Float) -> Float:
+    return __sqrt(x * x + y * y)
+
+# `base` to the power `exp`, on `Int`s. Panics on overflow, like `*`, and if
+# `exp` is negative.
+fn pow_int(base: Int, exp: Int) -> Int:
+    if exp < 0:
+        panic(f"pow_int({base}, {exp}): the exponent can't be negative")
+    var result = 1
+    var b = base
+    var n = exp
+    while n > 0:
+        if n % 2 == 1:
+            result *= b
+        n = n / 2
+        if n > 0:
+            b *= b
+    return result
+
+# The integer square root: the largest `r` with `r * r <= n`. Panics if `n` is negative.
+fn isqrt(n: Int) -> Int:
+    if n < 0:
+        panic(f"isqrt({n}): the number can't be negative")
+    if n < 2:
+        return n
+    var r = __sqrt(n.to_float()).to_int()
+    # The float estimate can be off by one either way for huge numbers.
+    while r > n / r:
+        r -= 1
+    while r + 1 <= n / (r + 1):
+        r += 1
+    return r
+
+# ---------------------------------------------------------------- rounding
+
+# The largest whole number not above `x`: `floor(2.7)` is 2.0, `floor(-2.5)` is -3.0.
+fn floor(x: Float) -> Float:
+    return __floor(x)
+
+# The smallest whole number not below `x`: `ceil(2.1)` is 3.0.
+fn ceil(x: Float) -> Float:
+    return __ceil(x)
+
+# The nearest whole number, with halves away from zero: `round(2.5)` is 3.0,
+# `round(-2.5)` is -3.0. Use `.to_int()` for an `Int`.
+fn round(x: Float) -> Float:
+    return __round(x)
+
+# `x` with its fractional part dropped: `trunc(-2.7)` is -2.0.
+fn trunc(x: Float) -> Float:
+    return __trunc(x)
+
+# ---------------------------------------------------------------- trigonometry (radians)
+
+fn sin(x: Float) -> Float:
+    return __sin(x)
+
+fn cos(x: Float) -> Float:
+    return __cos(x)
+
+fn tan(x: Float) -> Float:
+    return __tan(x)
+
+fn asin(x: Float) -> Float:
+    return __asin(x)
+
+fn acos(x: Float) -> Float:
+    return __acos(x)
+
+fn atan(x: Float) -> Float:
+    return __atan(x)
+
+# The angle of the point (x, y) from the x axis, from -π to π.
+fn atan2(y: Float, x: Float) -> Float:
+    return __atan2(y, x)
+
+fn sinh(x: Float) -> Float:
+    return __sinh(x)
+
+fn cosh(x: Float) -> Float:
+    return __cosh(x)
+
+fn tanh(x: Float) -> Float:
+    return __tanh(x)
+
+# Radians to degrees.
+fn degrees(radians: Float) -> Float:
+    return radians * 180.0 / pi
+
+# Degrees to radians.
+fn radians(degrees: Float) -> Float:
+    return degrees * pi / 180.0
+
+# ---------------------------------------------------------------- comparing
+
+# The smaller of two values (`a` if they're equal).
+fn min[T](a: T, b: T) -> T:
+    if b < a:
+        return b
+    return a
+
+# The larger of two values (`a` if they're equal).
+fn max[T](a: T, b: T) -> T:
+    if b > a:
+        return b
+    return a
+
+# `x`, moved into the range `low..=high`.
+fn clamp[T](x: T, low: T, high: T) -> T:
+    if x < low:
+        return low
+    if x > high:
+        return high
+    return x
+
+# The absolute value. Panics for `math.min_int`, whose absolute value isn't an `Int`.
+fn abs[T](x: T) -> T:
+    if x < -x:
+        return -x
+    return x
+
+# -1.0, 0.0 or 1.0, by the sign of `x` (NaN stays NaN).
+fn sign(x: Float) -> Float:
+    if x > 0.0:
+        return 1.0
+    if x < 0.0:
+        return -1.0
+    return x
+
+fn is_nan(x: Float) -> Bool:
+    return x != x
+
+# Is `x` infinite (`math.inf` or `-math.inf`)?
+fn is_inf(x: Float) -> Bool:
+    return x == inf or x == -inf
+
+# Is `x` an ordinary number (neither infinite nor NaN)?
+fn is_finite(x: Float) -> Bool:
+    return x - x == 0.0
+
+# ---------------------------------------------------------------- integers
+
+# The greatest common divisor (never negative; `gcd(0, 0)` is 0).
+fn gcd(a: Int, b: Int) -> Int:
+    var x = abs(a)
+    var y = abs(b)
+    while y != 0:
+        val t = x % y
+        x = y
+        y = t
+    return x
+
+# The least common multiple (never negative; 0 if either is 0).
+fn lcm(a: Int, b: Int) -> Int:
+    if a == 0 or b == 0:
+        return 0
+    return abs(a / gcd(a, b) * b)
+
+# `n!` = 1 × 2 × ... × n. Panics on overflow (from 21!) and if `n` is negative.
+fn factorial(n: Int) -> Int:
+    if n < 0:
+        panic(f"factorial({n}): the number can't be negative")
+    var result = 1
+    for i in 2..=n:
+        result *= i
+    return result

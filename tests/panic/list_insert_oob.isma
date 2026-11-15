@@ -1,0 +1,4 @@
+# expect-panic: insert index 5 out of bounds for list of length 2
+fn main():
+    val xs = [1, 2]
+    xs.insert(5, 3)

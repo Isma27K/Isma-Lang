@@ -1,0 +1,3 @@
+# expect-error: `join` needs a `List[String]`, found `List[Int]`
+fn main():
+    print([1, 2].join(", "))

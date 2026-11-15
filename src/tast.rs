@@ -9,6 +9,16 @@ use crate::types::*;
 pub struct TProgram {
     pub structs: Vec<TStruct>,
     pub funcs: Vec<TFunc>,
+    /// Struct or enum types used as map keys: their `fn hash` and `fn ==`.
+    pub map_keys: Vec<MapKey>,
+}
+
+/// How a map hashes and compares keys of a user type.
+#[derive(Debug, Clone, Copy)]
+pub struct MapKey {
+    pub sid: StructId,
+    pub hash: FuncId,
+    pub eq: FuncId,
 }
 
 /// A struct, or an enum (`variants` is `Some`): both live in one table, so
@@ -75,7 +85,11 @@ pub enum TStmt {
     If { branches: Vec<(TExpr, Vec<TStmt>)>, else_block: Option<Vec<TStmt>> },
     While { cond: TExpr, body: Vec<TStmt> },
     ForRange { var: LocalId, start: TExpr, end: TExpr, inclusive: bool, body: Vec<TStmt> },
-    ForList { var: LocalId, list: TExpr, body: Vec<TStmt> },
+    /// `for x in xs:` / `for i, x in xs:` (`index` is `i`).
+    ForList { var: LocalId, index: Option<LocalId>, list: TExpr, body: Vec<TStmt> },
+    /// `for k in m:` / `for k, v in m:`, in insertion order. The span is for
+    /// the panic when the body adds or removes keys.
+    ForMap { key: LocalId, value: Option<LocalId>, map: TExpr, body: Vec<TStmt>, span: Span },
     /// Exhaustive (checked): exactly one arm runs.
     Match { scrutinee: TExpr, arms: Vec<TArm> },
     Break,
@@ -123,6 +137,8 @@ pub enum Place {
     /// `grid[i]` on a type with operator functions: `set` is its `fn []=`,
     /// `get` its `fn []` (needed by `grid[i] += x`). `ty` is the element type.
     Custom { obj: TExpr, index: TExpr, get: Option<FuncId>, set: FuncId, ty: Type },
+    /// `m[k] = v` on a `Map` (`m[k] += v` reads it first, panicking if missing).
+    MapEntry { map: TExpr, key: TExpr, span: Span },
 }
 
 /// What `x op= v` computes from the current value of `x` and `v`.
@@ -174,10 +190,141 @@ pub enum Builtin {
     /// `s.to_int_or_null()` / `s.to_float_or_null()`
     StrToIntOrNull,
     StrToFloatOrNull,
+    StrSplit,
+    StrSplitWhitespace,
+    StrLines,
+    StrTrim,
+    StrTrimStart,
+    StrTrimEnd,
+    StrUpper,
+    StrLower,
+    StrReplace,
+    /// `s.find(t) -> Int?`: byte index of the first match.
+    StrFind,
+    /// `s.rfind(t) -> Int?`: byte index of the last match.
+    StrRfind,
+    StrRepeat,
+    StrCount,
+    StrPadStart,
+    StrPadEnd,
+    /// `", ".join(...)`-style, as `parts.join(sep)` on a `List[String]`.
+    ListJoin,
+    ListInsert,
+    ListRemoveAt,
+    ListClear,
+    ListReverse,
+    /// `xs.sort()` on a list of `Int`, `Float` or `String`.
+    ListSort,
+    /// `m[k]`: panics if `k` is missing.
+    MapGet,
+    /// `m.get(k) -> V?`
+    MapGetOrNull,
+    /// `m.get(k, default) -> V`
+    MapGetOr,
+    /// `m[k] = v` (consumes the key and value).
+    MapSet,
+    MapContains,
+    /// `m.remove(k) -> V?`
+    MapRemove,
+    MapLen,
+    MapClear,
+    /// `m.keys()` / `m.values()`: new lists, in insertion order.
+    MapKeys,
+    MapValues,
+    /// Internal (`for` loops, `keys()`, `values()`): `MapNext(m, i, len)` is the
+    /// index of the next entry at or after `i`, or -1 at the end; panics if the
+    /// map's size isn't `len` any more.
+    MapNext,
+    /// Internal: the key / value of the entry at an index from `MapNext`.
+    MapKeyAt,
+    MapValueAt,
+    /// A string as it's written in code: `"a\"b"` (for printing lists and maps).
+    StrRepr,
+    /// `hash(x)` of one value of a type with a built-in hash.
+    HashOf,
+    /// `hash(a, b, ...)`: the hashes of the parts, mixed into one `Int`.
+    HashCombine,
+    /// Math (`math` module intrinsics), on `Float`s.
+    MathUnary(MathFn),
+    MathPow,
+    MathAtan2,
+    /// File system (`fs` module intrinsics).
+    Fs(FsOp),
     /// Internal (nullable primitives): is it `null`? / `T` -> `T?` / `T?` -> `T` (unchecked).
     IsNull,
     Wrap,
     Unwrap,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MathFn {
+    Sin,
+    Cos,
+    Tan,
+    Asin,
+    Acos,
+    Atan,
+    Sinh,
+    Cosh,
+    Tanh,
+    Exp,
+    Ln,
+    Log2,
+    Log10,
+    Floor,
+    Ceil,
+    Round,
+    Trunc,
+    Abs,
+    Cbrt,
+}
+
+impl MathFn {
+    pub const ALL: &[(&str, MathFn)] = &[
+        ("__sin", MathFn::Sin),
+        ("__cos", MathFn::Cos),
+        ("__tan", MathFn::Tan),
+        ("__asin", MathFn::Asin),
+        ("__acos", MathFn::Acos),
+        ("__atan", MathFn::Atan),
+        ("__sinh", MathFn::Sinh),
+        ("__cosh", MathFn::Cosh),
+        ("__tanh", MathFn::Tanh),
+        ("__exp", MathFn::Exp),
+        ("__ln", MathFn::Ln),
+        ("__log2", MathFn::Log2),
+        ("__log10", MathFn::Log10),
+        ("__floor", MathFn::Floor),
+        ("__ceil", MathFn::Ceil),
+        ("__round", MathFn::Round),
+        ("__trunc", MathFn::Trunc),
+        ("__fabs", MathFn::Abs),
+        ("__cbrt", MathFn::Cbrt),
+    ];
+}
+
+/// The file-system operations behind the `fs` module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FsOp {
+    /// `(path) -> String?`
+    Read,
+    /// `(path, text, append) -> Bool`
+    Write,
+    /// `(path) -> Int`: 0 missing, 1 file, 2 directory, 3 other.
+    Kind,
+    /// `(path) -> List[String]?`: sorted names.
+    ListDir,
+    /// `(path) -> Bool`
+    MakeDir,
+    Remove,
+    /// `(from, to) -> Bool`
+    Rename,
+    /// `() -> String`: why the last failed operation failed.
+    LastError,
+    /// `() -> String`
+    Cwd,
+    /// `() -> String`: everything left on stdin.
+    ReadStdin,
 }
 
 #[derive(Debug)]
@@ -201,6 +348,19 @@ pub enum TExprKind {
     /// `Shape.Circle(r)`: enum, variant, one value per field.
     EnumNew(StructId, usize, Vec<TExpr>),
     ListLit(Vec<TExpr>),
+    /// Evaluate the first expression into the local, then the second.
+    Let(LocalId, Box<TExpr>, Box<TExpr>),
+    /// `{k: v, ...}` of the expression's (`Map`) type.
+    MapLit(Vec<(TExpr, TExpr)>),
+    /// `x in xs`, `xs.contains(x)` (Bool) or `xs.index_of(x)` (`Int?`): the
+    /// list's elements are put in `elem` in turn and `test` (which reads
+    /// `elem` and `needle`, set to the value looked for) says if one matches.
+    ListFind { list: Box<TExpr>, value: Box<TExpr>, elem: LocalId, needle: LocalId, test: Box<TExpr>, index: bool },
+    /// `[1, 2, 3]`: the list's elements are put in `elem` in turn, and `each`
+    /// (which reads it) formats one.
+    ListFormat { list: Box<TExpr>, elem: LocalId, each: Box<TExpr> },
+    /// `{"a": 1}`: like `ListFormat`, for each key and value.
+    MapFormat { map: Box<TExpr>, key: LocalId, value: LocalId, key_str: Box<TExpr>, value_str: Box<TExpr> },
     /// Concatenation of String-typed parts.
     FString(Vec<TExpr>),
     /// `null`, of the (nullable) type of the expression.

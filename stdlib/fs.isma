@@ -1,0 +1,135 @@
+# Files and folders.
+#
+#     import fs
+#
+#     fs.write("notes.txt", "first line\n")
+#     fs.append("notes.txt", "second line\n")
+#     for line in fs.read_lines("notes.txt"):
+#         print(line)
+#
+#     val config = fs.read_or_null("config.txt") ?: "defaults"
+#     if not fs.exists("out"):
+#         fs.make_dir("out/reports")              # and any missing parents
+#     for name in fs.list_dir("."):
+#         if fs.extension(name) == "isma":
+#             print(name)
+#
+# Paths are `String`s, relative to the current directory unless they start
+# with `/`. Text is read and written as it is (UTF-8, no newline conversion).
+# Something that can't be done (a missing file, no permission...) panics with
+# the reason, pointing at your line, e.g.
+#
+#     panic at app.isma:3:16: cannot read data.txt: No such file or directory
+#
+# Check first with `fs.exists`, or use `fs.read_or_null` when a missing file is expected.
+
+# The whole contents of a file.
+fn read(path: String) -> String:
+    return __fs_read(path) ?: panic(__fs_last_error())
+
+# The contents of a file, or `null` if it can't be read.
+fn read_or_null(path: String) -> String?:
+    return __fs_read(path)
+
+# The lines of a file, without their line endings.
+fn read_lines(path: String) -> List[String]:
+    return read(path).lines()
+
+# Everything left on standard input (until end of input).
+fn read_stdin() -> String:
+    return __fs_read_stdin()
+
+# Replace the file's contents with `text` (creating the file if needed).
+fn write(path: String, text: String):
+    if not __fs_write(path, text, false):
+        panic(__fs_last_error())
+
+# Add `text` to the end of the file (creating it if needed).
+fn append(path: String, text: String):
+    if not __fs_write(path, text, true):
+        panic(__fs_last_error())
+
+# Is there a file or folder at `path`?
+fn exists(path: String) -> Bool:
+    return __fs_kind(path) != 0
+
+# Is `path` a file?
+fn is_file(path: String) -> Bool:
+    return __fs_kind(path) == 1
+
+# Is `path` a folder?
+fn is_dir(path: String) -> Bool:
+    return __fs_kind(path) == 2
+
+# The names of the files and folders in a folder, sorted (without `.` and `..`).
+fn list_dir(path: String) -> List[String]:
+    return __fs_list_dir(path) ?: panic(__fs_last_error())
+
+# Create a folder, and any missing folders above it. A folder that already exists is fine.
+fn make_dir(path: String):
+    if not __fs_make_dir(path):
+        panic(__fs_last_error())
+
+# Delete a file, or an empty folder.
+fn remove(path: String):
+    if not __fs_remove(path):
+        panic(__fs_last_error())
+
+# Move or rename a file or folder.
+fn rename(from: String, to: String):
+    if not __fs_rename(from, to):
+        panic(__fs_last_error())
+
+# The current directory.
+fn cwd() -> String:
+    return __fs_cwd()
+
+# ---------------------------------------------------------------- paths
+
+# `a` and `b` joined with a `/`: `fs.join("out", "a.txt")` is "out/a.txt".
+# If `b` starts with `/`, it's already a full path and is returned as it is.
+fn join(a: String, b: String) -> String:
+    if a.is_empty() or b.starts_with("/"):
+        return b
+    if a.ends_with("/"):
+        return a + b
+    return f"{a}/{b}"
+
+# The last part of a path: `fs.file_name("src/main.isma")` is "main.isma".
+fn file_name(path: String) -> String:
+    val p = _trim_slashes(path)
+    val at = p.rfind("/") ?: return p
+    return p.substring(at + 1, p.len())
+
+# The folder a path is in: `fs.parent("src/main.isma")` is "src", and
+# `fs.parent("main.isma")` is "".
+fn parent(path: String) -> String:
+    val p = _trim_slashes(path)
+    val at = p.rfind("/") ?: return ""
+    if at == 0:
+        return "/"
+    return p.substring(0, at)
+
+# The extension of a file name, without the dot: "isma" for "main.isma",
+# "gz" for "a.tar.gz", and "" for "Makefile" or ".bashrc".
+fn extension(path: String) -> String:
+    val name = file_name(path)
+    val at = name.rfind(".") ?: return ""
+    if at == 0:
+        return ""
+    return name.substring(at + 1, name.len())
+
+# The file name without its extension: "main" for "src/main.isma".
+fn stem(path: String) -> String:
+    val name = file_name(path)
+    val at = name.rfind(".") ?: return name
+    if at == 0:
+        return name
+    return name.substring(0, at)
+
+# Without trailing slashes ("/" stays "/").
+fn _trim_slashes(path: String) -> String:
+    var p = path
+    while p.len() > 1 and p.ends_with("/"):
+        p = p.substring(0, p.len() - 1)
+    return p

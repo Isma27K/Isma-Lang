@@ -45,6 +45,10 @@ pub(super) enum Need {
     Format,
     /// `a.to_string()`.
     ToStr,
+    /// `hash(a)`.
+    Hash,
+    /// A key of a `Map[T, V]`: `==` and `hash`.
+    Key,
 }
 
 impl Need {
@@ -58,6 +62,8 @@ impl Need {
             Need::Neg => "`-` (negation)".into(),
             Need::Format => "printing".into(),
             Need::ToStr => "`to_string()`".into(),
+            Need::Hash => "`hash()`".into(),
+            Need::Key => "being a map key (`==` and `hash`)".into(),
         }
     }
 
@@ -74,6 +80,8 @@ impl Need {
             Need::Neg => format!("a `{p}` is negated here"),
             Need::Format => format!("a `{p}` is printed here"),
             Need::ToStr => format!("`to_string()` is called on a `{p}` here"),
+            Need::Hash => format!("a `{p}` is hashed here"),
+            Need::Key => format!("`{p}` is a map key here"),
         }
     }
 }
@@ -127,6 +135,10 @@ fn calls_in(stmts: &[TStmt], out: &mut Vec<(FuncId, Span)>) {
                         calls_in_expr(index, out);
                         out.extend(get.iter().chain([set]).map(|f| (*f, *span)));
                     }
+                    Place::MapEntry { map, key, .. } => {
+                        calls_in_expr(map, out);
+                        calls_in_expr(key, out);
+                    }
                 }
                 calls_in_expr(value, out);
             }
@@ -148,7 +160,7 @@ fn calls_in(stmts: &[TStmt], out: &mut Vec<(FuncId, Span)>) {
                 calls_in_expr(end, out);
                 calls_in(body, out);
             }
-            TStmt::ForList { list, body, .. } => {
+            TStmt::ForList { list, body, .. } | TStmt::ForMap { map: list, body, .. } => {
                 calls_in_expr(list, out);
                 calls_in(body, out);
             }
@@ -179,7 +191,7 @@ fn calls_in_expr(e: &TExpr, out: &mut Vec<(FuncId, Span)>) {
             calls_in_expr(a, out);
             calls_in_expr(b, out);
         }
-        TExprKind::SafeCall { recv, body, .. } => {
+        TExprKind::SafeCall { recv, body, .. } | TExprKind::Let(_, recv, body) => {
             calls_in_expr(recv, out);
             calls_in_expr(body, out);
         }
@@ -187,6 +199,26 @@ fn calls_in_expr(e: &TExpr, out: &mut Vec<(FuncId, Span)>) {
             calls_in_expr(x, out)
         }
         TExprKind::Jump(s) => calls_in(std::slice::from_ref(&**s), out),
+        TExprKind::MapLit(entries) => {
+            for (k, v) in entries {
+                calls_in_expr(k, out);
+                calls_in_expr(v, out);
+            }
+        }
+        TExprKind::ListFind { list, value, test, .. } => {
+            calls_in_expr(list, out);
+            calls_in_expr(value, out);
+            calls_in_expr(test, out);
+        }
+        TExprKind::ListFormat { list, each, .. } => {
+            calls_in_expr(list, out);
+            calls_in_expr(each, out);
+        }
+        TExprKind::MapFormat { map, key_str, value_str, .. } => {
+            calls_in_expr(map, out);
+            calls_in_expr(key_str, out);
+            calls_in_expr(value_str, out);
+        }
         TExprKind::Int(_) | TExprKind::Float(_) | TExprKind::Bool(_) | TExprKind::Str(_) | TExprKind::Local(_) | TExprKind::Null => {}
     }
 }
@@ -331,6 +363,7 @@ impl Checker {
     pub(super) fn type_depth(&self, t: &Type) -> usize {
         match t {
             Type::List(e) | Type::Nullable(e) => 1 + self.type_depth(e),
+            Type::Map(k, v) => 1 + self.type_depth(k).max(self.type_depth(v)),
             Type::Struct(id) | Type::Enum(id, _) => 1 + self.struct_args[*id].iter().map(|a| self.type_depth(a)).max().unwrap_or(0),
             _ => 1,
         }
@@ -341,6 +374,7 @@ impl Checker {
         match t {
             Type::Param(q) => *q == p,
             Type::List(e) | Type::Nullable(e) => self.mentions(e, p),
+            Type::Map(k, v) => self.mentions(k, p) || self.mentions(v, p),
             Type::Struct(id) | Type::Enum(id, _) => self.struct_has_param[*id] && self.struct_args[*id].iter().any(|a| self.mentions(a, p)),
             _ => false,
         }
@@ -351,6 +385,7 @@ impl Checker {
         match t {
             Type::Param(p) => map.iter().find(|(q, _)| q == p).map(|(_, t)| t.clone()).unwrap_or_else(|| t.clone()),
             Type::List(e) => Type::List(Box::new(self.subst(e, map))),
+            Type::Map(k, v) => Type::Map(Box::new(self.subst(k, map)), Box::new(self.subst(v, map))),
             // `T?` with `T` = `Int?` is `Int?`.
             Type::Nullable(e) => self.subst(e, map).nullable(),
             Type::Struct(id) | Type::Enum(id, _) if self.struct_has_param[*id] => {
@@ -648,6 +683,10 @@ impl Checker {
             (Type::Nullable(p), Type::Nullable(a)) => self.unify(p, a, tparams, bound, weak),
             (Type::Nullable(p), a) => self.unify(p, a, tparams, bound, weak),
             (Type::List(p), Type::List(a)) => self.unify(p, a, tparams, bound, weak),
+            (Type::Map(pk, pv), Type::Map(ak, av)) => {
+                self.unify(pk, ak, tparams, bound, weak);
+                self.unify(pv, av, tparams, bound, weak);
+            }
             (Type::Struct(ps) | Type::Enum(ps, _), Type::Struct(asid) | Type::Enum(asid, _))
                 if self.struct_has_param[*ps] && self.struct_origin[*ps] == self.struct_origin[*asid] =>
             {
@@ -665,6 +704,7 @@ impl Checker {
         match &e.kind {
             ExprKind::Null => true,
             ExprKind::List(es) => es.is_empty(),
+            ExprKind::Map(es) => es.is_empty(),
             ExprKind::Field(obj, _) => {
                 let sid = match &obj.kind {
                     ExprKind::Name(n) if self.lookup(n).is_none() => self.struct_index.get(&(self.ns, n.clone())).copied().or_else(|| match self.names.get(&(self.ns, n.clone())) {
@@ -1026,19 +1066,26 @@ impl Checker {
         match t {
             Type::Error => Ok(Vec::new()),
             Type::Param(p) => Ok(vec![(*p, need)]),
+            Type::List(e) if need == Need::Format => self.satisfies(e, need, depth + 1),
+            Type::Map(k, v) if need == Need::Format => {
+                let mut out = self.satisfies(k, need, depth + 1)?;
+                out.extend(self.satisfies(v, need, depth + 1)?);
+                Ok(out)
+            }
             Type::Nullable(inner) => match (need, &**inner) {
-                (Need::Format, _) => self.satisfies(inner, Need::Format, depth + 1),
+                (Need::Format | Need::Hash, _) => self.satisfies(inner, need, depth + 1),
                 (Need::Eq | Need::EqNullable, Type::Param(p)) => Ok(vec![(*p, Need::EqNullable)]),
                 (Need::Eq | Need::EqNullable, inner) => self.satisfies(inner, Need::EqNullable, depth + 1),
                 _ => fail(t),
             },
+            Type::Float if need == Need::Key => fail(t),
             Type::Int | Type::Float => Ok(Vec::new()),
             Type::Bool => match need {
-                Need::Eq | Need::EqNullable | Need::Format | Need::ToStr => Ok(Vec::new()),
+                Need::Eq | Need::EqNullable | Need::Format | Need::ToStr | Need::Hash | Need::Key => Ok(Vec::new()),
                 _ => fail(t),
             },
             Type::Str => match need {
-                Need::Eq | Need::EqNullable | Need::Ord | Need::Arith(BinOp::Add) | Need::Format | Need::ToStr => Ok(Vec::new()),
+                Need::Eq | Need::EqNullable | Need::Ord | Need::Arith(BinOp::Add) | Need::Format | Need::ToStr | Need::Hash | Need::Key => Ok(Vec::new()),
                 _ => fail(t),
             },
             Type::Struct(sid) | Type::Enum(sid, _) => {
@@ -1051,6 +1098,15 @@ impl Checker {
                 if plain_enum && matches!(need, Need::Format | Need::ToStr) && !self.has_method(sid, "to_string") {
                     return Ok(Vec::new());
                 }
+                if plain_enum && (need == Need::Key || need == Need::Hash && !self.has_method(sid, "hash")) {
+                    return Ok(Vec::new());
+                }
+                // A key needs both `==` and `hash`.
+                if need == Need::Key {
+                    let mut out = self.satisfies(t, Need::Eq, depth)?;
+                    out.extend(self.satisfies(t, Need::Hash, depth)?);
+                    return Ok(out);
+                }
                 let fid = match need {
                     Need::Eq => self.ops(sid, OpKind::Eq).first().copied(),
                     Need::EqNullable => None,
@@ -1061,6 +1117,8 @@ impl Checker {
                     }
                     Need::Neg => self.ops(sid, OpKind::Neg).into_iter().find(|&f| self.funcs[f].ret == *t),
                     Need::Format | Need::ToStr => self.user_to_string(t),
+                    Need::Hash => self.user_hash(sid),
+                    Need::Key => unreachable!(),
                 };
                 let Some(fid) = fid else { return fail(t) };
                 // A method of a generic type needs what its code needs.
@@ -1147,6 +1205,7 @@ impl Checker {
                     Need::Ord => format!("fn <=>(self, other: {me}) -> Int"),
                     Need::Arith(op) => format!("fn {}(self, other: {me}) -> {me}", op.symbol()),
                     Need::Neg => format!("fn -(self) -> {me}"),
+                    Need::Hash => "fn hash(self) -> Int".to_string(),
                     _ => "fn to_string(self) -> String".to_string(),
                 };
                 let mut d = d.with_help(format!("give `{kw} {short}` a method `{m}`"));
@@ -1164,6 +1223,8 @@ impl Checker {
                 d.with_note(format!("`{shown}` has its own `==`, which needs two non-null values"))
             }
             Type::List(_) => d.with_note("lists can't be compared, added or printed directly"),
+            Type::Map(..) => d.with_note("maps can't be compared, added, printed or hashed directly"),
+            Type::Float if need == Need::Key => d.with_note("`Float`s make unreliable keys (`0.1 + 0.2 != 0.3`, and NaN isn't equal to itself)"),
             _ => d,
         }
     }

@@ -1,0 +1,3 @@
+# expect-panic: repeat(-1): the count can't be negative
+fn main():
+    print("ab".repeat(-1))

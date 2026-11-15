@@ -5,3 +5,7 @@ struct Pair:
 
 fn make() -> Pair:
     return Pair("top-level util", 1)
+
+# Constants can be imported too.
+val version = "1.2.3"
+val greeting = "hello from " + "mylib"

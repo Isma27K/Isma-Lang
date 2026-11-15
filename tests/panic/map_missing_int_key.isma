@@ -1,0 +1,4 @@
+# expect-panic: key 7 not found in map
+fn main():
+    val m = {1: "one"}
+    m[7] += "!"

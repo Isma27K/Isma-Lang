@@ -1,0 +1,24 @@
+# Counting with hash maps: 2 million updates with Int keys, then 2 million
+# with String keys (word frequencies).
+fn main():
+    val counts: Map[Int, Int] = {}
+    var x = 12345
+    for _ in 0..2_000_000:
+        x = (x * 1103515245 + 12345) % 2147483648
+        val k = x % 500_000
+        counts[k] = counts.get(k, 0) + 1
+    var total = 0
+    for k, c in counts:
+        total += k % 7 * c
+    print(counts.len())
+    print(total)
+
+    val words: List[String] = []
+    for i in 0..200_000:
+        words.push(f"w{i * 7919 % 20_000}")
+    val freq: Map[String, Int] = {}
+    for _ in 0..10:
+        for w in words:
+            freq[w] = freq.get(w, 0) + 1
+    print(freq.len())
+    print(freq["w0"])

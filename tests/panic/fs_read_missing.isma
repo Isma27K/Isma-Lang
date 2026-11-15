@@ -1,0 +1,5 @@
+# expect-panic: cannot read no/such/file.txt: No such file or directory
+import fs
+
+fn main():
+    print(fs.read("no/such/file.txt"))
