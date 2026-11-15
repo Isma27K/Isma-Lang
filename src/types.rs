@@ -19,6 +19,10 @@ pub enum Type {
     /// true when some variant carries data: values are then reference-counted
     /// heap objects. Otherwise a value is just its variant's number.
     Enum(StructId, bool),
+    /// A value of an interface type (`Shape`; the id is the interface's, in
+    /// the struct table): a value of any type that has the interface's
+    /// methods, kept with a table of them so calls find the right code.
+    Iface(StructId),
     /// `T?`: a `T` or `null`. Never nested, and never `Unit?`.
     Nullable(Box<Type>),
     /// `fn(Int, String) -> Bool`: a function value (a named function, or a
@@ -118,7 +122,7 @@ impl Type {
             Type::Unit => "Unit".into(),
             Type::List(t) => format!("List[{}]", t.display(struct_names, param_names)),
             Type::Map(k, v) => format!("Map[{}, {}]", k.display(struct_names, param_names), v.display(struct_names, param_names)),
-            Type::Struct(id) | Type::Enum(id, _) => struct_names[*id].clone(),
+            Type::Struct(id) | Type::Enum(id, _) | Type::Iface(id) => struct_names[*id].clone(),
             // `(fn(Int) -> Int)?`: without the parentheses the `?` would belong to the return type.
             Type::Nullable(t) if matches!(**t, Type::Func(..)) => format!("({})?", t.display(struct_names, param_names)),
             Type::Nullable(t) => format!("{}?", t.display(struct_names, param_names)),

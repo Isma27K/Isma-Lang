@@ -227,6 +227,7 @@ mod tests {
                 variants: Some(vec![variant("Circle", vec![Type::Float]), variant("Rect", vec![Type::Float, Type::Float]), variant("Empty", vec![])]),
                 generic: false,
                 closure: None,
+                vtable: Vec::new(),
             },
             TStruct {
                 name: "Expr".into(),
@@ -238,6 +239,7 @@ mod tests {
                 ]),
                 generic: false,
                 closure: None,
+                vtable: Vec::new(),
             },
         ]
     }

@@ -1,0 +1,47 @@
+# Bounds: several on one type parameter (`T: Shape + Named`), on a generic
+# type (`Gallery[T: Shape]`), and an interface type as the type argument
+# (`Gallery[Shape]`), inferred from an annotation or given explicitly.
+
+interface Shape:
+    fn area(self) -> Float
+
+interface Named:
+    fn name(self) -> String
+
+struct Circle:
+    r: Float
+
+    fn area(self) -> Float:
+        return self.r
+
+    fn name(self) -> String:
+        return f"circle {self.r}"
+
+struct Gallery[T: Shape]:
+    items: List[T]
+
+    fn total(self) -> Float:
+        var sum = 0.0
+        for s in self.items:
+            sum += s.area()
+        return sum
+
+fn label[T: Shape + Named](x: T) -> String:
+    return f"{x.name()}: {x.area()}"
+
+fn labels[T: Shape + Named](xs: List[T]) -> List[String]:
+    return xs.map(fn(x) -> label(x))
+
+fn main():
+    print(label(Circle(2.0)))
+    print(labels([Circle(1.0), Circle(3.0)]))
+    val g: Gallery[Shape] = Gallery([Circle(1.0), Circle(2.0)])
+    print(g.total())
+    val h = Gallery[Shape]([Circle(5.0)])
+    print(h.total())
+    val circles = [Circle(1.0), Circle(2.0)]
+    val first: Shape = pick(circles)
+    print(first.area())
+
+fn pick[T](xs: List[T]) -> T:
+    return xs[0]

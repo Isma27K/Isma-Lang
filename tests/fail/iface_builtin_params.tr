@@ -1,0 +1,7 @@
+# expect-error: methods of built-in types can only stand for interface methods without parameters
+interface Finder:
+    fn contains(self, s: String) -> Bool
+
+fn main():
+    val f: Finder = "haystack"
+    print(f.contains("hay"))

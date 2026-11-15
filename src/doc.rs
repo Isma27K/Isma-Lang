@@ -44,12 +44,18 @@ pub fn reference() -> Value {
             .enumerate()
             .filter(|(_, s)| s.ns == ns && !s.instance && !short(&s.name).starts_with('_'))
             .map(|(sid, s)| {
-                let ty = if s.variants.is_some() { Type::Enum(sid, true) } else { Type::Struct(sid) };
+                let ty = if s.iface {
+                    Type::Iface(sid)
+                } else if s.variants.is_some() {
+                    Type::Enum(sid, true)
+                } else {
+                    Type::Struct(sid)
+                };
                 let variants: Vec<Value> =
                     s.variants.iter().flatten().map(|v| json!({ "name": v.name, "signature": v.signature, "doc": v.doc })).collect();
                 json!({
                     "name": short(&s.name),
-                    "kind": if s.variants.is_some() { "enum" } else { "struct" },
+                    "kind": if s.iface { "interface" } else if s.variants.is_some() { "enum" } else { "struct" },
                     "doc": s.doc,
                     "variants": variants,
                     "members": info.members(&ty).iter().map(member).collect::<Vec<_>>(),

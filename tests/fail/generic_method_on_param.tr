@@ -1,4 +1,4 @@
-# expect-error: the only method generic code can call on it is `to_string()`
+# expect-error: generic code can only call `to_string()` and the methods of `T`'s bounds
 fn size[T](x: T) -> Int:
     return x.len()
 

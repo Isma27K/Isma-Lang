@@ -1,0 +1,21 @@
+# expect-error: `Point` isn't an interface, so it can't be a bound
+interface Shape:
+    fn area(self) -> Float
+
+interface Scalable(Shape):
+    fn scale(self, by: Float)
+
+struct Circle:
+    r: Float
+
+    fn area(self) -> Float:
+        return 3.0 * self.r * self.r
+
+struct Point:
+    x: Int
+
+fn f[T: Point](x: T) -> T:
+    return x
+
+fn main():
+    print(f(1))

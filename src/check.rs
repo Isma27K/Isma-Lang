@@ -14,11 +14,13 @@ use std::collections::{HashMap, HashSet};
 
 mod consts;
 mod generics;
+mod ifaces;
 mod lambdas;
 mod list_fns;
 mod maps;
 use consts::*;
 use generics::*;
+use ifaces::*;
 use lambdas::*;
 
 const BUILTINS: &[&str] = &["print", "input", "args", "panic", "assert", "sqrt", "exit", "hash"];
@@ -340,6 +342,17 @@ pub struct Checker {
     in_template: bool,
     /// Inside a one-line lambda (`fn(x) -> ...`), where `return`, `break` and `continue` can't be used.
     in_lambda_expr: usize,
+    // interfaces (see `ifaces.rs`)
+    /// Per interface (its id in the struct table): its methods.
+    ifaces: HashMap<StructId, IfaceInfo>,
+    /// The box of each type used as each interface type: (interface, type) -> box.
+    boxes: HashMap<(StructId, Type), StructId>,
+    /// Are all methods known (signatures, and interfaces' full method lists)?
+    /// Until then, bounds are checked later (`pending_bounds`).
+    sigs_ready: bool,
+    pending_bounds: Vec<PendingBound>,
+    /// `struct Circle(Shape):`: the interfaces types say they fit, checked once the methods are known.
+    implements: Vec<(StructId, Vec<(Type, Span)>)>,
 }
 
 /// Type-check: `Ok((program, warnings))` or `Err(errors and warnings)`.
@@ -412,6 +425,11 @@ pub fn analyze(files: &[SourceFile]) -> Analysis {
         cur_fn: None,
         in_template: false,
         in_lambda_expr: 0,
+        ifaces: HashMap::new(),
+        boxes: HashMap::new(),
+        sigs_ready: false,
+        pending_bounds: Vec::new(),
+        implements: Vec::new(),
     };
     for (ns, f) in files.iter().enumerate().skip(1) {
         let doc = c.leading_comment(ns);
@@ -687,6 +705,16 @@ impl Checker {
         let params = if s.instance { &s.type_args } else { &s.type_params };
         let title = if params.is_empty() || s.instance { s.name.clone() } else { format!("{}[{}]", s.name, params.join(", ")) };
         let method = |m: usize| replace_words(&self.ide.functions[m].signature, &s.type_params, if s.instance { &s.type_args } else { &s.type_params });
+        if s.iface {
+            let mut out = format!("interface {title}:");
+            for &m in &s.methods {
+                out.push_str(&format!("\n    {}", method(m)));
+            }
+            if s.methods.is_empty() {
+                out.push_str("\n    pass");
+            }
+            return out;
+        }
         if let Some(variants) = &s.variants {
             let mut out = format!("enum {title}:");
             for v in variants {
@@ -807,19 +835,27 @@ impl Checker {
         for &(ns, program) in units {
             self.ns = ns;
             for item in &program.items {
-                let (name_id, end, enum_boxed, tparams) = match item {
+                let none: &[TypeParam] = &[];
+                let (name_id, end, enum_boxed, tparams, iface) = match item {
                     Item::Struct(s) => {
                         let end = s.fields.iter().map(|f| f.ty.span.end).chain(s.methods.iter().map(|m| fn_full_span(m).end)).max();
-                        (&s.name, end, None, &s.type_params)
+                        (&s.name, end, None, &s.type_params[..], false)
                     }
                     Item::Enum(e) => {
                         let end = e.variants.iter().map(|v| v.span.end).chain(e.methods.iter().map(|m| fn_full_span(m).end)).max();
-                        (&e.name, end, Some(e.variants.iter().any(|v| !v.fields.is_empty())), &e.type_params)
+                        (&e.name, end, Some(e.variants.iter().any(|v| !v.fields.is_empty())), &e.type_params[..], false)
                     }
+                    Item::Interface(i) => (&i.name, Some(i.span.end), None, none, true),
                     _ => continue,
                 };
                 let name = &name_id.name;
-                let what = if enum_boxed.is_some() { "enum" } else { "struct" };
+                let what = if iface {
+                    "interface"
+                } else if enum_boxed.is_some() {
+                    "enum"
+                } else {
+                    "struct"
+                };
                 if RESERVED_TYPES.contains(&name.as_str()) {
                     self.err(Diagnostic::error(format!("`{name}` is a built-in type name"), name_id.span));
                     continue;
@@ -829,7 +865,7 @@ impl Checker {
                     self.err(
                         Diagnostic::error(format!("the type `{name}` is defined more than once"), name_id.span)
                             .with_label(prev_span, "first defined here")
-                            .with_note(format!("this one is {} {what}", if what == "enum" { "an" } else { "a" })),
+                            .with_note(format!("this one is {} {what}", if what == "struct" { "a" } else { "an" })),
                     );
                     continue;
                 }
@@ -847,8 +883,9 @@ impl Checker {
                 if !pids.is_empty() {
                     self.struct_instances.insert((id, args), id);
                 }
-                self.structs.push(TStruct { name: shown, fields: Vec::new(), variants: enum_boxed.map(|_| Vec::new()), generic: !pids.is_empty(), closure: None });
+                self.structs.push(TStruct { name: shown, fields: Vec::new(), variants: enum_boxed.map(|_| Vec::new()), generic: !pids.is_empty(), closure: None, vtable: Vec::new() });
                 self.def_types.push(match enum_boxed {
+                    _ if iface => Type::Iface(id),
                     Some(boxed) => Type::Enum(id, boxed),
                     None => Type::Struct(id),
                 });
@@ -868,6 +905,7 @@ impl Checker {
                     type_params: pnames,
                     type_args: Vec::new(),
                     instance: false,
+                    iface,
                 });
                 self.field_spans.push(Vec::new());
                 self.pending_struct_hovers.push((name_id.span, id));
@@ -877,6 +915,23 @@ impl Checker {
         // `from m import Type`: types first, since signatures need them.
         self.resolve_name_imports(&mut pending, false);
 
+        // Bounds of generic types' type parameters (`struct Zoo[T: Animal]`).
+        for &(ns, program) in units {
+            self.ns = ns;
+            for item in &program.items {
+                let (name, tps) = match item {
+                    Item::Struct(s) => (&s.name, &s.type_params),
+                    Item::Enum(e) => (&e.name, &e.type_params),
+                    _ => continue,
+                };
+                let Some(&sid) = self.struct_index.get(&(ns, name.name.clone())) else { continue };
+                if self.struct_spans[sid] == name.span {
+                    let pids = self.struct_params[sid].clone();
+                    self.resolve_bounds(&pids, tps);
+                }
+            }
+        }
+
         // Pass 2: struct fields, function + method signatures.
         let mut bodies: Vec<(&FnDecl, Option<StructId>, usize, FuncId)> = Vec::new();
         for &(ns, program) in units {
@@ -885,6 +940,12 @@ impl Checker {
                 match item {
                     Item::Import(_) => {}
                     Item::Const(c) => self.declare_const(c, ns),
+                    Item::Interface(i) => {
+                        let Some(&sid) = self.struct_index.get(&(ns, i.name.name.clone())) else { continue };
+                        if self.struct_spans[sid] == i.name.span {
+                            self.declare_interface(sid, i);
+                        }
+                    }
                     Item::Struct(s) => {
                         let Some(&sid) = self.struct_index.get(&(ns, s.name.name.clone())) else { continue };
                         if self.struct_spans[sid] != s.name.span {
@@ -922,6 +983,7 @@ impl Checker {
                         self.unused_type_params(sid);
                         let fields: Vec<&str> = seen.keys().copied().collect();
                         self.declare_methods(sid, &s.methods, &fields, ns, &mut bodies);
+                        self.declared_interfaces(sid, &s.implements);
                     }
                     Item::Enum(e) => {
                         let Some(&sid) = self.struct_index.get(&(ns, e.name.name.clone())) else { continue };
@@ -977,6 +1039,7 @@ impl Checker {
                         self.fields_ready[sid] = true;
                         self.unused_type_params(sid);
                         self.declare_methods(sid, &e.methods, &[], ns, &mut bodies);
+                        self.declared_interfaces(sid, &e.implements);
                     }
                     Item::Fn(f) => {
                         let name = &f.name.name;
@@ -1025,6 +1088,17 @@ impl Checker {
         // Instances of generic types used before the types' fields were known.
         while let Some(id) = self.pending_fields.pop() {
             self.fill_instance(id);
+        }
+
+        // Every method is known now: interfaces get their full lists of
+        // methods, and the bounds and `struct Circle(Shape):` promises met so far are checked.
+        self.finish_ifaces();
+        self.sigs_ready = true;
+        for b in std::mem::take(&mut self.pending_bounds) {
+            self.check_bound(b);
+        }
+        for (sid, list) in std::mem::take(&mut self.implements) {
+            self.check_implements(sid, &list);
         }
 
         // `from m import function`, and names that don't exist.
@@ -1611,6 +1685,7 @@ impl Checker {
         // Type parameters: the owner's (`struct Box[T]`), then the function's own.
         let outer: Vec<ParamId> = owner.map(|s| self.struct_params[s].clone()).unwrap_or_default();
         let own = self.declare_type_params(&f.type_params, &f.name.name, &outer);
+        self.resolve_bounds(&own, &f.type_params);
         let all: Vec<ParamId> = outer.iter().chain(&own).copied().collect();
         self.type_env = all.iter().map(|p| (self.type_params[*p].name.clone(), Type::Param(*p))).collect();
         let mut params = Vec::new();
@@ -1688,7 +1763,17 @@ impl Checker {
         }
         let instance = (!all.is_empty()).then(|| (id, all.iter().map(|p| Type::Param(*p)).collect()));
         self.funcs.push(FuncSig { name, symbol, params, ret, span: f.name.span, type_params: all, tparams: own, instance });
+        self.bound_needs(id);
         id
+    }
+
+    /// `struct Circle(Shape, Named):`: remember the interfaces, to check once every method is known.
+    fn declared_interfaces(&mut self, sid: StructId, list: &[TypeExpr]) {
+        if list.is_empty() {
+            return;
+        }
+        let types: Vec<(Type, Span)> = list.iter().map(|t| (self.resolve_type(t), t.span)).collect();
+        self.implements.push((sid, types));
     }
 
     fn resolve_type(&mut self, t: &TypeExpr) -> Type {
@@ -2670,10 +2755,14 @@ impl Checker {
             Type::Struct(id) => (*id, self.names_type(path, *id)),
             _ => {
                 let tn = self.tn(ty);
-                self.err(
-                    Diagnostic::error(format!("mismatched types: `{shown}` can't match {}", a_type(&tn)), p.span)
-                        .with_primary(format!("expected {} pattern", a_type(&tn))),
-                );
+                let mut d = Diagnostic::error(format!("mismatched types: `{shown}` can't match {}", a_type(&tn)), p.span)
+                    .with_primary(format!("expected {} pattern", a_type(&tn)));
+                if matches!(ty.non_null(), Type::Iface(_)) {
+                    d = d
+                        .with_note(format!("matching on which type is inside {} isn't supported yet", a_type(&tn)))
+                        .with_help(format!("call `{tn}`'s methods instead, or add a method to `{tn}` that answers the question"));
+                }
+                self.err(d);
                 cx.errors = true;
                 return TPat { kind: TPatKind::Wild, ty: ty.clone() };
             }
@@ -2888,10 +2977,13 @@ impl Checker {
             } else {
                 let expected = expected.map(Type::non_null).filter(|t| user_type(t).is_some_and(|e| self.struct_origin[e] == sid));
                 return match self.infer_args(&what, &tparams, &params, &ty, args.unwrap_or(&[]), explicit, expected, span) {
-                    Some((targs, bound)) => match self.struct_instance(sid, bound) {
-                        Some(i) => Self::mk(TExprKind::EnumNew(i, k, targs), self.def_types[i].clone(), span),
-                        None => Self::error_expr(span),
-                    },
+                    Some((targs, bound)) => {
+                        self.check_type_bounds(sid, &bound, span);
+                        match self.struct_instance(sid, bound) {
+                            Some(i) => Self::mk(TExprKind::EnumNew(i, k, targs), self.def_types[i].clone(), span),
+                            None => Self::error_expr(span),
+                        }
+                    }
                     None => Self::error_expr(span),
                 };
             }
@@ -3318,6 +3410,13 @@ impl Checker {
                 return Self::mk(TExprKind::Wrap(Box::new(e)), expected.clone(), span);
             }
         }
+        // A value of a type that fits an interface, used as one: boxed.
+        if let Type::Iface(i) = *expected.non_null()
+            && !matches!(e.ty, Type::Null | Type::Unit)
+            && *e.ty.non_null() != Type::Iface(i)
+        {
+            return self.box_as_iface(e, i, expected, annotation);
+        }
         self.expect_type(&e, expected, annotation);
         e
     }
@@ -3345,6 +3444,18 @@ impl Checker {
                     Some(n) => d.with_note(n),
                     None => d,
                 }
+            }
+            // `List[Circle]` where a `List[Shape]` is wanted.
+            (Type::List(want), Type::List(have)) | (Type::Map(_, want), Type::Map(_, have))
+                if matches!(want.non_null(), Type::Iface(_)) && !have.is_error() && {
+                    let (w, h) = ((**want).clone(), (**have).clone());
+                    self.can_coerce(&h, &w)
+                } =>
+            {
+                let (w, h) = (self.tn(want), self.tn(have));
+                let kind = if matches!(expected, Type::List(_)) { "list" } else { "map" };
+                d.with_note(format!("each `{h}` is {}, but a {kind} of `{h}`s isn't a {kind} of `{w}`s: it couldn't hold other kinds of `{w}`", a_type(&w)))
+                    .with_help(format!("make it a `{exp}` where it's created, e.g. `val {}: {exp} = [...]`", if kind == "list" { "xs" } else { "m" }))
             }
             (Type::Float, Type::Int) => d.with_help("Tarn never converts implicitly; use `.to_float()`, or write a float literal like `1.0`"),
             (Type::Int, Type::Float) => d.with_help("Tarn never converts implicitly; use `.to_int()` to truncate"),
@@ -3714,12 +3825,17 @@ impl Checker {
                             elem_ty = join_types(et, &t.ty);
                         }
                         Some(et) => {
-                            if !t.ty.assignable(et) {
+                            if !t.ty.assignable(et) && !(expected_elem.is_some() && matches!(et.non_null(), Type::Iface(_))) {
                                 let (a, b) = (self.tn(et), self.tn(&t.ty));
                                 let mut d = Diagnostic::error(format!("list elements must all have the same type: expected `{a}`, found `{b}`"), el.span)
                                     .with_primary(format!("this is `{b}`"));
                                 if expected_elem.is_none() {
                                     d = d.with_label(elems[0].span, format!("the element type was inferred as `{a}` from this"));
+                                    let (ea, eb) = (et.clone(), t.ty.clone());
+                                    if let Some(i) = self.common_iface(&ea, &eb) {
+                                        let iname = self.tn(&Type::Iface(i));
+                                        d = d.with_help(format!("both are {}: to keep them in one list, give it that type, like `val xs: List[{iname}] = [...]`", a_type(&iname)));
+                                    }
                                 }
                                 self.err(d);
                             }
@@ -3735,7 +3851,8 @@ impl Checker {
                     );
                     return Self::error_expr(span);
                 }
-                let out = out.into_iter().map(|t| if t.ty.assignable(&et) { self.coerce(t, &et, None) } else { t }).collect();
+                let iface = expected_elem.is_some() && matches!(et.non_null(), Type::Iface(_));
+                let out = out.into_iter().map(|t| if iface || t.ty.assignable(&et) { self.coerce(t, &et, None) } else { t }).collect();
                 Self::mk(TExprKind::ListLit(out), Type::List(Box::new(et)), span)
             }
         }
@@ -3761,11 +3878,24 @@ impl Checker {
             Type::Error => Self::error_expr(span),
             Type::Param(p) => {
                 let (tn, owner) = (self.tn(&t.ty), self.type_params[*p].owner.clone());
-                self.err(
-                    Diagnostic::error(format!("no field `{}` on type `{tn}`", field.name), field.span)
-                        .with_primary("unknown field")
-                        .with_note(format!("`{tn}` is a type parameter of `{owner}`: it stands for whichever type the caller picks, so it has no fields")),
-                );
+                let mut d = Diagnostic::error(format!("no field `{}` on type `{tn}`", field.name), field.span)
+                    .with_primary("unknown field")
+                    .with_note(format!("`{tn}` is a type parameter of `{owner}`: it stands for whichever type the caller picks, so it has no fields"));
+                if self.type_params[*p].bounds.is_empty() {
+                    d = d.with_help(format!("to use something every `{tn}` has, ask for a method: put `fn {}(self) -> ...` in an interface, and make it a bound: `[{tn}: ...]`", field.name));
+                }
+                self.err(d);
+                Self::error_expr(span)
+            }
+            Type::Iface(i) => {
+                let iname = self.structs[*i].name.clone();
+                let mut d = Diagnostic::error(format!("no field `{}` on interface `{iname}`", field.name), field.span)
+                    .with_primary("unknown field")
+                    .with_note(format!("a `{iname}` can be any type that fits it, so only its methods can be used"));
+                if self.iface_slot(*i, &field.name).is_some() {
+                    d = d.with_help(format!("`{}` is a method; call it with `.{}()`", field.name, field.name));
+                }
+                self.err(d);
                 Self::error_expr(span)
             }
             Type::Nullable(inner) if matches!(**inner, Type::Struct(_)) => {
@@ -3832,9 +3962,9 @@ impl Checker {
             self.add_facts(Self::nonnull_when_nonnull(&tl));
             return Self::mk(TExprKind::Elvis(Box::new(tl), Box::new(tr)), inner, span);
         }
-        let ty = if tr.ty.assignable(&inner) {
+        let ty = if self.can_coerce(&tr.ty, &inner) {
             inner
-        } else if tr.ty.assignable(&inner.clone().nullable()) {
+        } else if self.can_coerce(&tr.ty, &inner.clone().nullable()) {
             inner.nullable()
         } else {
             let (a, b) = (self.tn(&tl.ty), self.tn(&tr.ty));
@@ -3858,6 +3988,7 @@ impl Checker {
             Type::Nullable(inner) => self.formattable(inner),
             Type::List(e) => self.formattable(e),
             Type::Map(k, v) => self.formattable(k) && self.formattable(v),
+            Type::Iface(i) => self.iface_to_string(*i).is_some(),
             _ => self.user_to_string(t).is_some(),
         }
     }
@@ -3885,6 +4016,11 @@ impl Checker {
         }
         if let Some(fid) = self.user_to_string(&t.ty) {
             return Self::mk(TExprKind::Call(fid, vec![t]), Type::Str, span);
+        }
+        if let Type::Iface(i) = t.ty
+            && let Some(k) = self.iface_to_string(i)
+        {
+            return Self::mk(TExprKind::CallMethod(Box::new(t), k, Vec::new()), Type::Str, span);
         }
         match &t.ty {
             Type::Str => t,
@@ -3927,6 +4063,12 @@ impl Checker {
                     let kw = if self.structs[sid].variants.is_some() { "enum" } else { "struct" };
                     let short = found.rsplit('.').next().unwrap_or(&found).to_string();
                     d = d.with_help(format!("give `{kw} {short}` a method `fn to_string(self) -> String`"));
+                }
+                if let Type::Iface(i) = other
+                    && self.can_extend(*i)
+                {
+                    let short = short_name(&found).to_string();
+                    d = d.with_help(format!("add `fn to_string(self) -> String` to `interface {short}` (every type that fits it then needs one)"));
                 }
                 self.err(d);
                 Self::error_expr(span)
@@ -4032,6 +4174,7 @@ impl Checker {
                 (Type::Struct(_) | Type::List(_) | Type::Map(..), _) if op.is_comparison() => {
                     d.with_note("`==` is only defined for `Int`, `Float`, `Bool`, `String` and enums without data")
                 }
+                (Type::Iface(_), _) | (_, Type::Iface(_)) => d.with_note("an interface value only has the interface's methods: it can't be compared or used with operators"),
                 _ => d,
             };
             self.err(d);
@@ -4206,6 +4349,14 @@ impl Checker {
             }
             Self::error_expr(span)
         };
+        if matches!(self.def_types[sid], Type::Iface(_)) {
+            return refuse(
+                self,
+                Diagnostic::error(format!("`{name}` is an interface: it has no values of its own"), name_span)
+                    .with_primary("not a constructor")
+                    .with_help(format!("make a value of a type that fits it, and use it where a `{name}` is expected")),
+            );
+        }
         if let Some(first) = self.structs[sid].variants.as_ref().map(|vs| vs.first().map(|v| v.name.clone()).unwrap_or_default()) {
             return refuse(
                 self,
@@ -4243,6 +4394,9 @@ impl Checker {
         let me = self.def_types[sid].clone();
         match self.infer_args(&what, &tparams, &params, &me, args, explicit, expected, span) {
             Some((targs, bound)) => {
+                if !tparams.is_empty() {
+                    self.check_type_bounds(sid, &bound, span);
+                }
                 let inst = if tparams.is_empty() { Some(sid) } else { self.struct_instance(sid, bound) };
                 match inst {
                     Some(i) => Self::mk(TExprKind::StructNew(i, targs), self.def_types[i].clone(), span),
@@ -4429,7 +4583,7 @@ impl Checker {
                     || t.ty.is_nullable() && t.ty.non_null().is_primitive()
                     || matches!(t.ty, Type::Enum(_, false))
                     || matches!(t.ty.non_null(), Type::Param(_))
-                    || matches!(t.ty.non_null(), Type::List(_) | Type::Map(..)) && self.formattable(&t.ty)
+                    || matches!(t.ty.non_null(), Type::List(_) | Type::Map(..) | Type::Iface(_)) && self.formattable(&t.ty)
                     || self.user_to_string(t.ty.non_null()).is_some() =>
                 {
                     t = self.stringify(t, a.value.span)
@@ -4445,6 +4599,10 @@ impl Checker {
                                 let short = found.rsplit('.').next().unwrap_or(&found).trim_end_matches('?').to_string();
                                 d.with_help(format!("give `{kw} {short}` a method `fn to_string(self) -> String`, or print its fields"))
                             }
+                            None if matches!(t.ty.non_null(), Type::Iface(i) if self.can_extend(*i)) => d.with_help(format!(
+                                "add `fn to_string(self) -> String` to `interface {}` (every type that fits it then needs one)",
+                                short_name(found.trim_end_matches('?'))
+                            )),
                             None if matches!(t.ty, Type::Map(..)) => d.with_help("print each entry: `for k, v in m: print(f\"{k}: {v}\")`"),
                             None if matches!(t.ty, Type::List(_)) => d.with_help("print each element in a loop, or `xs.join(\", \")` a list of strings"),
                             None => d.with_help("print individual fields, or use an f-string"),
@@ -4506,13 +4664,25 @@ impl Checker {
                 Self::mk(TExprKind::Builtin(Builtin::ToStr, vec![recv]), Type::Str, span)
             }
             (Type::Param(p), _) => {
-                let (tn, owner) = (self.tn(&rty), self.type_params[*p].owner.clone());
-                self.err(
-                    Diagnostic::error(format!("no method `{m}` on type `{tn}`"), method.span)
-                        .with_primary("method not found")
-                        .with_note(format!("`{tn}` is a type parameter of `{owner}`: it stands for whichever type the caller picks, so the only method generic code can call on it is `to_string()`"))
-                        .with_help(format!("operators work too (`==`, `<`, `+`...): `{owner}` then needs a `{tn}` that supports them")),
-                );
+                let p = *p;
+                if let Some(call) = self.bound_call(recv, p, method, args, explicit, span) {
+                    return call;
+                }
+                let (tn, owner) = (self.tn(&rty), self.type_params[p].owner.clone());
+                let bounds: Vec<String> = self.type_params[p].bounds.iter().map(|(i, _)| a_type(&self.structs[*i].name)).collect();
+                let mut d = Diagnostic::error(format!("no method `{m}` on type `{tn}`"), method.span).with_primary("method not found");
+                if bounds.is_empty() {
+                    let iname: String = std::iter::once("Has".to_string())
+                        .chain(m.split('_').filter(|w| !w.is_empty()).map(|w| w[..1].to_uppercase() + &w[1..]))
+                        .collect();
+                    d = d
+                        .with_note(format!("`{tn}` is a type parameter of `{owner}`: it stands for whichever type the caller picks, so generic code can only call `to_string()` and the methods of `{tn}`'s bounds"))
+                        .with_help(format!("list the method in an interface (`interface {iname}:` with `fn {m}(self) -> ...`) and make it a bound: `[{tn}: {iname}]`"));
+                } else {
+                    let they = if bounds.len() == 1 { "it has" } else { "they have" };
+                    d = d.with_note(format!("`{tn}` can be any type that is {}, and {they} no method `{m}`", and_list(&bounds)));
+                }
+                self.err(d);
                 for a in args {
                     let _ = self.expr(&a.value, None);
                 }
@@ -4635,6 +4805,10 @@ impl Checker {
                     return Self::error_expr(span);
                 }
                 self.stringify(recv, span)
+            }
+            (Type::Iface(i), _) => {
+                let i = *i;
+                self.iface_call(recv, i, method, args, explicit, span)
             }
             (Type::Struct(sid) | Type::Enum(sid, _), _) => {
                 let sid = *sid;
@@ -4806,7 +4980,8 @@ fn expr_breaks(e: &TExpr) -> bool {
         TExprKind::ListFind { list, value, .. } => expr_breaks(list) || expr_breaks(value),
         TExprKind::ListFormat { list, .. } | TExprKind::MapFormat { map: list, .. } => expr_breaks(list),
         TExprKind::Closure { captures, .. } => any(captures),
-        TExprKind::CallValue(f, args) => expr_breaks(f) || any(args),
+        TExprKind::CallValue(f, args) | TExprKind::CallMethod(f, _, args) => expr_breaks(f) || any(args),
+        TExprKind::Boxed(_, x) => expr_breaks(x),
         TExprKind::Block(stmts, e) => contains_break(stmts) || expr_breaks(e),
     }
 }

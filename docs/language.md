@@ -16,6 +16,7 @@ Tarn reads like Python, checks like Kotlin and compiles to native code. This gui
 - [Enums and `match`](#enums-and-match)
 - [Operator functions](#operator-functions)
 - [Generics](#generics)
+- [Interfaces](#interfaces)
 - [Lists](#lists)
 - [Maps](#maps)
 - [Strings and f-strings](#strings-and-f-strings)
@@ -476,7 +477,7 @@ fn main():
 
 ### What a `T` can do
 
-There are no bounds to declare. The compiler works out what each type parameter must support from what the code does with it. `max` compares two `T`s with `>`, so `max` works for any type with `<=>`, and only those:
+Operators need no bound. The compiler works out what each type parameter must support from what the code does with it. `max` compares two `T`s with `>`, so `max` works for any type with `<=>`, and only those:
 
 | When generic code does | `T` must support | Which built-in types do |
 |---|---|---|
@@ -488,7 +489,7 @@ There are no bounds to declare. The compiler works out what each type parameter 
 | `hash(a)` | `hash` | `Int`, `Float`, `Bool`, `String`, enums without data |
 | `Map[T, V]` (a `T` as a map key) | `==` and `hash` | `Int`, `Bool`, `String`, enums without data |
 
-Your own types qualify by defining the matching [operator functions](#operator-functions), `fn to_string(self) -> String` or `fn hash(self) -> Int`; for arithmetic, it's the one that takes and returns the type itself (`fn +(self, other: Vec2) -> Vec2`). Generic code can also store a `T` in lists and fields, return it, compare it with `null`, and pass it to other generic code, which passes on what *that* code needs. What it can't do is read fields or call other methods on a `T`: it could be any type.
+Your own types qualify by defining the matching [operator functions](#operator-functions), `fn to_string(self) -> String` or `fn hash(self) -> Int`; for arithmetic, it's the one that takes and returns the type itself (`fn +(self, other: Vec2) -> Vec2`). Generic code can also store a `T` in lists and fields, return it, compare it with `null`, and pass it to other generic code, which passes on what *that* code needs. To call other methods on a `T`, give it a bound: an [interface](#interfaces) listing them (`fn total[T: Shape]`). A `T` never has fields: it could be any type.
 
 Using a type that falls short is an error at the call, pointing at the line of generic code that needs more:
 
@@ -517,6 +518,123 @@ Hovering a generic function in the editor shows what each of its type parameters
 ### What it costs
 
 Nothing at run time. Generic code is compiled separately for every set of types it's used with (*monomorphization*, as in Rust and C++): `max[Int]` and `max[String]` are two functions in the program, each exactly what you'd get by writing it out by hand, and a `Box[Int]` stores its `Int` directly, with no boxing and no type information at run time. The price is paid at compile time, in code size, for each type actually used.
+
+## Interfaces
+
+An interface lists methods. Any type that has them fits it, and nothing has to say so:
+
+```python
+interface Shape:
+    fn area(self) -> Float
+    fn name(self) -> String
+
+struct Circle:
+    r: Float
+
+    fn area(self) -> Float:
+        return 3.14159 * self.r * self.r
+
+    fn name(self) -> String:
+        return "circle"
+
+struct Square:
+    side: Float
+
+    fn area(self) -> Float:
+        return self.side * self.side
+
+    fn name(self) -> String:
+        return "square"
+```
+
+A type fits when it has every method of the interface, with the same parameters (names and types) and the same return type. `Circle` and `Square` both fit `Shape`. An interface is used in two ways.
+
+### As a bound: `[T: Shape]`
+
+A bound lets generic code call the interface's methods on a `T`:
+
+```python
+fn total[T: Shape](xs: List[T]) -> Float:
+    var sum = 0.0
+    for x in xs:
+        sum += x.area()
+    return sum
+
+print(total([Circle(1.0), Circle(2.0)]))      # 15.70795
+print(total([Square(3.0)]))                   # 9.0
+```
+
+Generic code is still compiled for each type it's used with, so `x.area()` is a direct call to `Circle.area`: a bound costs nothing at run time. A type parameter can have several bounds (`[T: Shape + Named]`), and generic types can have them too (`struct Gallery[T: Shape]`, whose methods can then call `area` on its items). Using a type that doesn't fit is an error at the call:
+
+```text
+Error: `total` needs `T` to be a `Shape`, but `Int` isn't
+    ╭─[ main.tr:11:11 ]
+ 11 │     print(total([1, 2]))
+    │           ──────┬──────
+    │                 ╰──────── here `T` is `Int`
+  4 │ fn total[T: Shape](xs: List[T]) -> Float:
+    │             ──┬──
+    │               ╰──── `T` must be a `Shape` here
+    │ Note: `Int` has no method `area`
+```
+
+Generic code that passes a `T` on to `total` needs it to be a `Shape` too, as with [operators](#what-a-t-can-do); it doesn't have to declare the bound itself.
+
+### As a type: `List[Shape]`
+
+An interface is also a type. A `Shape` value can be a circle, a square or anything else that fits, so one list can hold them all:
+
+```python
+fn describe(s: Shape) -> String:
+    return f"{s.name()}: {s.area()}"
+
+fn main():
+    val shapes: List[Shape] = [Circle(1.0), Square(2.0)]
+    shapes.push(Square(3.0))
+    for s in shapes:
+        print(describe(s))     # circle: 3.14159, then square: 4.0, then square: 9.0
+    print(total(shapes))       # 16.14159: here `T` is `Shape`
+```
+
+A value becomes a `Shape` wherever a `Shape` is expected: a typed `val`, a parameter, a field, a return value, a list or map of `Shape`s. `Shape?` works like any nullable type. Only the interface's methods can be used on a `Shape`: no fields, no operators, no `==`. To print one, the interface needs `fn to_string(self) -> String`.
+
+A `List[Circle]` isn't a `List[Shape]`, since it couldn't hold squares: make the list a `List[Shape]` where it's created.
+
+### Saying a type fits: `struct Circle(Shape):`
+
+Nothing has to say that a type fits an interface, but it can, after its name: `struct Circle(Shape):`, `enum Tree[T](Container):`. The compiler then checks it there, so a mistake is reported at the type instead of where it's first used as a `Shape`:
+
+```text
+Error: `Sq` says it's a `Shape`, but `Sq` has no method `area`
+```
+
+### Including other interfaces
+
+`interface Solid(Shape):` has `Shape`'s methods and its own:
+
+```python
+interface Solid(Shape):
+    fn volume(self) -> Float
+```
+
+A `Solid` value can be used where a `Shape` is expected.
+
+### Built-in types
+
+Built-in types fit interfaces whose methods take no parameters, when they have those methods. `Int`, `Float`, `Bool`, `String` and enums without data all have `to_string`:
+
+```python
+interface Named:
+    fn to_string(self) -> String
+
+val things: List[Named] = [42, "hello", true, Color.Green, Point(1, 2)]
+for t in things:
+    print(t)                   # 42, hello, true, Green, (1, 2)
+```
+
+### What it costs
+
+A bound costs nothing. An interface value is a small box holding the value and a pointer to the table of its type's methods: making one is an allocation, and a call goes through the table (a few nanoseconds, like a virtual call in Java or Go). In a hot loop over values of one type, a bound is faster.
 
 ## Lists
 
@@ -856,7 +974,8 @@ Panics cover:
 - **Operators look at the left operand.** `2.0 * v` can't use `Vec2`'s `fn *`; write `v * 2.0`.
 - **`==` from `fn ==` needs non-null values.** Check for `null` first (a smart cast then does the rest).
 - **`match` is a statement.** It doesn't produce a value; assign or `return` inside its cases.
-- **No interfaces yet.** Generic code can use operators, `to_string` and `hash` on a `T`, but no fields or other methods.
+- **Interfaces can't be generic** (`interface Source[T]`), their methods have no default bodies, and there's no `match` on which type is inside an interface value.
+- **Built-in types only fit interface methods without parameters** (`to_string`, `len`...).
 - **No sets or tuples yet.** Use a `Map[K, Bool]` for a set, and a struct for a pair.
 - **`sort()` only sorts lists of `Int`, `Float` and `String`.** For anything else, sort by a key: `people.sort_by(fn(p) -> p.name)`.
 - **Lambdas can't capture `var`s,** and a lambda with a block body can't be written inside parentheses. See [lambdas](#lambdas-and-function-values).

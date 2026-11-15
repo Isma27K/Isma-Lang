@@ -1,0 +1,19 @@
+# expect-error: no field `r` on interface `Shape`
+interface Shape:
+    fn area(self) -> Float
+
+interface Scalable(Shape):
+    fn scale(self, by: Float)
+
+struct Circle:
+    r: Float
+
+    fn area(self) -> Float:
+        return 3.0 * self.r * self.r
+
+struct Point:
+    x: Int
+
+fn main():
+    val s: Shape = Circle(1.0)
+    print(s.r)

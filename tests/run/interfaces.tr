@@ -1,0 +1,181 @@
+# Interfaces: `interface Shape:` lists methods; any type with them fits.
+# As a bound (`fn largest[T: Shape]`) generic code calls them directly; as a
+# type (`List[Shape]`) one list holds several types, called through method tables.
+interface Shape:
+    fn area(self) -> Float
+    fn name(self) -> String
+
+interface Named:
+    fn to_string(self) -> String
+
+# Includes `Shape`'s methods.
+interface Scalable(Shape):
+    fn scale(self, by: Float)
+
+struct Circle:
+    var r: Float
+
+    fn area(self) -> Float:
+        return 3.0 * self.r * self.r
+
+    fn name(self) -> String:
+        return "circle"
+
+    fn scale(self, by: Float):
+        self.r *= by
+
+    fn to_string(self) -> String:
+        return f"Circle({self.r})"
+
+enum Tri(Shape):
+    Right(a: Float, b: Float)
+    Flat
+
+    fn area(self) -> Float:
+        match self:
+            case Right(a, b):
+                return a * b / 2.0
+            case Flat:
+                return 0.0
+
+    fn name(self) -> String:
+        return "triangle"
+
+enum Color:
+    Red
+    Green
+
+struct Box[T]:
+    item: T
+
+    fn get(self) -> T:
+        return self.item
+
+interface IntSource:
+    fn get(self) -> Int
+
+# A generic type whose type parameter must fit an interface.
+struct Gallery[T: Shape]:
+    items: List[T]
+
+    fn total(self) -> Float:
+        var sum = 0.0
+        for s in self.items:
+            sum += s.area()
+        return sum
+
+    fn names(self) -> String:
+        return self.items.map(fn(s) -> s.name()).join(", ")
+
+fn largest[T: Shape](xs: List[T]) -> T?:
+    var best: T? = null
+    for x in xs:
+        val b = best
+        if b == null or x.area() > b.area():
+            best = x
+    return best
+
+# `T` needs no bound to be used as a `Shape`: that's inferred.
+fn as_shape[T](x: T) -> Shape:
+    return x
+
+fn grow_all(xs: List[Scalable], by: Float):
+    for x in xs:
+        x.scale(by=by)
+
+fn show_all(xs: List[Named]) -> String:
+    val parts: List[String] = []
+    for x in xs:
+        parts.push(x.to_string())
+    return parts.join(" | ")
+
+struct Node:
+    label: String
+    var children: List[Shape]
+
+    fn area(self) -> Float:
+        var sum = 1.0
+        for c in self.children:
+            sum += c.area()
+        return sum
+
+    fn name(self) -> String:
+        return self.label
+
+fn if_even(i: Int) -> Shape?:
+    if i % 2 == 0:
+        return Circle(1.0)
+    return null
+
+fn circle_if(yes: Bool) -> Circle?:
+    if yes:
+        return Circle(2.0)
+    return null
+
+# Generic code that boxes a concrete type: the box is shared with `main`.
+fn with_unit[T](_x: T) -> List[Shape]:
+    val out: List[Shape] = [Circle(1.0)]
+    return out
+
+fn main():
+    # Bounds: one copy per type, direct calls.
+    print(largest([Circle(1.0), Circle(3.0), Circle(2.0)])?.r ?: 0.0)
+    val g = Gallery([Tri.Right(3.0, 4.0), Tri.Flat])
+    print(g.total())
+    print(g.names())
+
+    # Interface values: one list, several types.
+    val shapes: List[Shape] = [Circle(1.0), Tri.Right(2.0, 2.0), as_shape(Circle(2.0))]
+    for s in shapes:
+        print(f"{s.name()}: {s.area()}")
+    print(largest(shapes)?.name() ?: "none")
+    print(shapes.map(fn(s) -> s.area()))
+    val by_area = shapes.filter(fn(s) -> s.area() > 2.5)
+    print(by_area.len())
+
+    # One interface's value used as another's.
+    val c = Circle(1.0)
+    val sc: List[Scalable] = [c, Circle(2.0)]
+    grow_all(sc, 10.0)
+    print(c.r)
+    val again: Shape = sc[1]
+    print(again.area())
+
+    # Built-in types, enums without data and structs with `to_string`.
+    val things: List[Named] = [1, "two", 3.5, true, Color.Green, Circle(4.0)]
+    print(show_all(things))
+    print(things[5])
+    print(f"{things[0]} and {things[1]}")
+    print(things)
+
+    # Generic types fit when their methods do.
+    val src: IntSource = Box(42)
+    print(src.get())
+
+    # Nullable interface values.
+    for i in 0..2:
+        val maybe: Shape? = if_even(i)
+        print(maybe?.area() ?: -1.0)
+        val circle_or_null: Circle? = circle_if(i == 1)
+        val boxed: Shape? = circle_or_null
+        print(boxed?.name())
+        val fallback: Shape = maybe ?: Tri.Flat
+        print(fallback.name())
+
+    # Maps and fields holding interface values; a cycle through one.
+    val by_name: Map[String, Shape] = {"c": Circle(1.0), "t": Tri.Flat}
+    print(by_name["c"].area())
+    val root = Node("root", [])
+    val child = Node("child", [Circle(1.0)])
+    root.children.push(child)
+    child.children.push(root)
+    print(root.children.len())
+    print(child.children[0].area())
+
+    print(with_unit(5)[0].area())
+
+    # Lambdas returning and capturing interface values.
+    val make: fn(Float) -> Shape = fn(r) -> Circle(r)
+    val s3 = make(1.0)
+    val read = fn() -> s3.area()
+    print(read())

@@ -22,6 +22,28 @@ pub enum Item {
     Import(Import),
     /// `val pi = 3.14159`: a constant, worked out when compiling.
     Const(ConstDecl),
+    /// `interface Shape:` and the methods a type needs to be a `Shape`.
+    Interface(InterfaceDecl),
+}
+
+/// `interface Shape:` with method signatures (no bodies), or
+/// `interface NamedShape(Shape, Named):`, which adds the methods of others.
+#[derive(Debug)]
+pub struct InterfaceDecl {
+    pub name: Ident,
+    /// `Shape, Named` in `interface NamedShape(Shape, Named):`.
+    pub extends: Vec<TypeExpr>,
+    /// Each one's `body` is empty.
+    pub methods: Vec<FnDecl>,
+    /// From `interface` to the end of the last method.
+    pub span: Span,
+}
+
+/// `T` in `fn max[T]`, or `T: Shape + Named` (with bounds: interfaces `T` must be).
+#[derive(Debug)]
+pub struct TypeParam {
+    pub name: Ident,
+    pub bounds: Vec<TypeExpr>,
 }
 
 #[derive(Debug)]
@@ -83,7 +105,7 @@ impl ImportName {
 pub struct FnDecl {
     pub name: Ident,
     /// `[T, U]` in `fn pair[T, U](a: T, b: U)`.
-    pub type_params: Vec<Ident>,
+    pub type_params: Vec<TypeParam>,
     /// Span of `self` if the first parameter is `self`.
     pub self_param: Option<Span>,
     pub params: Vec<Param>,
@@ -103,7 +125,9 @@ pub struct Param {
 pub struct StructDecl {
     pub name: Ident,
     /// `[T]` in `struct Box[T]:`.
-    pub type_params: Vec<Ident>,
+    pub type_params: Vec<TypeParam>,
+    /// `Shape` in `struct Circle(Shape):`: interfaces it promises to fit (checked there).
+    pub implements: Vec<TypeExpr>,
     pub fields: Vec<FieldDecl>,
     pub methods: Vec<FnDecl>,
 }
@@ -113,7 +137,9 @@ pub struct StructDecl {
 pub struct EnumDecl {
     pub name: Ident,
     /// `[T]` in `enum Tree[T]:`.
-    pub type_params: Vec<Ident>,
+    pub type_params: Vec<TypeParam>,
+    /// `Container` in `enum Tree[T](Container):`.
+    pub implements: Vec<TypeExpr>,
     pub variants: Vec<VariantDecl>,
     pub methods: Vec<FnDecl>,
 }

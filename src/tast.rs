@@ -34,7 +34,15 @@ pub struct TStruct {
     pub generic: bool,
     /// The values one lambda captured (its fields, all immutable), and the
     /// lambda's function type. Its closures are values of that type.
+    ///
+    /// Or a *box*: one value (its only field) of a type that fits an
+    /// interface, and the interface type (`Type::Iface`). Boxes are the
+    /// values of that interface type, laid out like closures, with the
+    /// method table where a closure has its code.
     pub closure: Option<Type>,
+    /// A box's method table: for each method of its interface, in order, the
+    /// closure code that calls it on the boxed value. Empty otherwise.
+    pub vtable: Vec<FuncId>,
 }
 
 #[derive(Debug, Clone)]
@@ -397,6 +405,12 @@ pub enum TExprKind {
     Closure { func: FuncId, sid: Option<StructId>, captures: Vec<TExpr> },
     /// Calling a function value: `f(x)`.
     CallValue(Box<TExpr>, Vec<TExpr>),
+    /// A value used as an interface value: put in a new box (struct `.0`,
+    /// see `TStruct::closure`) with the method table of its type.
+    Boxed(StructId, Box<TExpr>),
+    /// `s.area()` on an interface value: the method in slot `.1` of its
+    /// table (the interface's `.1`-th method), with the arguments.
+    CallMethod(Box<TExpr>, usize, Vec<TExpr>),
     /// Run the statements, then evaluate the expression (the code that the
     /// list methods taking functions, like `map` and `filter`, become).
     Block(Vec<TStmt>, Box<TExpr>),

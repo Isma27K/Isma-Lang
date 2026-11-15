@@ -1,0 +1,58 @@
+# Interfaces from another file: `module.Shape` as a type and in `struct X(module.Shape):`,
+# `from ... import` of one, generic code from the module with a bound, and
+# an interface with no methods, which every type fits.
+import mylib.figures as geo
+from mylib.figures import Shape, Rect
+
+interface Anything:
+    pass
+
+interface Grows:
+    fn grow(self, by: Float) -> Grows
+    fn size(self) -> Float
+
+struct Disc(geo.Shape):
+    r: Float
+
+    fn area(self) -> Float:
+        return 3.0 * self.r * self.r
+
+    fn name(self) -> String:
+        return "disc"
+
+struct Blob:
+    size_now: Float
+
+    fn grow(self, by: Float) -> Grows:
+        return Blob(self.size_now * by)
+
+    fn size(self) -> Float:
+        return self.size_now
+
+struct Holder:
+    var current: Shape
+
+# Passes `T` on to `geo.total`, which needs a `Shape`: so does this.
+fn twice[T](xs: List[T]) -> Float:
+    return 2.0 * geo.total(xs)
+
+fn main():
+    val shapes: List[Shape] = [Rect(2.0, 3.0), Disc(1.0), Rect(1.0, 1.0)]
+    print(geo.total(shapes))
+    print(geo.biggest(shapes)?.name() ?: "none")
+    print(twice([Disc(1.0), Disc(2.0)]))
+    shapes.sort_by(fn(s) -> s.area())
+    print(shapes.map(fn(s) -> s.name()))
+
+    val stuff: List[Anything] = [1, "x", Disc(1.0), [1, 2]]
+    print(stuff.len())
+
+    var g: Grows = Blob(1.0)
+    for _ in 0..3:
+        g = g.grow(by=2.0)
+    print(g.size())
+
+    val h = Holder(Disc(1.0))
+    for i in 0..3:
+        h.current = Rect(i.to_float(), 1.0)
+    print(h.current.area())

@@ -1,0 +1,21 @@
+# expect-error: `Sq` says it's a `Shape`, but `Sq` has no method `area`
+interface Shape:
+    fn area(self) -> Float
+
+interface Scalable(Shape):
+    fn scale(self, by: Float)
+
+struct Circle:
+    r: Float
+
+    fn area(self) -> Float:
+        return 3.0 * self.r * self.r
+
+struct Point:
+    x: Int
+
+struct Sq(Shape):
+    side: Float
+
+fn main():
+    print(Sq(1.0).side)

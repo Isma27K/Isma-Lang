@@ -1,4 +1,4 @@
-# expect-error: expected `fn`, `struct`, `enum` or `val`
+# expect-error: expected `fn`, `struct`, `enum`, `interface` or `val`
 print("hi")
 fn main():
     pass

@@ -187,12 +187,13 @@ fn rvalue_roles(f: &Func, rv: &Rvalue, sigs: &[Vec<bool>], r: &mut Roles) {
             add(&args[0], true, r);
             add(&args[1], false, r);
         }
-        // A closure keeps its captured values.
+        // A closure keeps its captured values, and a box its value.
         Rvalue::New(_, args) | Rvalue::Reuse(_, _, args) | Rvalue::ListNew(_, args) | Rvalue::Closure(_, _, args) => {
             for a in args {
                 add(a, true, r);
             }
         }
+        Rvalue::Boxed(_, o) => add(o, true, r),
         Rvalue::Field(o, ..) | Rvalue::VariantField(o, ..) | Rvalue::Tag(o) => add(&Operand::Var(*o), false, r),
         Rvalue::Index(l, i, _) => {
             add(&Operand::Var(*l), false, r);
@@ -389,8 +390,8 @@ fn direct_writes(f: &Func, s: &Stmt, calls: &mut Vec<FuncId>) -> Vec<Class> {
     };
     match rv {
         Some(Rvalue::Call(fid, ..)) => calls.push(*fid),
-        // Could be any function value: see `ANY_CLOSURE`.
-        Some(Rvalue::CallIndirect(..)) => calls.push(ANY_CLOSURE),
+        // Could be any function value (or method of any interface value): see `ANY_CLOSURE`.
+        Some(Rvalue::CallIndirect(..) | Rvalue::CallMethod(..)) => calls.push(ANY_CLOSURE),
         // Taking an element out, or releasing them all.
         Some(Rvalue::Builtin(Builtin::ListPop | Builtin::ListRemoveAt | Builtin::ListClear, args, _)) => out.push(Class::Elem(elem_of(&f.operand_ty(&args[0])))),
         _ => {}

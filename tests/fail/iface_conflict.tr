@@ -1,0 +1,24 @@
+# expect-error: `Both` gets two different methods called `area`
+interface Shape:
+    fn area(self) -> Float
+
+interface Scalable(Shape):
+    fn scale(self, by: Float)
+
+struct Circle:
+    r: Float
+
+    fn area(self) -> Float:
+        return 3.0 * self.r * self.r
+
+struct Point:
+    x: Int
+
+interface Named:
+    fn area(self) -> Int
+
+interface Both(Shape, Named):
+    pass
+
+fn main():
+    pass

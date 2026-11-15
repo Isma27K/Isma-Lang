@@ -20,7 +20,7 @@ use super::*;
 
 /// The per-function state of the checker, set aside while a lambda's body is checked.
 pub(super) struct FnState {
-    locals: Vec<TLocal>,
+    pub locals: Vec<TLocal>,
     local_meta: Vec<LocalMeta>,
     scopes: Vec<HashMap<String, LocalBinding>>,
     nonnull: Vec<NullPath>,
@@ -67,7 +67,7 @@ impl Checker {
 
     // ---------- state ----------
 
-    fn swap_state(&mut self, s: &mut FnState) {
+    pub(super) fn swap_state(&mut self, s: &mut FnState) {
         std::mem::swap(&mut self.locals, &mut s.locals);
         std::mem::swap(&mut self.local_meta, &mut s.local_meta);
         std::mem::swap(&mut self.scopes, &mut s.scopes);
@@ -79,10 +79,10 @@ impl Checker {
 
     /// A struct holding one lambda's captured values (fields are added as
     /// captures are found). Never seen by users: the editor skips it.
-    fn closure_struct(&mut self, span: Span, generic: bool) -> StructId {
+    pub(super) fn closure_struct(&mut self, span: Span, generic: bool) -> StructId {
         let id = self.structs.len();
         let name = format!("<lambda {id}>");
-        self.structs.push(TStruct { name: name.clone(), fields: Vec::new(), variants: None, generic, closure: None });
+        self.structs.push(TStruct { name: name.clone(), fields: Vec::new(), variants: None, generic, closure: None, vtable: Vec::new() });
         self.def_types.push(Type::Struct(id));
         self.struct_spans.push(span);
         self.struct_ns.push(self.ns);
@@ -104,13 +104,14 @@ impl Checker {
             type_params: Vec::new(),
             type_args: Vec::new(),
             instance: true,
+            iface: false,
         });
         id
     }
 
     /// Register closure code `tf` (a lambda's body or a function wrapper) as
     /// function `fid`. Generic code as written only keeps a placeholder.
-    fn add_closure_code(&mut self, tf: TFunc, span: Span, ty: &Type) -> FuncId {
+    pub(super) fn add_closure_code(&mut self, tf: TFunc, span: Span, ty: &Type) -> FuncId {
         let fid = self.funcs.len();
         let params = tf.params.iter().map(|&p| (tf.locals[p].name.clone(), tf.locals[p].ty.clone())).collect();
         self.funcs.push(FuncSig {

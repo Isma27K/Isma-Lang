@@ -1,0 +1,19 @@
+# expect-error: matching on which type is inside a `Shape` isn't supported yet
+interface Shape:
+    fn area(self) -> Float
+
+struct Circle:
+    r: Float
+
+    fn area(self) -> Float:
+        return self.r
+
+fn kind(s: Shape) -> Int:
+    match s:
+        case Circle(r):
+            return 1
+        case _:
+            return 0
+
+fn main():
+    print(kind(Circle(1.0)))

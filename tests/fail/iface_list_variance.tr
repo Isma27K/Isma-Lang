@@ -1,0 +1,25 @@
+# expect-error: a list of `Circle`s isn't a list of `Shape`s
+interface Shape:
+    fn area(self) -> Float
+
+interface Scalable(Shape):
+    fn scale(self, by: Float)
+
+struct Circle:
+    r: Float
+
+    fn area(self) -> Float:
+        return 3.0 * self.r * self.r
+
+struct Point:
+    x: Int
+
+fn total(xs: List[Shape]) -> Float:
+    var sum = 0.0
+    for x in xs:
+        sum += x.area()
+    return sum
+
+fn main():
+    val circles = [Circle(1.0), Circle(2.0)]
+    print(total(circles))

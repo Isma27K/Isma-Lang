@@ -1,0 +1,21 @@
+# expect-error: `T` can be any type that is a `Shape`, and it has no method `perimeter`
+interface Shape:
+    fn area(self) -> Float
+
+interface Scalable(Shape):
+    fn scale(self, by: Float)
+
+struct Circle:
+    r: Float
+
+    fn area(self) -> Float:
+        return 3.0 * self.r * self.r
+
+struct Point:
+    x: Int
+
+fn f[T: Shape](x: T) -> Float:
+    return x.perimeter()
+
+fn main():
+    print(f(Circle(1.0)))

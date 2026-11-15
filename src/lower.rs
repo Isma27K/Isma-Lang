@@ -936,6 +936,15 @@ impl<'a> Lower<'a> {
                 let a = self.operands(args);
                 Rvalue::CallIndirect(fo, a, e.span)
             }
+            TExprKind::Boxed(sid, x) => {
+                let o = self.operand(x);
+                Rvalue::Boxed(*sid, o)
+            }
+            TExprKind::CallMethod(recv, slot, args) => {
+                let r = self.operand(recv);
+                let a = self.operands(args);
+                Rvalue::CallMethod(r, *slot, a, e.ty.clone(), e.span)
+            }
             TExprKind::Block(stmts, value) => {
                 self.stmts(stmts);
                 self.rvalue(value)

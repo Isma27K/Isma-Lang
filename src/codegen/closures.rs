@@ -12,6 +12,11 @@
 //! dispatchers that read the object's own type info. Whether a function type
 //! can be part of a cycle is decided for the type (see `cycles.rs`), so its
 //! count is kept like other cyclic values' when it can.
+//!
+//! Interface values are boxes laid out the same way, `{ rc, ti, table,
+//! value }`, with a method table (a constant array of closure code, one per
+//! method of the interface) where a closure has its code, and they're
+//! released and traced through the same dispatchers.
 
 use super::*;
 
@@ -67,6 +72,79 @@ impl<'a> Codegen<'a> {
             self.emit(format!("store {} {v}, ptr {fp}{md}", llty(ty)));
         }
         p
+    }
+
+    /// A new interface value: `o` in box `sid`, with the method table of its type.
+    pub(super) fn box_value(&mut self, sid: StructId, o: &Operand) -> String {
+        self.closure_rt = true;
+        if !self.closure_classes.contains(&sid) {
+            self.closure_classes.push(sid);
+        }
+        let table = self.method_table(sid);
+        let (v, ty) = (self.operand(o), self.f.operand_ty(o));
+        let lt = format!("%struct.{}", self.type_names[sid]);
+        let szp = self.fresh();
+        self.emit(format!("{szp} = getelementptr {lt}, ptr null, i32 1"));
+        let sz = self.fresh();
+        self.emit(format!("{sz} = ptrtoint ptr {szp} to i64"));
+        let p = self.fresh();
+        self.emit(format!("{p} = call ptr @tarn_alloc(i64 {sz})"));
+        let ity = self.prog.structs[sid].closure.clone().expect("box struct");
+        let one = if self.is_cyclic(&ity) { 8 } else { 1 };
+        let md = self.tbaa("rc");
+        self.emit(format!("store i64 {one}, ptr {p}{md}"));
+        let tip = self.fresh();
+        self.emit(format!("{tip} = getelementptr inbounds {lt}, ptr {p}, i32 0, i32 1"));
+        let md = self.tbaa("closure.ti");
+        self.emit(format!("store ptr @tarn.ti.cl{sid}, ptr {tip}{md}"));
+        let tp = self.fresh();
+        self.emit(format!("{tp} = getelementptr inbounds {lt}, ptr {p}, i32 0, i32 2"));
+        let md = self.tbaa("box.table");
+        self.emit(format!("store ptr {table}, ptr {tp}{md}"));
+        let vp = self.fresh();
+        self.emit(format!("{vp} = getelementptr inbounds {lt}, ptr {p}, i32 0, i32 3"));
+        let md = self.field_tbaa(sid, 0);
+        self.emit(format!("store {} {v}, ptr {vp}{md}", llty(&ty)));
+        p
+    }
+
+    /// The method table of box `sid` (a constant, emitted once).
+    fn method_table(&mut self, sid: StructId) -> String {
+        if !self.vtables.contains(&sid) {
+            self.vtables.push(sid);
+            let entries: Vec<String> = self.prog.structs[sid].vtable.iter().map(|f| format!("ptr @{}", self.prog.funcs[*f].symbol)).collect();
+            let init = if entries.is_empty() { "zeroinitializer".to_string() } else { format!("[{}]", entries.join(", ")) };
+            let _ = writeln!(self.globals, "@tarn.vt.{sid} = internal constant [{} x ptr] {init}", entries.len());
+        }
+        format!("@tarn.vt.{sid}")
+    }
+
+    /// Call the method in slot `slot` of interface value `recv`'s method table.
+    pub(super) fn call_method(&mut self, recv: &Operand, slot: usize, args: &[Operand], ret: &Type) -> String {
+        let b = self.operand(recv);
+        let mut vals = vec![format!("ptr {b}")];
+        for a in args {
+            let ty = llty(&self.f.operand_ty(a));
+            let v = self.operand(a);
+            vals.push(format!("{ty} {v}"));
+        }
+        let tp = self.fresh();
+        self.emit(format!("{tp} = getelementptr inbounds i8, ptr {b}, i64 16"));
+        let table = self.fresh();
+        let md = self.tbaa("box.table");
+        self.emit(format!("{table} = load ptr, ptr {tp}{md}"));
+        let fp = self.fresh();
+        self.emit(format!("{fp} = getelementptr inbounds ptr, ptr {table}, i64 {slot}"));
+        let code = self.fresh();
+        self.emit(format!("{code} = load ptr, ptr {fp}"));
+        if *ret == Type::Unit {
+            self.emit(format!("call void {code}({})", vals.join(", ")));
+            String::new()
+        } else {
+            let r = self.fresh();
+            self.emit(format!("{r} = call {} {code}({})", llty(ret), vals.join(", ")));
+            r
+        }
     }
 
     /// Call the function value `f` with `args`.

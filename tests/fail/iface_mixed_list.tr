@@ -1,0 +1,24 @@
+# expect-error: both are a `Shape`: to keep them in one list
+interface Shape:
+    fn area(self) -> Float
+
+interface Scalable(Shape):
+    fn scale(self, by: Float)
+
+struct Circle:
+    r: Float
+
+    fn area(self) -> Float:
+        return 3.0 * self.r * self.r
+
+struct Point:
+    x: Int
+
+struct Sq:
+    side: Float
+    fn area(self) -> Float:
+        return self.side * self.side
+
+fn main():
+    val xs = [Circle(1.0), Sq(2.0)]
+    print(xs.len())

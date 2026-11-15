@@ -1,0 +1,29 @@
+# Interfaces for the module tests: a `Shape`, a type that says it fits it, and code using both.
+
+interface Shape:
+    fn area(self) -> Float
+    fn name(self) -> String
+
+struct Rect(Shape):
+    w: Float
+    h: Float
+
+    fn area(self) -> Float:
+        return self.w * self.h
+
+    fn name(self) -> String:
+        return "rect"
+
+fn total[T: Shape](xs: List[T]) -> Float:
+    var sum = 0.0
+    for x in xs:
+        sum += x.area()
+    return sum
+
+fn biggest(xs: List[Shape]) -> Shape?:
+    var best: Shape? = null
+    for x in xs:
+        val b = best
+        if b == null or x.area() > b.area():
+            best = x
+    return best

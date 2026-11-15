@@ -1,0 +1,10 @@
+# expect-error: `name` is a field of `Node`, not a method (a type can't have both
+interface Named:
+    fn name(self) -> String
+
+struct Node:
+    name: String
+
+fn main():
+    val n: Named = Node("a")
+    print(n.name())

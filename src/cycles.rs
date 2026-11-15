@@ -18,7 +18,9 @@
 //! type's children are the closure structs of every lambda of that type (in
 //! the whole program), and those hold the captured values. Captures never
 //! change, so these edges are immutable: `n.on_change = fn() -> n.value`
-//! closes a cycle only because `on_change` is a `var` field.
+//! closes a cycle only because `on_change` is a `var` field. Likewise, an
+//! interface type's children are its boxes (one per type used as it),
+//! which each hold one value.
 
 use crate::mir::is_ref;
 use crate::tast::TStruct;
@@ -36,7 +38,9 @@ fn children(t: &Type, structs: &[TStruct]) -> Vec<(Type, bool)> {
         Type::List(e) if refs(e) => vec![(e.non_null().clone(), true)],
         // Entries are added to a map that already exists, like list elements.
         Type::Map(k, v) => [k, v].into_iter().filter(|t| refs(t)).map(|t| (t.non_null().clone(), true)).collect(),
-        Type::Func(..) => (0..structs.len()).filter(|&s| !structs[s].generic && structs[s].closure.as_ref() == Some(t)).map(|s| (Type::Struct(s), false)).collect(),
+        Type::Func(..) | Type::Iface(_) => {
+            (0..structs.len()).filter(|&s| !structs[s].generic && structs[s].closure.as_ref() == Some(t)).map(|s| (Type::Struct(s), false)).collect()
+        }
         _ => Vec::new(),
     }
 }
@@ -91,6 +95,7 @@ mod tests {
             variants: None,
             generic: false,
             closure: None,
+            vtable: Vec::new(),
         }
     }
 
@@ -133,8 +138,8 @@ mod tests {
         let expr = Type::Enum(1, true);
         let structs = vec![
             fixed("Cons", &[Type::Int, Type::Struct(0).nullable()]), // a `val next`: no cycle possible
-            TStruct { name: "Expr".into(), fields: vec![], variants: Some(vec![variant("Num", &[Type::Int]), variant("Add", &[expr.clone(), expr.clone()])]), generic: false, closure: None },
-            TStruct { name: "Json".into(), fields: vec![], variants: Some(vec![variant("Arr", &[Type::List(Box::new(Type::Enum(2, true)))])]), generic: false, closure: None },
+            TStruct { name: "Expr".into(), fields: vec![], variants: Some(vec![variant("Num", &[Type::Int]), variant("Add", &[expr.clone(), expr.clone()])]), generic: false, closure: None, vtable: Vec::new() },
+            TStruct { name: "Json".into(), fields: vec![], variants: Some(vec![variant("Arr", &[Type::List(Box::new(Type::Enum(2, true)))])]), generic: false, closure: None, vtable: Vec::new() },
         ];
         assert_eq!(cyclic_structs(&structs), vec![false, false, true]); // `Arr(items)`: `items.push(json)` can close a cycle
     }

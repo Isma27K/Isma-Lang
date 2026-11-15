@@ -49,6 +49,7 @@ pub fn generate(prog: &Program, sources: &SourceMap, target_triple: Option<&str>
         fn_consts: Vec::new(),
         closure_classes: Vec::new(),
         closures_done: 0,
+        vtables: Vec::new(),
     };
     let mut funcs = String::new();
     for f in prog.funcs.iter().filter(|f| !f.generic) {
@@ -255,7 +256,7 @@ fn llty(t: &Type) -> &'static str {
         Type::Int => "i64",
         Type::Float => "double",
         Type::Bool => "i1",
-        Type::Str | Type::List(_) | Type::Map(..) | Type::Struct(_) | Type::Enum(_, true) | Type::Func(..) => "ptr",
+        Type::Str | Type::List(_) | Type::Map(..) | Type::Struct(_) | Type::Enum(_, true) | Type::Func(..) | Type::Iface(_) => "ptr",
         // An enum without data is just the number of its variant.
         Type::Enum(_, false) => "i64",
         Type::Unit => "void",
@@ -307,6 +308,7 @@ fn mangle(t: &Type) -> String {
         Type::Nullable(inner) => format!("opt.{}", mangle(inner)),
         Type::Unit => "unit".into(),
         Type::Func(ps, r) => format!("fn.{}.to.{}.end", ps.iter().map(mangle).collect::<Vec<_>>().join("."), mangle(r)),
+        Type::Iface(id) => format!("i{id}"),
         _ => unreachable!("no runtime representation: {t:?}"),
     }
 }
@@ -410,6 +412,8 @@ struct Codegen<'a> {
     /// Lambdas whose closures are built (their structs), and how many have their functions.
     closure_classes: Vec<StructId>,
     closures_done: usize,
+    /// Boxes whose method table (a global) has been emitted.
+    vtables: Vec<StructId>,
 }
 
 impl<'a> Codegen<'a> {
@@ -999,7 +1003,8 @@ impl<'a> Codegen<'a> {
                 );
                 continue;
             }
-            if let Type::Func(..) = t {
+            // Function and interface values are released through their own type info.
+            if let Type::Func(..) | Type::Iface(_) = t {
                 self.func_rc_functions(&t, &mut out);
                 continue;
             }
@@ -1269,6 +1274,8 @@ impl<'a> Codegen<'a> {
             Rvalue::Builtin(b, args, span) => self.builtin(*b, args, *span),
             Rvalue::Closure(func, sid, args) => self.closure_value(*func, *sid, args),
             Rvalue::CallIndirect(f, args, _) => self.call_indirect(f, args),
+            Rvalue::Boxed(sid, o) => self.box_value(*sid, o),
+            Rvalue::CallMethod(recv, slot, args, ret, _) => self.call_method(recv, *slot, args, ret),
             Rvalue::Field(obj, sid, idx) => {
                 let o = self.operand(&Operand::Var(*obj));
                 let s = &self.prog.structs[*sid];

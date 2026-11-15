@@ -186,6 +186,11 @@ impl Parser {
                     Ok(i) => items.push(Item::Import(i)),
                     Err(()) => self.synchronize(),
                 },
+                // `interface` is only a keyword here, before a name.
+                Tok::Ident(n) if n == "interface" && matches!(self.peek_nth(1), Tok::Ident(_)) => match self.interface_decl() {
+                    Ok(i) => items.push(Item::Interface(i)),
+                    Err(()) => self.synchronize(),
+                },
                 Tok::Ident(n) if n == "from" && matches!(self.peek_nth(1), Tok::Ident(_) | Tok::Dot | Tok::DotDot) => match self.parse_from_import() {
                     Ok(i) => items.push(Item::Import(i)),
                     Err(()) => self.synchronize(),
@@ -217,8 +222,8 @@ impl Parser {
                     let span = self.span();
                     let found = self.peek().clone();
                     self.diags.push(
-                        Diagnostic::error(format!("expected `fn`, `struct`, `enum` or `val`, found {found}"), span)
-                            .with_note("only functions, structs, enums and constants (`val`) may appear at the top level")
+                        Diagnostic::error(format!("expected `fn`, `struct`, `enum`, `interface` or `val`, found {found}"), span)
+                            .with_note("only functions, structs, enums, interfaces and constants (`val`) may appear at the top level")
                             .with_help("put statements inside `fn main():`"),
                     );
                     self.synchronize();
@@ -360,27 +365,26 @@ impl Parser {
         Ok(Ident { name: name.into(), span: start })
     }
 
-    /// `[T, U]` after the name of a generic function, struct or enum (nothing if there's no `[`).
-    fn type_params(&mut self) -> PResult<Vec<Ident>> {
+    /// `[T, U]` after the name of a generic function, struct or enum (nothing
+    /// if there's no `[`). A parameter can have bounds: `[T: Shape + Named]`.
+    fn type_params(&mut self) -> PResult<Vec<TypeParam>> {
         if !self.at(&Tok::LBracket) {
             return Ok(Vec::new());
         }
         let open = self.bump().span;
         let mut params = Vec::new();
         while !self.at(&Tok::RBracket) {
-            let p = self.expect_ident("a type parameter name, like `T`")?;
-            if self.at(&Tok::Colon) {
-                let span = self.span();
-                return self.error_diag(
-                    Diagnostic::error(format!("type parameters don't take bounds: write `{}` alone", p.name), span)
-                        .with_primary("remove this")
-                        .with_note(format!(
-                            "Tarn works out what `{}` must support from how the code uses it: comparing two `{}`s with `<` makes it need `<=>`, printing one makes it need `to_string`",
-                            p.name, p.name
-                        )),
-                );
+            let name = self.expect_ident("a type parameter name, like `T`")?;
+            let mut bounds = Vec::new();
+            if self.eat(&Tok::Colon) {
+                loop {
+                    bounds.push(self.type_expr()?);
+                    if !self.eat(&Tok::Plus) {
+                        break;
+                    }
+                }
             }
-            params.push(p);
+            params.push(TypeParam { name, bounds });
             if !self.eat(&Tok::Comma) {
                 break;
             }
@@ -395,7 +399,31 @@ impl Parser {
         Ok(params)
     }
 
+    /// `(Shape, Named)` after a type's name: the interfaces it says it fits
+    /// (or, for an interface, the ones whose methods it includes).
+    fn interface_list(&mut self) -> PResult<Vec<TypeExpr>> {
+        if !self.eat(&Tok::LParen) {
+            return Ok(Vec::new());
+        }
+        let mut out = Vec::new();
+        while !self.at(&Tok::RParen) {
+            out.push(self.type_expr()?);
+            if !self.eat(&Tok::Comma) {
+                break;
+            }
+        }
+        self.expect(Tok::RParen)?;
+        Ok(out)
+    }
+
     fn fn_decl(&mut self) -> PResult<FnDecl> {
+        let mut f = self.fn_sig()?;
+        f.body = self.block()?;
+        Ok(f)
+    }
+
+    /// `fn name[T](params) -> Ret`, without the body (left empty).
+    fn fn_sig(&mut self) -> PResult<FnDecl> {
         let start = self.expect(Tok::Fn)?;
         let name = self.fn_name()?;
         let type_params = if is_operator_name(&name.name) { Vec::new() } else { self.type_params()? };
@@ -436,14 +464,85 @@ impl Parser {
         self.expect(Tok::RParen)?;
         let ret = if self.eat(&Tok::Arrow) { Some(self.type_expr()?) } else { None };
         let sig_span = start.merge(self.prev_span);
-        let body = self.block()?;
-        Ok(FnDecl { name, type_params, self_param, params, ret, body, sig_span })
+        Ok(FnDecl { name, type_params, self_param, params, ret, body: Vec::new(), sig_span })
+    }
+
+    /// `interface Shape:` and its method signatures, one per line.
+    fn interface_decl(&mut self) -> PResult<InterfaceDecl> {
+        let start = self.bump().span; // `interface`
+        let name = self.expect_ident("interface name")?;
+        if self.at(&Tok::LBracket) {
+            let span = self.span();
+            return self.error_diag(
+                Diagnostic::error("interfaces can't have type parameters yet", span)
+                    .with_primary("not supported yet")
+                    .with_help("write the interface for one type, e.g. `fn get(self) -> Int`"),
+            );
+        }
+        let extends = self.interface_list()?;
+        self.expect(Tok::Colon)?;
+        self.expect(Tok::Newline)?;
+        if !self.at(&Tok::Indent) {
+            return self.unexpected("an indented list of methods");
+        }
+        self.bump();
+        let mut methods = Vec::new();
+        while !self.at(&Tok::Dedent) && !self.at(&Tok::Eof) {
+            match self.peek() {
+                Tok::Newline => {
+                    self.bump();
+                }
+                Tok::Pass => {
+                    self.bump();
+                    if self.expect_newline().is_err() {
+                        self.synchronize();
+                    }
+                }
+                Tok::Fn => match self.interface_method() {
+                    Ok(f) => methods.push(f),
+                    Err(()) => self.synchronize(),
+                },
+                Tok::Val | Tok::Var | Tok::Ident(_) => {
+                    let span = self.span();
+                    self.diags.push(
+                        Diagnostic::error("interfaces list methods, not fields", span)
+                            .with_primary("a field")
+                            .with_help("ask for a method instead, e.g. `fn name(self) -> String`, and give each type that method"),
+                    );
+                    self.synchronize();
+                }
+                _ => {
+                    let _ = self.unexpected::<()>("a method signature (`fn name(self) -> Type`)");
+                    self.synchronize();
+                }
+            }
+        }
+        self.eat(&Tok::Dedent);
+        let end = methods.last().map(|m| m.sig_span).unwrap_or(name.span);
+        Ok(InterfaceDecl { span: start.merge(end), name, extends, methods })
+    }
+
+    /// `fn area(self) -> Float` in an interface: a signature on a line of its own.
+    fn interface_method(&mut self) -> PResult<FnDecl> {
+        let f = self.fn_sig()?;
+        if self.at(&Tok::Colon) {
+            let span = self.span();
+            return self.error_diag(
+                Diagnostic::error("an interface method has no body", span)
+                    .with_primary("remove the `:` and what follows")
+                    .with_note("an interface only says which methods a type needs; each type writes its own")
+                    .with_help("write just the signature, like `fn area(self) -> Float`"),
+            );
+        }
+        self.expect_newline()?;
+        Ok(f)
     }
 
     fn struct_decl(&mut self) -> PResult<StructDecl> {
         self.expect(Tok::Struct)?;
         let name = self.expect_ident("struct name")?;
         let type_params = self.type_params()?;
+        let implements = self.interface_list()?;
         self.expect(Tok::Colon)?;
         self.expect(Tok::Newline)?;
         if !self.at(&Tok::Indent) {
@@ -478,13 +577,14 @@ impl Parser {
             }
         }
         self.eat(&Tok::Dedent);
-        Ok(StructDecl { name, type_params, fields, methods })
+        Ok(StructDecl { name, type_params, implements, fields, methods })
     }
 
     fn enum_decl(&mut self) -> PResult<EnumDecl> {
         self.expect(Tok::Enum)?;
         let name = self.expect_ident("enum name")?;
         let type_params = self.type_params()?;
+        let implements = self.interface_list()?;
         self.expect(Tok::Colon)?;
         self.expect(Tok::Newline)?;
         if !self.at(&Tok::Indent) {
@@ -527,7 +627,7 @@ impl Parser {
             }
         }
         self.eat(&Tok::Dedent);
-        Ok(EnumDecl { name, type_params, variants, methods })
+        Ok(EnumDecl { name, type_params, implements, variants, methods })
     }
 
     /// `Circle(radius: Float)` or `Empty`
@@ -1782,9 +1882,9 @@ mod tests {
     fn generics_syntax() {
         let p = parse_ok("struct Pair[A, B]:\n    a: A\n    b: B\n\nfn max[T](a: T, b: T) -> T:\n    return a\n");
         let Item::Struct(st) = &p.items[0] else { panic!() };
-        assert_eq!(st.type_params.iter().map(|i| i.name.as_str()).collect::<Vec<_>>(), ["A", "B"]);
+        assert_eq!(st.type_params.iter().map(|p| p.name.name.as_str()).collect::<Vec<_>>(), ["A", "B"]);
         let Item::Fn(f) = &p.items[1] else { panic!() };
-        assert_eq!(f.type_params[0].name, "T");
+        assert_eq!(f.type_params[0].name.name, "T");
         // `[...]` is a type argument list before `(`, or before `.` after a type name; an index otherwise.
         assert_eq!(expr_of("max[Int](a, b)"), "max<Int>(a, b)");
         assert_eq!(expr_of("geo.Pair[Int, List[String]](a, b)"), "geo.Pair<Int, List[..]>(a, b)");
@@ -1792,8 +1892,33 @@ mod tests {
         assert_eq!(expr_of("xs[i].name"), "xs[i].name");
         assert_eq!(expr_of("xs[i + 1]"), "xs[(i + 1)]");
         assert_eq!(expr_of("grid[0]"), "grid[0]");
-        let (_, d) = parse("fn f[T: Ord](x: T) -> T:\n    return x\n");
-        assert!(d[0].message.contains("don't take bounds"), "{d:?}");
+    }
+
+    #[test]
+    fn interfaces_and_bounds() {
+        let p = parse_ok(
+            "interface Shape:\n    # its area\n    fn area(self) -> Float\n    fn scale(self, k: Float)\n\ninterface Both(Shape, Named):\n    pass\n\nstruct Sq[T](Shape, geo.Named):\n    s: Float\n\nenum E(Shape):\n    A\n\nfn f[T: Shape + geo.Named, U](x: T, y: U) -> T:\n    return x\n\nfn main():\n    val interface = 1\n    print(interface)\n",
+        );
+        let Item::Interface(i) = &p.items[0] else { panic!("{:?}", p.items[0]) };
+        assert_eq!(i.name.name, "Shape");
+        assert_eq!(i.methods.iter().map(|m| m.name.name.as_str()).collect::<Vec<_>>(), ["area", "scale"]);
+        assert!(i.methods.iter().all(|m| m.body.is_empty() && m.self_param.is_some()));
+        let Item::Interface(both) = &p.items[1] else { panic!() };
+        assert_eq!(both.extends.iter().map(|t| t.name.name.as_str()).collect::<Vec<_>>(), ["Shape", "Named"]);
+        let Item::Struct(st) = &p.items[2] else { panic!() };
+        assert_eq!(st.implements.len(), 2);
+        assert_eq!(st.implements[1].module.as_ref().map(|m| m.name.as_str()), Some("geo"));
+        let Item::Enum(e) = &p.items[3] else { panic!() };
+        assert_eq!(e.implements[0].name.name, "Shape");
+        let Item::Fn(f) = &p.items[4] else { panic!() };
+        assert_eq!(f.type_params[0].bounds.iter().map(|b| b.name.name.as_str()).collect::<Vec<_>>(), ["Shape", "Named"]);
+        assert!(f.type_params[1].bounds.is_empty());
+        let (_, d) = parse("interface Shape:\n    fn area(self) -> Float:\n        return 1.0\n");
+        assert!(d[0].message.contains("an interface method has no body"), "{d:?}");
+        let (_, d) = parse("interface Shape:\n    sides: Int\n");
+        assert!(d[0].message.contains("interfaces list methods, not fields"), "{d:?}");
+        let (_, d) = parse("interface Box[T]:\n    fn get(self) -> T\n");
+        assert!(d[0].message.contains("can't have type parameters yet"), "{d:?}");
     }
 
     #[test]

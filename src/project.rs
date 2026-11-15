@@ -258,6 +258,7 @@ fn defines(p: &Program, name: &str) -> bool {
         Item::Fn(f) => f.name.name == name,
         Item::Struct(s) => s.name.name == name,
         Item::Enum(e) => e.name.name == name,
+        Item::Interface(i) => i.name.name == name,
         Item::Const(c) => c.name.name == name,
         Item::Import(_) => false,
     })

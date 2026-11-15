@@ -1,0 +1,21 @@
+# expect-error: `as_shape` needs `T` to be a `Shape`, but `Int` isn't
+interface Shape:
+    fn area(self) -> Float
+
+interface Scalable(Shape):
+    fn scale(self, by: Float)
+
+struct Circle:
+    r: Float
+
+    fn area(self) -> Float:
+        return 3.0 * self.r * self.r
+
+struct Point:
+    x: Int
+
+fn as_shape[T](x: T) -> Shape:
+    return x
+
+fn main():
+    print(as_shape(5).area())

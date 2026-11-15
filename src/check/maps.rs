@@ -84,6 +84,7 @@ impl Checker {
             Type::List(_) | Type::Map(..) => "a key must not change while it's in the map, and lists and maps can change",
             Type::Unit => "`Unit` has no values",
             Type::Func(..) => "functions can't be compared, so they can't be keys",
+            Type::Iface(_) => "interface values can't be compared with `==`, so they can't be keys",
         };
         if report {
             let mut d = Diagnostic::error(format!("`{shown}` can't be a map key"), span).with_primary("not a valid key type").with_note(problem);
@@ -139,7 +140,8 @@ impl Checker {
                 }
                 Some(et) if expected.is_none() && !t.ty.assignable(et) && join_types(et, &t.ty).is_some() => ty = join_types(et, &t.ty),
                 Some(et) => {
-                    if !t.ty.assignable(et) {
+                    // With an expected interface type, `coerce` (below) boxes each value, or says why not.
+                    if !t.ty.assignable(et) && !(expected.is_some() && matches!(et.non_null(), Type::Iface(_))) {
                         let (a, b) = (self.tn(et), self.tn(&t.ty));
                         let mut d = Diagnostic::error(format!("map {what}s must all have the same type: expected `{a}`, found `{b}`"), e.span)
                             .with_primary(format!("this is `{b}`"));
@@ -154,7 +156,8 @@ impl Checker {
             out.push(t);
         }
         let Some(et) = ty.filter(|_| ok) else { return (out, None) };
-        let out = out.into_iter().map(|t| if t.ty.assignable(&et) { self.coerce(t, &et, None) } else { t }).collect();
+        let iface = expected.is_some() && matches!(et.non_null(), Type::Iface(_));
+        let out = out.into_iter().map(|t| if iface || t.ty.assignable(&et) { self.coerce(t, &et, None) } else { t }).collect();
         (out, Some(et))
     }
 

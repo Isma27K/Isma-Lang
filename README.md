@@ -79,7 +79,7 @@ Indentation instead of braces. `for x in list`, `{"key": value}` maps, `x in xs`
 
 ### Checks like Kotlin
 
-`val` vs `var`. Null safety: only a `T?` can be `null`, and smart casts know when it isn't. Enums with data, and a `match` that must handle every case. Generics, with no bounds to write. No implicit conversions, no "truthy" values, and every path must `return`. Mistakes are caught before the program runs, with messages that tell you the fix.
+`val` vs `var`. Null safety: only a `T?` can be `null`, and smart casts know when it isn't. Enums with data, and a `match` that must handle every case. Generics, where operators need no bounds, and interfaces that any type with the right methods fits. No implicit conversions, no "truthy" values, and every path must `return`. Mistakes are caught before the program runs, with messages that tell you the fix.
 
 </td>
 <td width="33%" valign="top">
@@ -221,7 +221,7 @@ fn main():
     print(dist(Point(0.0, 0.0), Point(3.0, 4.0)))
 ```
 
-The [**language guide**](docs/language.md) covers everything: types, constants, strictness rules, lints, functions and lambdas, structs, enums and `match`, operator functions, generics, lists, maps, strings, null safety, modules, built-ins and panics.
+The [**language guide**](docs/language.md) covers everything: types, constants, strictness rules, lints, functions and lambdas, structs, enums and `match`, operator functions, generics, interfaces, lists, maps, strings, null safety, modules, built-ins and panics.
 
 <a id="batteries"></a>
 ## Batteries included
@@ -314,6 +314,7 @@ These are the best of 3 runs on an AMD Ryzen 5 5500. Reproduce them with `./benc
 - **Memory management happens on a mid-level IR.** The typed program is lowered to a control-flow graph in which every intermediate value has a name ([`src/mir.rs`](src/mir.rs)). [`src/arc.rs`](src/arc.rs) then adds reference counting in the style of Perceus (Koka, Lean 4). It drops each value right after its last use. Parameters are borrowed unless consumed, and projections stay borrowed while interprocedural write-effect summaries prove their slot can't change. A unique struct's memory is reused for the next one, and unique strings are appended to in place. Types that can form cycles get a trial-deletion cycle collector. [`src/cycles.rs`](src/cycles.rs) decides which, from the type graph: a cycle needs a reference that can be replaced after construction, so immutable trees never pay for it.
 - **Operators on your types are method calls.** `a + b` on a struct type-checks to a direct call of its `fn +`, picked by the right operand's type when there are several, and `a < b` to `fn <=>`. The optimizer and the reference counting see an ordinary call: `acc = acc + v` reuses `acc`'s memory, and the particle benchmark runs as fast as with `pos.add(vel)`.
 - **Generics are checked once and compiled per use.** A generic function is type-checked a single time with `T` left abstract ([`src/check/generics.rs`](src/check/generics.rs)). What the code does with a `T` (compare it, add it, print it) becomes what `T` must support, passed along through calls between generic functions and settled for recursion as a fixed point. Each use with concrete types is checked against that list. Then the body is checked again for every set of types it's used with, producing ordinary functions and structs (`max[Int]`, `Box[String]`). Nothing generic reaches the back end, so generic code is exactly as fast as code written out by hand, and reference counting and memory reuse work on it unchanged.
+- **Interfaces fit structurally, and their values are boxes.** A type fits `interface Shape` when it has each method with the same parameter names and types and the same return type ([`src/check/ifaces.rs`](src/check/ifaces.rs)). A bound (`[T: Shape]`) is one more thing generic code needs from `T`, so it's still compiled per type and its calls are direct. A `Shape` value is a small box laid out like a closure: the value, plus a constant table of generated functions that call each of `Shape`'s methods on it. Reference counting and the cycle collector treat boxes like closures.
 - **`match` is checked with Maranget's usefulness algorithm** ([`src/patterns.rs`](src/patterns.rs)), as in Rust and OCaml. The same pass that proves a `match` exhaustive produces the missing cases for the error message and finds unreachable ones. Cases compile to chains of tag tests, which LLVM merges into a `switch`. Enums without data are plain integers, and data-less variants of other enums are shared constants.
 - **Maps are hash tables in the runtime, entries laid out by the compiler.** Each `Map[K, V]` type gets a small type record (the entry's size, how to hash and compare its keys) and its keys and values live inline in the entries: no boxing. `Int` and `String` keys are hashed and compared by the runtime itself; a struct key goes through generated functions that call its `fn hash` and `fn ==`. Reference counting stays in generated code, as for lists, and a map that can hold itself joins the cycle collector.
 - **Top-level `val`s are evaluated by the checker** ([`src/check/consts.rs`](src/check/consts.rs)), with overflow checks and cycle detection, and every use becomes a literal.
@@ -323,7 +324,7 @@ These are the best of 3 runs on an AMD Ryzen 5 5500. Reproduce them with `./benc
   - Integer `+ - *` use LLVM's overflow-checking intrinsics.
   - Panic paths are marked cold.
   - List indexing is bounds-checked inline.
-- **About 18,000 lines of Rust.** The only dependencies are `ariadne` (error rendering) and `lsp-server` / `lsp-types` (the language server).
+- **About 21,000 lines of Rust.** The only dependencies are `ariadne` (error rendering) and `lsp-server` / `lsp-types` (the language server).
 
 <a id="roadmap"></a>
 ## Roadmap
@@ -340,8 +341,11 @@ These are the best of 3 runs on an AMD Ryzen 5 5500. Reproduce them with `./benc
 - [x] Generics for user code: `fn max[T](a: T, b: T) -> T`, `struct Box[T]`, `enum Tree[T]`
 - [x] `Map[K, V]` with `{k: v}` literals, `in`, constants (`val pi = ...`), the `math` and `fs` modules, and string and list utilities (`split`, `join`, `trim`, `replace`, `sort`...)
 - [x] First-class functions and lambdas: `xs.map(fn(x) -> x * 2)`, `sort_by`, closures, function types
-- [ ] Interfaces, so generic code can call methods on a `T`
+- [x] Interfaces: `interface Shape:`, bounds (`fn total[T: Shape]`) and interface values (`List[Shape]`)
 - [ ] Tuples and sets
+- [ ] `match` as an expression, lambdas that capture `var`s, strings by character, `xs[-1]`, static methods, default field values
+- [ ] Generic interfaces, default methods, and `match` on the type inside an interface value
+- [ ] Recoverable errors (`Result` and `?`), calling C directly, a bridge to Python's libraries, a package manager, concurrency
 
 <a id="development"></a>
 ## Development

@@ -440,8 +440,14 @@ impl Server {
                 }
                 ImportedSymbol::Struct(sid) => {
                     let st = &doc.ide.structs[sid];
-                    let kind = if st.variants.is_some() { lt::CompletionItemKind::ENUM } else { lt::CompletionItemKind::STRUCT };
-                    add(name, kind, Some(format!("{} {}", if st.variants.is_some() { "enum" } else { "struct" }, st.name)), st.doc.clone(), "1");
+                    let (kind, kw) = if st.iface {
+                        (lt::CompletionItemKind::INTERFACE, "interface")
+                    } else if st.variants.is_some() {
+                        (lt::CompletionItemKind::ENUM, "enum")
+                    } else {
+                        (lt::CompletionItemKind::STRUCT, "struct")
+                    };
+                    add(name, kind, Some(format!("{kw} {}", st.name)), st.doc.clone(), "1");
                 }
                 ImportedSymbol::Const(cid) => {
                     let c = &doc.ide.consts[cid];
@@ -456,6 +462,11 @@ impl Server {
             add(&f.name, lt::CompletionItemKind::FUNCTION, Some(f.signature.clone()), f.doc.clone(), "1");
         }
         for s in doc.ide.structs.iter().filter(|s| s.ns == 0 && !s.instance) {
+            if s.iface {
+                let methods: Vec<&str> = s.methods.iter().map(|&m| doc.ide.functions[m].name.as_str()).collect();
+                add(&s.name, lt::CompletionItemKind::INTERFACE, Some(format!("interface {}: {}", s.name, methods.join(", "))), s.doc.clone(), "1");
+                continue;
+            }
             if let Some(variants) = &s.variants {
                 let names: Vec<&str> = variants.iter().map(|v| v.name.as_str()).collect();
                 add(&s.name, lt::CompletionItemKind::ENUM, Some(format!("enum {}: {}", s.name, names.join(" | "))), s.doc.clone(), "1");
@@ -556,6 +567,7 @@ impl Server {
                 let kind = match m.kind {
                     MemberKind::Function => lt::CompletionItemKind::FUNCTION,
                     MemberKind::Constant => lt::CompletionItemKind::CONSTANT,
+                    _ if m.signature.starts_with("interface ") => lt::CompletionItemKind::INTERFACE,
                     _ => lt::CompletionItemKind::STRUCT,
                 };
                 items.push(lt::CompletionItem {
@@ -617,7 +629,13 @@ impl Server {
                 let f = &ide.functions[m];
                 children.push(sym(&f.name, Some(f.signature.clone()), lt::SymbolKind::METHOD, f.full, f.name_span, None));
             }
-            let kind = if s.variants.is_some() { lt::SymbolKind::ENUM } else { lt::SymbolKind::STRUCT };
+            let kind = if s.iface {
+                lt::SymbolKind::INTERFACE
+            } else if s.variants.is_some() {
+                lt::SymbolKind::ENUM
+            } else {
+                lt::SymbolKind::STRUCT
+            };
             out.push((s.name_span.start, sym(&s.name, None, kind, s.full, s.name_span, Some(children))));
         }
         for f in ide.functions.iter().filter(|f| f.owner.is_none() && f.ns == 0 && !f.instance) {
@@ -1116,6 +1134,54 @@ mod tests {
         let a = crate::analyze(GEN_SRC);
         assert_eq!(a.ide.structs.iter().filter(|s| !s.instance).count(), 1);
         assert!(a.ide.structs.iter().any(|s| s.instance && s.name == "Box[Int]"));
+    }
+
+    const IFACE_SRC: &str = "# Things with an area.\ninterface Shape:\n    # How much room it takes.\n    fn area(self) -> Float\n\ninterface Solid(Shape):\n    fn volume(self) -> Float\n\nstruct Cube(Solid):\n    side: Float\n\n    fn area(self) -> Float:\n        return 6.0 * self.side * self.side\n\n    fn volume(self) -> Float:\n        return self.side * self.side * self.side\n\nfn total[T: Shape](xs: List[T]) -> Float:\n    var sum = 0.0\n    for x in xs:\n        sum += x.area()\n    return sum\n\nfn main():\n    val s: Solid = Cube(1.0)\n    print(s.volume() + total([Cube(2.0)]))\n    s.\n";
+
+    #[test]
+    fn interfaces_hover_complete_and_outline() {
+        let (s, uri) = server_with(IFACE_SRC);
+        let hover = |needle: &str, delta: usize| {
+            let h = s.hover(lt::HoverParams { text_document_position_params: tdp(&uri, at(IFACE_SRC, needle, delta)), work_done_progress_params: Default::default() });
+            let lt::HoverContents::Markup(m) = h.unwrap().contents else { panic!() };
+            m.value
+        };
+        // An interface type shows its methods, its own and included ones.
+        let shown = hover("Solid = Cube", 0);
+        assert!(shown.contains("interface Solid:") && shown.contains("fn volume(self) -> Float") && shown.contains("fn area(self) -> Float"), "{shown}");
+        // A call through an interface value, and a method of a bound.
+        let shown = hover("volume() +", 0);
+        assert!(shown.contains("fn volume(self) -> Float") && shown.contains("method of interface `Solid`"), "{shown}");
+        let shown = hover("area()\n    return sum", 0);
+        assert!(shown.contains("fn area(self) -> Float") && shown.contains("a bound of `T`"), "{shown}");
+        let shown = hover("T: Shape", 0);
+        assert!(shown.contains("T: Shape"), "{shown}");
+        let shown = hover("total([", 0);
+        assert!(shown.contains("`T` can be any type that is a `Shape`"), "{shown}");
+        let shown = hover("area(self) -> Float\n", 0);
+        assert!(shown.contains("required by interface `Shape`") && shown.contains("How much room it takes."), "{shown}");
+        // Go to the method the interface asks for.
+        let r = s
+            .definition(lt::GotoDefinitionParams {
+                text_document_position_params: tdp(&uri, at(IFACE_SRC, "volume() +", 0)),
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+            })
+            .unwrap();
+        let lt::GotoDefinitionResponse::Scalar(loc) = r else { panic!() };
+        assert_eq!(loc.range.start, at(IFACE_SRC, "volume(self) -> Float\n\nstruct", 0));
+        // `s.` offers the interface's methods.
+        let items = complete(&s, &uri, at(IFACE_SRC, "    s.\n", 6));
+        let labels: Vec<_> = items.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(labels, ["volume", "area"]);
+        // The outline shows interfaces as interfaces, and no boxes.
+        let r = s.symbols(lt::DocumentSymbolParams { text_document: lt::TextDocumentIdentifier { uri: uri.clone() }, work_done_progress_params: Default::default(), partial_result_params: Default::default() });
+        let Some(lt::DocumentSymbolResponse::Nested(syms)) = r else { panic!() };
+        let kinds: Vec<_> = syms.iter().map(|s| (s.name.as_str(), s.kind)).collect();
+        assert_eq!(
+            kinds,
+            [("Shape", lt::SymbolKind::INTERFACE), ("Solid", lt::SymbolKind::INTERFACE), ("Cube", lt::SymbolKind::STRUCT), ("total", lt::SymbolKind::FUNCTION), ("main", lt::SymbolKind::FUNCTION)]
+        );
     }
 
     #[test]

@@ -1,0 +1,22 @@
+# expect-error: `Gallery` needs `T` to be a `Shape`, but `Int` isn't
+interface Shape:
+    fn area(self) -> Float
+
+interface Scalable(Shape):
+    fn scale(self, by: Float)
+
+struct Circle:
+    r: Float
+
+    fn area(self) -> Float:
+        return 3.0 * self.r * self.r
+
+struct Point:
+    x: Int
+
+struct Gallery[T: Shape]:
+    items: List[T]
+
+fn main():
+    val g = Gallery([1, 2])
+    print(g.items.len())

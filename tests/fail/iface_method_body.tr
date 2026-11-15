@@ -1,0 +1,7 @@
+# expect-error: an interface method has no body
+interface Shape:
+    fn area(self) -> Float:
+        return 0.0
+
+fn main():
+    pass

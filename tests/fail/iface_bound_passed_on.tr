@@ -1,0 +1,16 @@
+# expect-error: `T` goes to `total` here, which needs being a `Shape`
+interface Shape:
+    fn area(self) -> Float
+
+fn total[T: Shape](xs: List[T]) -> Float:
+    var sum = 0.0
+    for x in xs:
+        sum += x.area()
+    return sum
+
+# No bound here, but `total` needs one: so `twice` needs `T` to be a `Shape` too.
+fn twice[T](xs: List[T]) -> Float:
+    return 2.0 * total(xs)
+
+fn main():
+    print(twice(["a", "b"]))

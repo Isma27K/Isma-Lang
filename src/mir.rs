@@ -117,6 +117,12 @@ pub enum Rvalue {
     Closure(FuncId, Option<StructId>, Vec<Operand>),
     /// Call the function value `.0` (borrowing it and every argument).
     CallIndirect(Operand, Vec<Operand>, Span),
+    /// A new interface value: box `.0` (see `TStruct::closure`) holding `.1`
+    /// (consumed), with the method table of its type.
+    Boxed(StructId, Operand),
+    /// Call the method in slot `.1` of the method table of interface value
+    /// `.0` (borrowing it and every argument); it returns a `.3`.
+    CallMethod(Operand, usize, Vec<Operand>, Type, Span),
 }
 
 /// What a `New` builds.
@@ -191,7 +197,7 @@ impl Func {
 /// A nullable reference is a possibly-null pointer, so it counts too. An enum
 /// does when some variant carries data.
 pub fn is_ref(t: &Type) -> bool {
-    matches!(t.non_null(), Type::Str | Type::List(_) | Type::Map(..) | Type::Struct(_) | Type::Enum(_, true) | Type::Func(..))
+    matches!(t.non_null(), Type::Str | Type::List(_) | Type::Map(..) | Type::Struct(_) | Type::Enum(_, true) | Type::Func(..) | Type::Iface(_))
 }
 
 impl Operand {
@@ -215,7 +221,8 @@ impl Rvalue {
             | Rvalue::Reuse(_, _, args)
             | Rvalue::ListNew(_, args)
             | Rvalue::Closure(_, _, args) => args.iter().collect(),
-            Rvalue::CallIndirect(f, args, _) => std::iter::once(f).chain(args).collect(),
+            Rvalue::CallIndirect(f, args, _) | Rvalue::CallMethod(f, _, args, ..) => std::iter::once(f).chain(args).collect(),
+            Rvalue::Boxed(_, o) => vec![o],
             Rvalue::Field(..) | Rvalue::Index(..) | Rvalue::Tag(_) | Rvalue::VariantField(..) | Rvalue::MapNew(..) => vec![],
             // (the list / object of a projection is a VarId, see `base`)
         }
@@ -339,6 +346,8 @@ fn print_func(out: &mut String, f: &Func, p: &Program, names: &[String]) {
         Rvalue::Closure(fid, _, caps) if caps.is_empty() => format!("fn {}", p.funcs[*fid].name),
         Rvalue::Closure(fid, _, caps) => format!("closure {}[{}]", p.funcs[*fid].name, ops(caps)),
         Rvalue::CallIndirect(f, args, _) => format!("{}({})", op(f), ops(args)),
+        Rvalue::Boxed(sid, o) => format!("box {} as {}", op(o), p.structs[*sid].closure.as_ref().map(|t| t.display(names, &[])).unwrap_or_default()),
+        Rvalue::CallMethod(o, slot, args, ..) => format!("{}.<method {slot}>({})", op(o), ops(args)),
     };
     for (b, block) in f.blocks.iter().enumerate() {
         let _ = writeln!(out, "  bb{b}:");

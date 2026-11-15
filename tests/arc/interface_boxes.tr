@@ -1,0 +1,31 @@
+# expect-max-allocs: 2003
+# Using a value as an interface value boxes it: one allocation, the box (here
+# 1000 circles and their 1000 boxes, plus two lists and one more circle). Calls
+# through a box allocate nothing, and neither does generic code with a bound,
+# here used with `T` = `Shape` and with `T` = `Circle`.
+interface Shape:
+    fn area(self) -> Float
+
+struct Circle:
+    r: Float
+
+    fn area(self) -> Float:
+        return self.r
+
+fn total[T: Shape](xs: List[T]) -> Float:
+    var sum = 0.0
+    for x in xs:
+        sum += x.area()
+    return sum
+
+fn main():
+    val shapes: List[Shape] = []
+    for i in 0..1000:
+        shapes.push(Circle(i.to_float()))
+    var sum = 0.0
+    for _ in 0..100:
+        for s in shapes:
+            sum += s.area()
+        sum += total(shapes)
+    print(sum)
+    print(total([Circle(1.0)]))

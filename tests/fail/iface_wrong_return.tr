@@ -1,0 +1,24 @@
+# expect-error: `Sq.area` returns `Int`, not `Float`
+interface Shape:
+    fn area(self) -> Float
+
+interface Scalable(Shape):
+    fn scale(self, by: Float)
+
+struct Circle:
+    r: Float
+
+    fn area(self) -> Float:
+        return 3.0 * self.r * self.r
+
+struct Point:
+    x: Int
+
+struct Sq:
+    side: Int
+    fn area(self) -> Int:
+        return self.side * self.side
+
+fn main():
+    val s: Shape = Sq(2)
+    print(s.area())

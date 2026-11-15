@@ -25,6 +25,8 @@ pub(super) struct ParamInfo {
     pub span: Span,
     /// What declares it: `max`, or `Box` (for display).
     pub owner: String,
+    /// `T: Shape + Named`: the interfaces it must fit (see `ifaces.rs`), and where each is written.
+    pub bounds: Vec<(StructId, Span)>,
 }
 
 /// Something generic code does with values of a type parameter, which the
@@ -49,12 +51,16 @@ pub(super) enum Need {
     Hash,
     /// A key of a `Map[T, V]`: `==` and `hash`.
     Key,
+    /// Fitting an interface: a bound `T: Shape`, or a `T` used as a `Shape` value.
+    Iface(StructId),
 }
 
 impl Need {
-    /// "`<` and `>`", for "needs `T` to support ...".
-    fn shown(self) -> String {
+    /// "`<` and `>`", for "needs `T` to support ..." (`names`: of the struct
+    /// table, for interfaces: "being a `Shape`").
+    fn shown(self, names: &[String]) -> String {
         match self {
+            Need::Iface(i) => format!("being {}", a_type(&names[i])),
             Need::Eq => "`==`".into(),
             Need::EqNullable => "`==` between values that may be `null`".into(),
             Need::Ord => "`<` and `>`".into(),
@@ -68,8 +74,9 @@ impl Need {
     }
 
     /// "`T` values are compared here"
-    fn used(self, p: &str) -> String {
+    fn used(self, p: &str, names: &[String]) -> String {
         match self {
+            Need::Iface(i) => format!("`{p}` must be {} here", a_type(&names[i])),
             Need::Eq | Need::EqNullable => format!("`{p}` values are compared with `==` here"),
             Need::Ord => format!("`{p}` values are compared here"),
             Need::Arith(BinOp::Add) => format!("`{p}` values are added here"),
@@ -221,10 +228,11 @@ fn calls_in_expr(e: &TExpr, out: &mut Vec<(FuncId, Span)>) {
         }
         // (A lambda's own body is a function of its own: its calls are recorded with it.)
         TExprKind::Closure { captures, .. } => captures.iter().for_each(|a| calls_in_expr(a, out)),
-        TExprKind::CallValue(f, args) => {
+        TExprKind::CallValue(f, args) | TExprKind::CallMethod(f, _, args) => {
             calls_in_expr(f, out);
             args.iter().for_each(|a| calls_in_expr(a, out));
         }
+        TExprKind::Boxed(_, x) => calls_in_expr(x, out),
         TExprKind::Block(stmts, e) => {
             calls_in(stmts, out);
             calls_in_expr(e, out);
@@ -243,9 +251,9 @@ impl Checker {
 
     /// Register the type parameters `[T, U]` of `owner` (a function or type
     /// name). `outer`: those already in scope (a method's struct's).
-    pub(super) fn declare_type_params(&mut self, params: &[Ident], owner: &str, outer: &[ParamId]) -> Vec<ParamId> {
+    pub(super) fn declare_type_params(&mut self, params: &[TypeParam], owner: &str, outer: &[ParamId]) -> Vec<ParamId> {
         let mut out = Vec::new();
-        for p in params {
+        for p in params.iter().map(|tp| &tp.name) {
             let name = &p.name;
             let what = format!("type parameter of `{owner}`");
             if !name.starts_with(|c: char| c.is_ascii_uppercase()) {
@@ -279,7 +287,7 @@ impl Checker {
                 continue;
             }
             let id = self.type_params.len();
-            self.type_params.push(ParamInfo { name: name.clone(), span: p.span, owner: owner.to_string() });
+            self.type_params.push(ParamInfo { name: name.clone(), span: p.span, owner: owner.to_string(), bounds: Vec::new() });
             self.ide.params.push(name.clone());
             self.hover(p.span, name.clone(), Some(what));
             out.push(id);
@@ -362,6 +370,7 @@ impl Checker {
         if args.iter().any(|a| a.is_error()) {
             return Type::Error;
         }
+        self.check_type_bounds(sid, &args, t.span);
         match self.struct_instance(sid, args) {
             Some(i) => self.def_types[i].clone(),
             None => Type::Error,
@@ -377,6 +386,18 @@ impl Checker {
             Type::Func(ps, r) => 1 + ps.iter().chain([&**r]).map(|t| self.type_depth(t)).max().unwrap_or(0),
             Type::Struct(id) | Type::Enum(id, _) => 1 + self.struct_args[*id].iter().map(|a| self.type_depth(a)).max().unwrap_or(0),
             _ => 1,
+        }
+    }
+
+    /// Does an interface type occur in `t` (`List[Shape]`, `Box[Shape?]`)?
+    pub(super) fn mentions_iface(&self, t: &Type) -> bool {
+        match t {
+            Type::Iface(_) => true,
+            Type::List(e) | Type::Nullable(e) => self.mentions_iface(e),
+            Type::Map(k, v) => self.mentions_iface(k) || self.mentions_iface(v),
+            Type::Func(ps, r) => ps.iter().any(|t| self.mentions_iface(t)) || self.mentions_iface(r),
+            Type::Struct(id) | Type::Enum(id, _) => self.struct_args[*id].iter().any(|a| self.mentions_iface(a)),
+            _ => false,
         }
     }
 
@@ -445,7 +466,7 @@ impl Checker {
         let name = format!("{base}[{}]", shown.join(", "));
         let has_param = args.iter().any(|a| a.has_param(&self.struct_has_param));
         let variants = self.structs[origin].variants.as_ref().map(|_| Vec::new());
-        self.structs.push(TStruct { name: name.clone(), fields: Vec::new(), variants, generic: has_param, closure: None });
+        self.structs.push(TStruct { name: name.clone(), fields: Vec::new(), variants, generic: has_param, closure: None, vtable: Vec::new() });
         self.def_types.push(match self.def_types[origin] {
             Type::Enum(_, boxed) => Type::Enum(id, boxed),
             _ => Type::Struct(id),
@@ -789,7 +810,13 @@ impl Checker {
         }
         let (slots, ok) = self.arg_slots(what, params, args, span);
         // `[]`, `null` and `Tree.Leaf` need to know their type: they wait for the others.
-        let later: Vec<bool> = slots.iter().map(|(_, a)| self.needs_context(&a.value)).collect();
+        // So do list and map literals when an interface type is expected
+        // (`val g: Gallery[Shape] = Gallery([Circle(1.0)])` makes a `List[Shape]`).
+        let iface_wanted = expected.is_some_and(|t| self.mentions_iface(t));
+        let later: Vec<bool> = slots
+            .iter()
+            .map(|(_, a)| self.needs_context(&a.value) || iface_wanted && matches!(a.value.kind, ExprKind::List(_) | ExprKind::Map(_)))
+            .collect();
         let mut checked: Vec<Option<TExpr>> = (0..params.len()).map(|_| None).collect();
         for pass in 0..2 {
             if pass == 1
@@ -1101,9 +1128,17 @@ impl Checker {
         if depth > MAX_TYPE_DEPTH {
             return Ok(Vec::new());
         }
+        if let Need::Iface(i) = need {
+            return self.fit(t, i).map_err(|_| Fail { ty: t.clone(), need, trail: Vec::new() });
+        }
         match t {
             Type::Error => Ok(Vec::new()),
             Type::Param(p) => Ok(vec![(*p, need)]),
+            // An interface value can be printed when the interface has `to_string`.
+            Type::Iface(i) => match need {
+                Need::Format | Need::ToStr if self.iface_to_string(*i).is_some() => Ok(Vec::new()),
+                _ => fail(t),
+            },
             Type::List(e) if need == Need::Format => self.satisfies(e, need, depth + 1),
             Type::Map(k, v) if need == Need::Format => {
                 let mut out = self.satisfies(k, need, depth + 1)?;
@@ -1156,29 +1191,35 @@ impl Checker {
                     Need::Neg => self.ops(sid, OpKind::Neg).into_iter().find(|&f| self.funcs[f].ret == *t),
                     Need::Format | Need::ToStr => self.user_to_string(t),
                     Need::Hash => self.user_hash(sid),
-                    Need::Key => unreachable!(),
+                    Need::Key | Need::Iface(_) => unreachable!(),
                 };
                 let Some(fid) = fid else { return fail(t) };
-                // A method of a generic type needs what its code needs.
-                let Some((decl, args)) = self.funcs[fid].instance.clone() else { return Ok(Vec::new()) };
-                let tps = self.funcs[decl].type_params.clone();
-                let mut out = Vec::new();
-                for nu in self.needs.get(&decl).cloned().unwrap_or_default() {
-                    let Some(k) = tps.iter().position(|p| *p == nu.param) else { continue };
-                    match self.satisfies(&args[k], nu.need, depth + 1) {
-                        Ok(r) => out.extend(r),
-                        Err(mut f) => {
-                            let p = self.type_params[nu.param].name.clone();
-                            let what = format!("`{}` needs `{p}` to support {}", self.fn_display(decl), nu.need.shown());
-                            f.trail.insert(0, (nu.span, what));
-                            return Err(f);
-                        }
-                    }
-                }
-                Ok(out)
+                self.callee_needs(fid, depth)
             }
             _ => fail(t),
         }
+    }
+
+    /// What calling `fid` needs: nothing for ordinary functions; for a method
+    /// of a generic type (or other copy of generic code), what its code needs
+    /// from its type arguments, which may be type parameters themselves.
+    pub(super) fn callee_needs(&mut self, fid: FuncId, depth: usize) -> Result<Vec<(ParamId, Need)>, Fail> {
+        let Some((decl, args)) = self.funcs[fid].instance.clone() else { return Ok(Vec::new()) };
+        let tps = self.funcs[decl].type_params.clone();
+        let mut out = Vec::new();
+        for nu in self.needs.get(&decl).cloned().unwrap_or_default() {
+            let Some(k) = tps.iter().position(|p| *p == nu.param) else { continue };
+            match self.satisfies(&args[k], nu.need, depth + 1) {
+                Ok(r) => out.extend(r),
+                Err(mut f) => {
+                    let p = self.type_params[nu.param].name.clone();
+                    let what = format!("`{}` needs `{p}` to support {}", self.fn_display(decl), nu.need.shown(&self.struct_names()));
+                    f.trail.insert(0, (nu.span, what));
+                    return Err(f);
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// Report uses of generic code (`obligations[from..]`) with types that
@@ -1206,13 +1247,17 @@ impl Checker {
         let name = self.fn_display(decl);
         let p = self.type_params[nu.param].name.clone();
         let shown = self.tn(arg);
-        let mut d = Diagnostic::error(format!("`{name}` needs `{p}` to support {}, but `{shown}` doesn't", nu.need.shown()), span)
-            .with_primary(format!("here `{p}` is `{shown}`"));
+        let names = self.struct_names();
+        let mut d = match nu.need {
+            Need::Iface(i) => Diagnostic::error(format!("`{name}` needs `{p}` to be {}, but `{shown}` isn't", a_type(&names[i])), span),
+            _ => Diagnostic::error(format!("`{name}` needs `{p}` to support {}, but `{shown}` doesn't", nu.need.shown(&names)), span),
+        }
+        .with_primary(format!("here `{p}` is `{shown}`"));
         d = match nu.via {
-            None => d.with_label(nu.span, nu.need.used(&p)),
+            None => d.with_label(nu.span, nu.need.used(&p, &names)),
             Some(callee) => {
                 let callee = self.fn_display(callee);
-                d.with_label(nu.span, format!("`{p}` goes to `{callee}` here, which needs {}", nu.need.shown()))
+                d.with_label(nu.span, format!("`{p}` goes to `{callee}` here, which needs {}", nu.need.shown(&names)))
             }
         };
         for (s, msg) in &fail.trail {
@@ -1220,8 +1265,14 @@ impl Checker {
         }
         let ft = fail.ty.clone();
         let fshown = self.tn(&ft);
+        if let Need::Iface(i) = fail.need
+            && let Err(m) = self.fit(&ft, i)
+        {
+            let d = d.with_note(m.reason.clone());
+            return self.misfit_help(d, &m);
+        }
         if ft != *arg {
-            d = d.with_note(format!("`{fshown}` doesn't support {}", fail.need.shown()));
+            d = d.with_note(format!("`{fshown}` doesn't support {}", fail.need.shown(&names)));
         }
         self.need_help(d, &ft, fail.need)
     }
@@ -1275,20 +1326,25 @@ impl Checker {
                 continue;
             }
             let needs = self.needs.get(&fid).cloned().unwrap_or_default();
+            let names = self.struct_names();
             let mut lines = Vec::new();
             for &p in &f.tparams {
-                let mut shown: Vec<String> = Vec::new();
+                let (mut shown, mut ifaces): (Vec<String>, Vec<String>) = (Vec::new(), Vec::new());
                 for n in needs.iter().filter(|n| n.param == p) {
-                    let s = n.need.shown();
-                    if !shown.contains(&s) {
-                        shown.push(s);
+                    let (list, s) = match n.need {
+                        Need::Iface(i) => (&mut ifaces, a_type(&names[i])),
+                        _ => (&mut shown, n.need.shown(&names)),
+                    };
+                    if !list.contains(&s) {
+                        list.push(s);
                     }
                 }
                 let name = &self.type_params[p].name;
-                lines.push(if shown.is_empty() {
-                    format!("`{name}` can be any type")
-                } else {
-                    format!("`{name}` can be any type that supports {}", and_list(&shown))
+                let any = if ifaces.is_empty() { "any type".to_string() } else { format!("any type that is {}", and_list(&ifaces)) };
+                lines.push(match (shown.is_empty(), ifaces.is_empty()) {
+                    (true, _) => format!("`{name}` can be {any}"),
+                    (false, true) => format!("`{name}` can be {any} that supports {}", and_list(&shown)),
+                    (false, false) => format!("`{name}` can be {any} and supports {}", and_list(&shown)),
                 });
             }
             texts.insert(fid, lines.join("\n\n"));

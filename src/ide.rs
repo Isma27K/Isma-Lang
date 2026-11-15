@@ -121,6 +121,8 @@ pub struct StructSymbol {
     /// A generic type with type arguments (`Box[Int]`): not a declaration of
     /// its own, so outlines and completion skip it.
     pub instance: bool,
+    /// An interface (its `methods` are the ones it asks for).
+    pub iface: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -149,7 +151,7 @@ impl IdeInfo {
     /// Fields + methods available on a value of type `t` (as seen from the user's file).
     pub fn members(&self, t: &Type) -> Vec<Member> {
         match t {
-            Type::Struct(sid) | Type::Enum(sid, _) => {
+            Type::Struct(sid) | Type::Enum(sid, _) | Type::Iface(sid) => {
                 let Some(s) = self.structs.get(*sid) else { return Vec::new() };
                 let hide_private = s.ns != 0;
                 let mut out: Vec<Member> = s
@@ -170,9 +172,11 @@ impl IdeInfo {
                     if hide_private && f.name.starts_with('_') || crate::ast::is_operator_name(&f.name) {
                         continue;
                     }
+                    let of = if s.iface { "method of interface" } else { "method of" };
                     let doc = match &f.doc {
-                        Some(d) => format!("method of `{}`\n\n{d}", s.name),
-                        None => format!("method of `{}`", s.name),
+                        Some(d) if s.iface => d.clone(),
+                        Some(d) => format!("{of} `{}`\n\n{d}", s.name),
+                        None => format!("{of} `{}`", s.name),
                     };
                     out.push(Member {
                         name: f.name.clone(),
@@ -219,7 +223,7 @@ impl IdeInfo {
             }
             out.push(Member {
                 name: short,
-                signature: format!("{} {}", if s.variants.is_some() { "enum" } else { "struct" }, s.name),
+                signature: format!("{} {}", if s.iface { "interface" } else if s.variants.is_some() { "enum" } else { "struct" }, s.name),
                 doc: s.doc.clone().unwrap_or_default(),
                 kind: MemberKind::Struct,
                 takes_args: false,

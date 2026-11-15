@@ -1,6 +1,8 @@
-# expect-error: type parameters don't take bounds: write `T` alone
+# expect-error: Tarn has no `Comparable`: operators need no bound
 fn max[T: Comparable](a: T, b: T) -> T:
-    return a
+    if a > b:
+        return a
+    return b
 
 fn main():
     print(max(1, 2))
