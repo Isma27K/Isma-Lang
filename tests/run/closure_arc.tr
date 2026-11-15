@@ -1,0 +1,71 @@
+# Memory with closures: captured values live as long as the closure, cycles
+# through closures are collected, and a closure that replaces itself while
+# running stays alive until it returns. (Every run test is also checked for
+# leaks and run under AddressSanitizer.)
+
+struct Node:
+    val value: Int
+    var on_change: fn() -> Int
+
+struct Machine:
+    var step: fn() -> String
+    var log: List[String]
+
+struct Registry:
+    var handlers: List[fn(String) -> String]
+
+fn first_step(m: Machine, note: String) -> fn() -> String:
+    val run = fn() -> String:
+        # Replace the closure that is running, then keep using what it captured.
+        m.step = fn() -> "second"
+        m.log.push(note)
+        return note + "!"
+    return run
+
+fn make_greeter(name: String) -> fn(String) -> String:
+    val prefix = "Hello, " + name
+    return fn(msg) -> prefix + ": " + msg
+
+fn main():
+    # captured strings outlive the function that made them
+    val greeters = ["Ada", "Bo"].map(fn(n) -> make_greeter(n + "!"))
+    for g in greeters:
+        print(g("hi"))
+
+    # a node whose callback captures the node: a cycle, collected
+    for i in 0..3:
+        val n = Node(i, fn() -> 0)
+        n.on_change = fn() -> n.value * 2
+        print(n.on_change())
+
+    # a list holding closures that capture the list: also a cycle
+    for round in 0..2:
+        val reg = Registry([])
+        reg.handlers.push(fn(s) -> s + f" ({reg.handlers.len()} handlers)")
+        reg.handlers.push(fn(s) -> s.upper())
+        for h in reg.handlers:
+            print(h(f"round {round}"))
+
+    # replacing the running closure
+    for i in 0..2:
+        val m = Machine(fn() -> "none", [])
+        m.step = first_step(m, "first " + i.to_string())
+        print(m.step())
+        print(m.step())
+        print(m.log)
+
+    # closures built and dropped in a loop, captures freed each time
+    var total = 0
+    for i in 0..1000:
+        val label = "n" + i.to_string()
+        val f = fn(k: Int) -> label.len() + k
+        total += f(i)
+    print(total)
+
+    # a closure kept in a nullable variable, then replaced
+    var cb: (fn() -> String)? = null
+    for w in ["a", "b", "c"]:
+        val word = w + w
+        cb = fn() -> word
+    if cb != null:
+        print(cb())

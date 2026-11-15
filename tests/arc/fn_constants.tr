@@ -1,0 +1,19 @@
+# expect-max-allocs: 1
+# A lambda that captures nothing, and a named function used as a value, are
+# constants: passing them around allocates nothing (only the list does).
+fn apply_all(xs: List[Int], f: fn(Int) -> Int) -> Int:
+    var s = 0
+    for x in xs:
+        s += f(x)
+    return s
+
+fn triple(x: Int) -> Int:
+    return x * 3
+
+fn main():
+    val xs = [1, 2, 3]
+    var total = 0
+    for _ in 0..1000:
+        total += apply_all(xs, fn(x) -> x * 2)
+        total += apply_all(xs, triple)
+    print(total)

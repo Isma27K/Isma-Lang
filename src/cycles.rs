@@ -13,6 +13,12 @@
 //! a `var` field or a list element. Strings, `List[Int]`, immutable trees
 //! (`enum Expr: Add(a: Expr, b: Expr)`) and most structs never pay for cycle
 //! collection.
+//!
+//! A function value can hold anything its lambda captured, so a function
+//! type's children are the closure structs of every lambda of that type (in
+//! the whole program), and those hold the captured values. Captures never
+//! change, so these edges are immutable: `n.on_change = fn() -> n.value`
+//! closes a cycle only because `on_change` is a `var` field.
 
 use crate::mir::is_ref;
 use crate::tast::TStruct;
@@ -30,6 +36,7 @@ fn children(t: &Type, structs: &[TStruct]) -> Vec<(Type, bool)> {
         Type::List(e) if refs(e) => vec![(e.non_null().clone(), true)],
         // Entries are added to a map that already exists, like list elements.
         Type::Map(k, v) => [k, v].into_iter().filter(|t| refs(t)).map(|t| (t.non_null().clone(), true)).collect(),
+        Type::Func(..) => (0..structs.len()).filter(|&s| !structs[s].generic && structs[s].closure.as_ref() == Some(t)).map(|s| (Type::Struct(s), false)).collect(),
         _ => Vec::new(),
     }
 }
@@ -63,6 +70,8 @@ pub fn cyclic_structs(structs: &[TStruct]) -> Vec<bool> {
         .map(|sid| {
             let t = match &structs[sid].variants {
                 Some(vs) => Type::Enum(sid, vs.iter().any(|v| !v.fields.is_empty())),
+                // A closure is counted as a value of its function type.
+                None if structs[sid].closure.is_some() => structs[sid].closure.clone().unwrap(),
                 None => Type::Struct(sid),
             };
             is_cyclic(&t, structs)
@@ -81,6 +90,7 @@ mod tests {
             fields: fields.iter().enumerate().map(|(i, t)| TField { name: format!("f{i}"), ty: t.clone(), mutable: true }).collect(),
             variants: None,
             generic: false,
+            closure: None,
         }
     }
 
@@ -123,8 +133,8 @@ mod tests {
         let expr = Type::Enum(1, true);
         let structs = vec![
             fixed("Cons", &[Type::Int, Type::Struct(0).nullable()]), // a `val next`: no cycle possible
-            TStruct { name: "Expr".into(), fields: vec![], variants: Some(vec![variant("Num", &[Type::Int]), variant("Add", &[expr.clone(), expr.clone()])]), generic: false },
-            TStruct { name: "Json".into(), fields: vec![], variants: Some(vec![variant("Arr", &[Type::List(Box::new(Type::Enum(2, true)))])]), generic: false },
+            TStruct { name: "Expr".into(), fields: vec![], variants: Some(vec![variant("Num", &[Type::Int]), variant("Add", &[expr.clone(), expr.clone()])]), generic: false, closure: None },
+            TStruct { name: "Json".into(), fields: vec![], variants: Some(vec![variant("Arr", &[Type::List(Box::new(Type::Enum(2, true)))])]), generic: false, closure: None },
         ];
         assert_eq!(cyclic_structs(&structs), vec![false, false, true]); // `Arr(items)`: `items.push(json)` can close a cycle
     }

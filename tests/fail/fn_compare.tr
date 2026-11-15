@@ -1,0 +1,4 @@
+# expect-error: operator `==` cannot be applied to `fn(Int) -> Int`
+fn main():
+    val f = fn(x: Int) -> x
+    print(f == f)

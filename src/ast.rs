@@ -141,7 +141,46 @@ pub struct TypeExpr {
     pub args: Vec<TypeExpr>,
     /// `T?`
     pub nullable: bool,
+    /// A function type, `fn(Int, String) -> Bool` (then `name` is `fn`).
+    pub func: Option<Box<FnTypeExpr>>,
     pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct FnTypeExpr {
+    pub params: Vec<TypeExpr>,
+    /// `None`: returns nothing.
+    pub ret: Option<TypeExpr>,
+}
+
+/// `fn(x) -> x * 2`, `fn(a: Int, b: Int) -> a + b`, or with a block body:
+///
+/// ```text
+/// val f = fn(x: Int) -> Int:
+///     return x * 2
+/// ```
+#[derive(Debug)]
+pub struct Lambda {
+    pub params: Vec<LambdaParam>,
+    /// The return type, when written (only with a block body).
+    pub ret: Option<TypeExpr>,
+    pub body: LambdaBody,
+    /// `fn(...)`, for messages.
+    pub head: Span,
+}
+
+#[derive(Debug)]
+pub struct LambdaParam {
+    pub name: Ident,
+    /// Written, or taken from the type the lambda is expected to have.
+    pub ty: Option<TypeExpr>,
+}
+
+#[derive(Debug)]
+pub enum LambdaBody {
+    /// `fn(x) -> x * 2`: the value is returned.
+    Expr(Box<Expr>),
+    Block(Block),
 }
 
 pub type Block = Vec<Stmt>;
@@ -255,6 +294,8 @@ pub enum ExprKind {
     Elvis(Box<Expr>, Box<Expr>),
     /// `return`, `break` or `continue` on the right of `?:`.
     Jump(Jump),
+    /// `fn(x) -> x * 2`
+    Lambda(Box<Lambda>),
     /// Placeholder produced after a parse error.
     Error,
 }

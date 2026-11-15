@@ -1,0 +1,6 @@
+# expect-error: this lambda might not return a value
+fn main():
+    val f = fn(x: Int) -> Int:
+        if x > 0:
+            return 1
+    print(f(1))

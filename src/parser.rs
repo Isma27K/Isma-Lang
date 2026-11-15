@@ -13,6 +13,9 @@ pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
     prev_span: Span,
+    /// The token position right after a block lambda's body: the line that
+    /// holds the lambda already ended there, so no newline is expected.
+    block_end: Option<usize>,
     diags: Vec<Diagnostic>,
 }
 
@@ -32,7 +35,7 @@ pub fn parse_at(src: &str, base: usize) -> (Program, Vec<Diagnostic>) {
 
 impl Parser {
     fn new(tokens: Vec<Token>) -> Self {
-        Parser { tokens, pos: 0, prev_span: Span::default(), diags: Vec::new() }
+        Parser { tokens, pos: 0, prev_span: Span::default(), block_end: None, diags: Vec::new() }
     }
 
     // ---------- token helpers ----------
@@ -109,7 +112,7 @@ impl Parser {
     }
 
     fn expect_newline(&mut self) -> PResult<()> {
-        if self.eat(&Tok::Newline) || self.at(&Tok::Eof) {
+        if self.eat(&Tok::Newline) || self.at(&Tok::Eof) || self.block_end == Some(self.pos) {
             Ok(())
         } else {
             self.unexpected("end of line")
@@ -594,6 +597,28 @@ impl Parser {
     }
 
     fn type_expr(&mut self) -> PResult<TypeExpr> {
+        // `(fn(Int) -> Int)?`: parentheses group a type (to make a function type nullable).
+        if self.at(&Tok::LParen) {
+            let start = self.bump().span;
+            let mut inner = self.type_expr()?;
+            self.expect(Tok::RParen)?;
+            if self.eat(&Tok::Question) {
+                if inner.nullable {
+                    let span = self.prev_span;
+                    return self.error_diag(
+                        Diagnostic::error("a type can only be made nullable once", span)
+                            .with_primary("remove this")
+                            .with_help("`T?` already allows `null`"),
+                    );
+                }
+                inner.nullable = true;
+            }
+            inner.span = start.merge(self.prev_span);
+            return Ok(inner);
+        }
+        if self.at(&Tok::Fn) {
+            return self.fn_type();
+        }
         let mut name = self.expect_ident("a type")?;
         let mut module = None;
         if self.at(&Tok::Dot) {
@@ -623,7 +648,102 @@ impl Parser {
         }
         let start = module.as_ref().map(|m| m.span).unwrap_or(name.span);
         let span = start.merge(self.prev_span);
-        Ok(TypeExpr { module, name, args, nullable, span })
+        Ok(TypeExpr { module, name, args, nullable, func: None, span })
+    }
+
+    /// `fn(Int, String) -> Bool`, or `fn(Int)` for a function returning nothing.
+    fn fn_type(&mut self) -> PResult<TypeExpr> {
+        let start = self.expect(Tok::Fn)?;
+        self.expect(Tok::LParen)?;
+        let mut params = Vec::new();
+        while !self.at(&Tok::RParen) {
+            if matches!(self.peek(), Tok::Ident(_)) && matches!(self.peek_nth(1), Tok::Colon) {
+                let span = self.span();
+                return self.error_diag(
+                    Diagnostic::error("a function type lists only the parameters' types", span)
+                        .with_help("write `fn(Int, String) -> Bool`, without parameter names"),
+                );
+            }
+            params.push(self.type_expr()?);
+            if !self.eat(&Tok::Comma) {
+                break;
+            }
+        }
+        self.expect(Tok::RParen)?;
+        let ret = if self.eat(&Tok::Arrow) { Some(self.type_expr()?) } else { None };
+        let span = start.merge(self.prev_span);
+        let name = Ident { name: "fn".into(), span: start };
+        Ok(TypeExpr { module: None, name, args: Vec::new(), nullable: false, func: Some(Box::new(FnTypeExpr { params, ret })), span })
+    }
+
+    /// A lambda: `fn(x) -> x * 2`, `fn(a: Int, b: Int) -> a + b`, or one with
+    /// a block body, which must end its line:
+    ///
+    /// ```text
+    /// val f = fn(x: Int) -> Int:      val g = fn(name: String):
+    ///     return x * 2                    print(name)
+    /// ```
+    fn lambda(&mut self) -> PResult<Expr> {
+        let start = self.expect(Tok::Fn)?;
+        self.expect(Tok::LParen)?;
+        let mut params = Vec::new();
+        while !self.at(&Tok::RParen) {
+            let name = self.expect_ident("a parameter name")?;
+            let ty = if self.eat(&Tok::Colon) { Some(self.type_expr()?) } else { None };
+            params.push(LambdaParam { name, ty });
+            if !self.eat(&Tok::Comma) {
+                break;
+            }
+        }
+        self.expect(Tok::RParen)?;
+        let head = start.merge(self.prev_span);
+        // `fn(x: Int) -> Int:` + a block, or `fn(x) -> <expression>`: decided
+        // by whether a type and then `:` at the end of the line follow `->`.
+        let (ret, block) = if self.eat(&Tok::Arrow) {
+            let (pos, prev, ndiags) = (self.pos, self.prev_span, self.diags.len());
+            match self.type_expr() {
+                // (`fn(x) -> x ?: 0`: a `?` right before the `:` is `?:`, the
+                // elvis operator, unless the line ends there.)
+                Ok(t) if self.at(&Tok::Colon)
+                    && (matches!(self.peek_nth(1), Tok::Newline) || !(t.nullable && self.prev_span.end == self.span().start)) =>
+                {
+                    (Some(t), true)
+                }
+                _ => {
+                    self.pos = pos;
+                    self.prev_span = prev;
+                    self.diags.truncate(ndiags);
+                    (None, false)
+                }
+            }
+        } else if self.at(&Tok::Colon) {
+            (None, true)
+        } else {
+            let span = self.span();
+            return self.error_diag(
+                Diagnostic::error(format!("expected `->` or `:` after the lambda's parameters, found {}", self.peek()), span)
+                    .with_help("write `fn(x) -> x * 2`, or end the line with `:` and put a block under it"),
+            );
+        };
+        if !block {
+            let body = self.expr()?;
+            let span = start.merge(body.span);
+            let lam = Lambda { params, ret: None, body: LambdaBody::Expr(Box::new(body)), head };
+            return Ok(Expr { kind: ExprKind::Lambda(Box::new(lam)), span });
+        }
+        if !matches!(self.peek_nth(1), Tok::Newline) {
+            let span = self.span();
+            return self.error_diag(
+                Diagnostic::error("a lambda's block must start on a new line", span)
+                    .with_note("a block body can't be inside parentheses or follow other code on its line")
+                    .with_help("put the lambda in a variable first (`val f = fn(x: Int):` and the block under it), or write a one-line lambda: `fn(x) -> ...`"),
+            );
+        }
+        let body = self.block()?;
+        self.block_end = Some(self.pos);
+        let span = start.merge(self.prev_span);
+        let lam = Lambda { params, ret, body: LambdaBody::Block(body), head };
+        Ok(Expr { kind: ExprKind::Lambda(Box::new(lam)), span })
     }
 
     // ---------- statements ----------
@@ -677,9 +797,18 @@ impl Parser {
                 Ok(Stmt { kind: StmtKind::While { cond, body }, span: start.merge(self.prev_span) })
             }
             Tok::For => self.for_stmt(),
+            // `fn(...)` starts a lambda (an expression); `fn name(...)` would be a nested function.
+            Tok::Fn if matches!(self.peek_nth(1), Tok::LParen) => self.simple_stmt(),
             Tok::Fn => {
                 let span = self.span();
-                self.error("nested functions are not supported yet", span)
+                let name = match self.peek_nth(1) {
+                    Tok::Ident(n) => n.clone(),
+                    _ => "f".into(),
+                };
+                self.error_diag(
+                    Diagnostic::error("functions can't be declared inside other functions", span)
+                        .with_help(format!("declare it at the top level, or use a lambda: `val {name} = fn(x: Int) -> Int:`")),
+                )
             }
             Tok::Struct | Tok::Enum => {
                 let span = self.span();
@@ -1352,6 +1481,7 @@ impl Parser {
                 self.bump();
                 ExprKind::Name(name)
             }
+            Tok::Fn => return self.lambda(),
             Tok::LParen => {
                 self.bump();
                 let e = self.expr()?;
@@ -1464,6 +1594,16 @@ mod tests {
                 format!("{{{}}}", es.join(", "))
             }
             ExprKind::In { item, container, negated } => format!("({} {}in {})", show(item), if *negated { "not " } else { "" }, show(container)),
+            ExprKind::Lambda(l) => {
+                let ps: Vec<String> = l.params.iter().map(|p| match &p.ty {
+                    Some(t) => format!("{}: {}", p.name.name, t.name.name),
+                    None => p.name.name.clone(),
+                }).collect();
+                match &l.body {
+                    LambdaBody::Expr(b) => format!("fn({}) -> {}", ps.join(", "), show(b)),
+                    LambdaBody::Block(b) => format!("fn({}) {{{} statements}}", ps.join(", "), b.len()),
+                }
+            }
             other => format!("{other:?}"),
         }
     }
@@ -1609,6 +1749,33 @@ mod tests {
         // `match` is still usable as a name
         assert!(matches!(f.body[1].kind, StmtKind::Let { .. }));
         assert!(matches!(f.body[2].kind, StmtKind::Assign { .. }));
+    }
+
+    #[test]
+    fn lambdas_and_function_types() {
+        // A lambda's body is the rest of the expression.
+        assert_eq!(expr_of("xs.map(fn(x) -> x * 2)"), "xs.map(fn(x) -> (x * 2))");
+        assert_eq!(expr_of("f(fn(a: Int, b) -> a + b, 1)"), "f(fn(a: Int, b) -> (a + b), 1)");
+        assert_eq!(expr_of("xs.map(fn(x) -> x ?: 0)"), "xs.map(fn(x) -> (x ?: 0))");
+        assert_eq!(expr_of("(fn() -> 1)()"), "fn() -> 1()");
+        // A block body ends its line; the next statement follows.
+        let p = parse_ok("fn main():\n    val f = fn(x: Int) -> Int?:\n        return x\n    print(f(1))\n");
+        let Item::Fn(m) = &p.items[0] else { panic!() };
+        assert_eq!(m.body.len(), 2);
+        let StmtKind::Let { value, .. } = &m.body[0].kind else { panic!() };
+        assert_eq!(show(value), "fn(x: Int) {1 statements}");
+        // Function types, made nullable with parentheses.
+        let p = parse_ok("fn run(f: fn(Int, String) -> Bool, g: (fn())?, h: fn() -> Int?):\n    pass\n");
+        let Item::Fn(f) = &p.items[0] else { panic!() };
+        let ft = f.params[0].ty.func.as_ref().unwrap();
+        assert_eq!((ft.params.len(), ft.ret.as_ref().unwrap().name.name.as_str()), (2, "Bool"));
+        assert!(f.params[1].ty.nullable && f.params[1].ty.func.as_ref().unwrap().ret.is_none());
+        assert!(!f.params[2].ty.nullable && f.params[2].ty.func.as_ref().unwrap().ret.as_ref().unwrap().nullable);
+        // A block can't start inside parentheses.
+        let (_, d) = parse("fn main():\n    xs.map(fn(x: Int) -> Int:\n        return x\n    )\n");
+        assert!(d[0].message.contains("must start on a new line"), "{d:?}");
+        let (_, d) = parse("fn main():\n    fn helper():\n        pass\n");
+        assert!(d[0].message.contains("inside other functions"), "{d:?}");
     }
 
     #[test]

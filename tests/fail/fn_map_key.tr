@@ -1,0 +1,4 @@
+# expect-error: `fn(Int) -> Int` can't be a map key
+fn main():
+    val m: Map[fn(Int) -> Int, Int] = {}
+    print(m.len())

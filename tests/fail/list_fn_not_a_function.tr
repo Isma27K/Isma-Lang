@@ -1,0 +1,3 @@
+# expect-error: `filter` takes a function, found an `Int`
+fn main():
+    print([1].filter(3))

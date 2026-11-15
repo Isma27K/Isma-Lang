@@ -1,0 +1,4 @@
+# expect-error: `print` cannot print a value of type `fn(Int) -> Int`
+fn main():
+    val f = fn(x: Int) -> x
+    print(f)

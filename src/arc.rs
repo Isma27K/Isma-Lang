@@ -187,7 +187,8 @@ fn rvalue_roles(f: &Func, rv: &Rvalue, sigs: &[Vec<bool>], r: &mut Roles) {
             add(&args[0], true, r);
             add(&args[1], false, r);
         }
-        Rvalue::New(_, args) | Rvalue::Reuse(_, _, args) | Rvalue::ListNew(_, args) => {
+        // A closure keeps its captured values.
+        Rvalue::New(_, args) | Rvalue::Reuse(_, _, args) | Rvalue::ListNew(_, args) | Rvalue::Closure(_, _, args) => {
             for a in args {
                 add(a, true, r);
             }
@@ -388,6 +389,8 @@ fn direct_writes(f: &Func, s: &Stmt, calls: &mut Vec<FuncId>) -> Vec<Class> {
     };
     match rv {
         Some(Rvalue::Call(fid, ..)) => calls.push(*fid),
+        // Could be any function value: see `ANY_CLOSURE`.
+        Some(Rvalue::CallIndirect(..)) => calls.push(ANY_CLOSURE),
         // Taking an element out, or releasing them all.
         Some(Rvalue::Builtin(Builtin::ListPop | Builtin::ListRemoveAt | Builtin::ListClear, args, _)) => out.push(Class::Elem(elem_of(&f.operand_ty(&args[0])))),
         _ => {}
@@ -396,10 +399,16 @@ fn direct_writes(f: &Func, s: &Stmt, calls: &mut Vec<FuncId>) -> Vec<Class> {
 }
 
 
+/// A call through a function value stands for a call of this pseudo
+/// function, which calls every function that values can run (closure code).
+const ANY_CLOSURE: FuncId = usize::MAX;
+
 /// Every slot class each function may overwrite, directly or through calls.
+/// One more entry at the end is `ANY_CLOSURE`'s.
 fn write_effects(prog: &Program) -> Vec<HashSet<Class>> {
     let mut writes: Vec<HashSet<Class>> = Vec::new();
     let mut callees: Vec<Vec<FuncId>> = Vec::new();
+    let any = prog.funcs.len();
     for f in &prog.funcs {
         let mut w = HashSet::new();
         let mut calls = Vec::new();
@@ -408,9 +417,16 @@ fn write_effects(prog: &Program) -> Vec<HashSet<Class>> {
                 w.extend(direct_writes(f, s, &mut calls));
             }
         }
+        for c in &mut calls {
+            if *c == ANY_CLOSURE {
+                *c = any;
+            }
+        }
         writes.push(w);
         callees.push(calls);
     }
+    writes.push(HashSet::new());
+    callees.push((0..prog.funcs.len()).filter(|&i| prog.funcs[i].closure).collect());
     loop {
         let mut changed = false;
         for fi in 0..writes.len() {
@@ -435,6 +451,7 @@ fn stmt_writes(f: &Func, s: &Stmt, writes: &[HashSet<Class>]) -> Vec<Class> {
     let mut calls = Vec::new();
     let mut out = direct_writes(f, s, &mut calls);
     for c in calls {
+        let c = if c == ANY_CLOSURE { writes.len() - 1 } else { c };
         out.extend(writes[c].iter().cloned());
     }
     out
@@ -550,13 +567,16 @@ fn struct_alloc_size(structs: &[TStruct], sid: StructId) -> u64 {
 /// owned parameter, so this is a fixpoint over the call graph.
 fn infer_borrows(prog: &Program, sizes: &[u64], cyclic: &[bool]) -> Vec<Vec<bool>> {
     let mut sigs: Vec<Vec<bool>> = prog.funcs.iter().map(|f| vec![false; f.params.len()]).collect();
-    // Reuse candidates don't depend on other functions' signatures.
+    // Reuse candidates don't depend on other functions' signatures. (Closure
+    // code keeps every parameter borrowed: its callers can't know whose code they run.)
     for (fi, f) in prog.funcs.iter().enumerate() {
-        sigs[fi] = reuse_params(f, sizes, cyclic, &sigs);
+        if !f.closure {
+            sigs[fi] = reuse_params(f, sizes, cyclic, &sigs);
+        }
     }
     loop {
         let mut changed = false;
-        for (fi, f) in prog.funcs.iter().enumerate() {
+        for (fi, f) in prog.funcs.iter().enumerate().filter(|(_, f)| !f.closure) {
             for (i, &p) in f.params.iter().enumerate() {
                 if sigs[fi][i] || !rc(f, p) {
                     continue;

@@ -1,0 +1,6 @@
+# expect-error: expected `fn(Int) -> Int`, found `fn(String) -> Int`
+fn apply(f: fn(Int) -> Int, x: Int) -> Int:
+    return f(x)
+
+fn main():
+    print(apply(fn(s: String) -> s.len(), 1))

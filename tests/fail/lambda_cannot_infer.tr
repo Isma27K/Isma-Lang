@@ -1,0 +1,4 @@
+# expect-error: cannot infer the type of parameter `x`
+fn main():
+    val f = fn(x) -> x
+    print(f(1))

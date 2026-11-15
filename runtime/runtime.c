@@ -792,6 +792,39 @@ void tarn_list_sort(TarnList *l, int64_t kind) {
     qsort(l->data, (size_t)l->len, 8, kind == 0 ? cmp_int : kind == 1 ? cmp_float : cmp_str);
 }
 
+// `xs.sort_by(key)`: sort `l` in place by the matching `keys` (computed
+// once per element by the caller; `kind` as for `sort`), keeping equal keys
+// in their order. A bottom-up merge sort of positions, then the elements
+// (`size` bytes each) move to their places; no counts change.
+void tarn_list_sort_by(TarnList *l, TarnList *keys, int64_t kind, int64_t size) {
+    int64_t n = l->len;
+    if (n < 2) return;
+    int (*cmp)(const void *, const void *) = kind == 0 ? cmp_int : kind == 1 ? cmp_float : cmp_str;
+    const char *k = keys->data;
+    int64_t *pos = malloc((size_t)n * sizeof(int64_t)), *tmp = malloc((size_t)n * sizeof(int64_t));
+    char *moved = malloc((size_t)(n * size));
+    if (!pos || !tmp || !moved) oom();
+    for (int64_t i = 0; i < n; i++) pos[i] = i;
+    for (int64_t width = 1; width < n; width *= 2) {
+        for (int64_t lo = 0; lo < n; lo += 2 * width) {
+            int64_t mid = lo + width < n ? lo + width : n, hi = lo + 2 * width < n ? lo + 2 * width : n;
+            int64_t a = lo, b = mid, o = lo;
+            // Take from the right half only when it's strictly smaller: stable.
+            while (a < mid && b < hi) tmp[o++] = cmp(k + pos[b] * 8, k + pos[a] * 8) < 0 ? pos[b++] : pos[a++];
+            while (a < mid) tmp[o++] = pos[a++];
+            while (b < hi) tmp[o++] = pos[b++];
+        }
+        int64_t *t = pos;
+        pos = tmp;
+        tmp = t;
+    }
+    for (int64_t i = 0; i < n; i++) memcpy(moved + i * size, l->data + pos[i] * size, (size_t)size);
+    memcpy(l->data, moved, (size_t)(n * size));
+    free(pos);
+    free(tmp);
+    free(moved);
+}
+
 // ---------------------------------------------------------------- more string utilities
 
 TarnStr *tarn_str_list_join(TarnList *l, TarnStr *sep) {

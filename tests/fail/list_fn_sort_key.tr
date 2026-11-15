@@ -1,0 +1,7 @@
+# expect-error: `sort_by` needs a key of type `Int`, `Float` or `String`, found `P`
+struct P:
+    x: Int
+
+fn main():
+    val ps = [P(1)]
+    ps.sort_by(fn(p) -> p)

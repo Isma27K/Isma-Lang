@@ -59,6 +59,7 @@ impl<'a> Lower<'a> {
             exported: f.exported,
             track_caller: f.track_caller,
             generic: f.generic,
+            closure: f.closure,
         }
     }
 
@@ -925,6 +926,19 @@ impl<'a> Lower<'a> {
                 self.push(Stmt::Assign(res, u));
                 self.start(end);
                 Rvalue::Use(Operand::Var(res))
+            }
+            TExprKind::Closure { func, sid, captures } => {
+                let caps = self.operands(captures);
+                Rvalue::Closure(*func, *sid, caps)
+            }
+            TExprKind::CallValue(f, args) => {
+                let fo = self.operand(f);
+                let a = self.operands(args);
+                Rvalue::CallIndirect(fo, a, e.span)
+            }
+            TExprKind::Block(stmts, value) => {
+                self.stmts(stmts);
+                self.rvalue(value)
             }
             TExprKind::Jump(s) => {
                 self.stmt(s);

@@ -219,6 +219,16 @@ fn calls_in_expr(e: &TExpr, out: &mut Vec<(FuncId, Span)>) {
             calls_in_expr(key_str, out);
             calls_in_expr(value_str, out);
         }
+        // (A lambda's own body is a function of its own: its calls are recorded with it.)
+        TExprKind::Closure { captures, .. } => captures.iter().for_each(|a| calls_in_expr(a, out)),
+        TExprKind::CallValue(f, args) => {
+            calls_in_expr(f, out);
+            args.iter().for_each(|a| calls_in_expr(a, out));
+        }
+        TExprKind::Block(stmts, e) => {
+            calls_in(stmts, out);
+            calls_in_expr(e, out);
+        }
         TExprKind::Int(_) | TExprKind::Float(_) | TExprKind::Bool(_) | TExprKind::Str(_) | TExprKind::Local(_) | TExprKind::Null => {}
     }
 }
@@ -364,6 +374,7 @@ impl Checker {
         match t {
             Type::List(e) | Type::Nullable(e) => 1 + self.type_depth(e),
             Type::Map(k, v) => 1 + self.type_depth(k).max(self.type_depth(v)),
+            Type::Func(ps, r) => 1 + ps.iter().chain([&**r]).map(|t| self.type_depth(t)).max().unwrap_or(0),
             Type::Struct(id) | Type::Enum(id, _) => 1 + self.struct_args[*id].iter().map(|a| self.type_depth(a)).max().unwrap_or(0),
             _ => 1,
         }
@@ -375,6 +386,7 @@ impl Checker {
             Type::Param(q) => *q == p,
             Type::List(e) | Type::Nullable(e) => self.mentions(e, p),
             Type::Map(k, v) => self.mentions(k, p) || self.mentions(v, p),
+            Type::Func(ps, r) => ps.iter().any(|t| self.mentions(t, p)) || self.mentions(r, p),
             Type::Struct(id) | Type::Enum(id, _) => self.struct_has_param[*id] && self.struct_args[*id].iter().any(|a| self.mentions(a, p)),
             _ => false,
         }
@@ -386,6 +398,10 @@ impl Checker {
             Type::Param(p) => map.iter().find(|(q, _)| q == p).map(|(_, t)| t.clone()).unwrap_or_else(|| t.clone()),
             Type::List(e) => Type::List(Box::new(self.subst(e, map))),
             Type::Map(k, v) => Type::Map(Box::new(self.subst(k, map)), Box::new(self.subst(v, map))),
+            Type::Func(ps, r) => {
+                let ps = ps.iter().map(|t| self.subst(t, map)).collect();
+                Type::Func(ps, Box::new(self.subst(r, map)))
+            }
             // `T?` with `T` = `Int?` is `Int?`.
             Type::Nullable(e) => self.subst(e, map).nullable(),
             Type::Struct(id) | Type::Enum(id, _) if self.struct_has_param[*id] => {
@@ -429,7 +445,7 @@ impl Checker {
         let name = format!("{base}[{}]", shown.join(", "));
         let has_param = args.iter().any(|a| a.has_param(&self.struct_has_param));
         let variants = self.structs[origin].variants.as_ref().map(|_| Vec::new());
-        self.structs.push(TStruct { name: name.clone(), fields: Vec::new(), variants, generic: has_param });
+        self.structs.push(TStruct { name: name.clone(), fields: Vec::new(), variants, generic: has_param, closure: None });
         self.def_types.push(match self.def_types[origin] {
             Type::Enum(_, boxed) => Type::Enum(id, boxed),
             _ => Type::Struct(id),
@@ -664,7 +680,7 @@ impl Checker {
     /// Learn type parameters (`tparams`, bound so far in `bound`) by matching a
     /// parameter type `pat` against the type of the value given for it.
     /// `weak`: only bind parameters that are still unknown.
-    fn unify(&self, pat: &Type, actual: &Type, tparams: &[ParamId], bound: &mut [Option<Type>], weak: bool) {
+    pub(super) fn unify(&self, pat: &Type, actual: &Type, tparams: &[ParamId], bound: &mut [Option<Type>], weak: bool) {
         match (pat, actual) {
             (_, Type::Error) => {}
             (Type::Param(p), a) => {
@@ -687,6 +703,12 @@ impl Checker {
                 self.unify(pk, ak, tparams, bound, weak);
                 self.unify(pv, av, tparams, bound, weak);
             }
+            (Type::Func(pp, pr), Type::Func(ap, ar)) if pp.len() == ap.len() => {
+                for (p, a) in pp.iter().zip(ap) {
+                    self.unify(p, a, tparams, bound, weak);
+                }
+                self.unify(pr, ar, tparams, bound, weak);
+            }
             (Type::Struct(ps) | Type::Enum(ps, _), Type::Struct(asid) | Type::Enum(asid, _))
                 if self.struct_has_param[*ps] && self.struct_origin[*ps] == self.struct_origin[*asid] =>
             {
@@ -702,7 +724,8 @@ impl Checker {
     /// of a generic enum without fields to tell its type arguments (`Tree.Leaf`)?
     fn needs_context(&mut self, e: &Expr) -> bool {
         match &e.kind {
-            ExprKind::Null => true,
+            // A lambda's parameters (and result) get their types from the other arguments.
+            ExprKind::Null | ExprKind::Lambda(_) => true,
             ExprKind::List(es) => es.is_empty(),
             ExprKind::Map(es) => es.is_empty(),
             ExprKind::Field(obj, _) => {
@@ -780,7 +803,19 @@ impl Checker {
                 }
                 let pat = params[idx].1.clone();
                 let known = self.known_type(&pat, tparams, &bound);
-                let t = self.expr(&a.value, known.as_ref());
+                let t = match &a.value.kind {
+                    // A lambda takes what's known of its type so far; what it returns can
+                    // tell the rest (`map_all(xs, fn(x) -> x.to_string())` finds `U`).
+                    ExprKind::Lambda(lam) if known.is_none() => {
+                        let map: Vec<(ParamId, Type)> = tparams.iter().zip(&bound).filter_map(|(p, b)| b.clone().map(|b| (*p, b))).collect();
+                        let partial = self.subst(&pat, &map);
+                        let unknown: Vec<ParamId> = tparams.iter().zip(&bound).filter(|(_, b)| b.is_none()).map(|(p, _)| *p).collect();
+                        let t = self.lambda(lam, a.value.span, Some(&partial), &unknown);
+                        self.ide.expr_types.push((a.value.span, t.ty.clone()));
+                        t
+                    }
+                    _ => self.expr(&a.value, known.as_ref()),
+                };
                 self.unify(&pat, &t.ty, tparams, &mut bound, false);
                 // With the parameter's type known, check the argument right away (as for any call).
                 let t = match &known {
@@ -917,6 +952,9 @@ impl Checker {
             self.record_calls(&tf.body, None);
             self.check_obligations(nobl);
             put_func(out, fid, tf);
+            for (lid, lf) in std::mem::take(&mut self.lambda_funcs) {
+                put_func(out, lid, lf);
+            }
             if failed || self.error_count() > 0 {
                 return;
             }

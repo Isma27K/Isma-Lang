@@ -226,6 +226,7 @@ mod tests {
                 fields: vec![],
                 variants: Some(vec![variant("Circle", vec![Type::Float]), variant("Rect", vec![Type::Float, Type::Float]), variant("Empty", vec![])]),
                 generic: false,
+                closure: None,
             },
             TStruct {
                 name: "Expr".into(),
@@ -236,6 +237,7 @@ mod tests {
                     variant("Add", vec![Type::Enum(1, true), Type::Enum(1, true)]),
                 ]),
                 generic: false,
+                closure: None,
             },
         ]
     }

@@ -1,0 +1,4 @@
+# expect-error: `return` can't be used in a one-line lambda
+fn main():
+    val xs: List[Int?] = [1, null]
+    print(xs.map(fn(x) -> x ?: return))

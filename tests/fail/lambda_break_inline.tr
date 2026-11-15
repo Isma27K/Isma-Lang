@@ -1,0 +1,5 @@
+# expect-error: `break` can't be used in a one-line lambda
+fn main():
+    val xs: List[Int?] = [1, null]
+    for _ in 0..2:
+        print(xs.count(fn(x) -> (x ?: break) > 0))

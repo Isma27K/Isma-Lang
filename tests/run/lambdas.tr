@@ -1,0 +1,171 @@
+# First-class functions: function types, lambdas, closures and named
+# functions used as values.
+
+struct Counter:
+    var count: Int
+
+    fn bumper(self) -> fn(Int):
+        return fn(n) -> self.add(n)
+
+    fn add(self, n: Int):
+        self.count += n
+
+struct Button:
+    val name: String
+    var on_click: (fn(String) -> String)?
+
+enum Op:
+    Unary(name: String, f: fn(Int) -> Int)
+    Binary(name: String, f: fn(Int, Int) -> Int)
+
+struct Stack[T]:
+    var items: List[T]
+
+    fn mapped[U](self, f: fn(T) -> U) -> Stack[U]:
+        return Stack[U](self.items.map(f))
+
+    fn pusher(self) -> fn(T):
+        return fn(x) -> self.items.push(x)
+
+fn double(x: Int) -> Int:
+    return x * 2
+
+fn shout(s: String) -> String:
+    return s.upper() + "!"
+
+fn biggest[T](a: T, b: T) -> T:
+    if a > b:
+        return a
+    return b
+
+fn apply(f: fn(Int) -> Int, x: Int) -> Int:
+    return f(x)
+
+fn make_adder(n: Int) -> fn(Int) -> Int:
+    return fn(x) -> x + n
+
+fn compose[A, B, C](f: fn(A) -> B, g: fn(B) -> C) -> fn(A) -> C:
+    return fn(x) -> g(f(x))
+
+fn twice[T](f: fn(T) -> T) -> fn(T) -> T:
+    return fn(x) -> f(f(x))
+
+fn map_all[T, U](xs: List[T], f: fn(T) -> U) -> List[U]:
+    val out: List[U] = []
+    for x in xs:
+        out.push(f(x))
+    return out
+
+fn run(label: String, cb: (fn())?):
+    if cb != null:
+        cb()
+    else:
+        print(f"{label}: nothing to run")
+
+fn counter() -> fn() -> Int:
+    val calls: List[Int] = []
+    val next = fn() -> Int:
+        calls.push(1)
+        return calls.len()
+    return next
+
+fn found() -> String?:
+    return "here"
+
+fn main():
+    # named functions and lambdas as arguments
+    print(apply(double, 21))
+    print(apply(fn(x) -> x * x, 7))
+    print(apply(make_adder(10), 5))
+    print(make_adder(1)(2))
+
+    # captured values: strings and lists (shared, so changes show)
+    val greeting = "hello, " + "world"
+    val parts = ["a", "b"]
+    val describe = fn(n: Int) -> f"{greeting} #{n} of {parts.len()}"
+    print(describe(1))
+    parts.push("c")
+    print(describe(2))
+
+    # each loop iteration captures its own value
+    val later: List[fn() -> Int] = []
+    for i in 0..3:
+        later.push(fn() -> i * 10)
+    print(later.map(fn(f) -> f()))
+
+    # block lambdas
+    val classify = fn(n: Int) -> String:
+        if n < 0:
+            return "negative"
+        if n == 0:
+            return "zero"
+        return "positive"
+    print([-3, 0, 8].map(classify))
+    val tick = counter()
+    tick()
+    tick()
+    print(tick())
+
+    # captures through two lambdas
+    val base = 100
+    val outer = fn(a: Int) -> fn(Int) -> Int:
+        return fn(b) -> a + b + base
+    print(outer(1)(2))
+    print([1, 2, 3].map(fn(x) -> fn(y: Int) -> x + y).map(fn(add) -> add(100)))
+
+    # `self` captured by a closure a method returns
+    val c = Counter(0)
+    val bump = c.bumper()
+    bump(3)
+    bump(4)
+    print(c.count)
+
+    # functions in lists, maps, struct fields and enum variants
+    val ops: List[fn(Int) -> Int] = [fn(x) -> x + 1, fn(x) -> x * 10, double]
+    for op in ops:
+        print(op(5))
+    print(ops[1](7))
+    val table: Map[String, fn(Int, Int) -> Int] = {"+": fn(a, b) -> a + b, "*": fn(a, b) -> a * b, "max": biggest}
+    for name, op in table:
+        print(f"{name}: {op(6, 7)}")
+    val b = Button("ok", null)
+    b.on_click = shout
+    val handler = b.on_click
+    if handler != null:
+        print(handler(b.name))
+    var acc = 5
+    for op in [Op.Unary("neg", fn(x) -> -x), Op.Binary("sub", fn(a, b) -> a - b), Op.Unary("sq", fn(x) -> x * x)]:
+        match op:
+            case Unary(name, f):
+                acc = f(acc)
+                print(f"{name} -> {acc}")
+            case Binary(name, f):
+                acc = f(acc, 3)
+                print(f"{name} -> {acc}")
+
+    # nullable function types, functions returning nothing
+    run("a", fn() -> print("ran a"))
+    run("b", null)
+    val log = fn(s: String) -> print("log: " + s)
+    log("hi")
+    val answer = fn() -> 42
+    print(answer())
+
+    # generics
+    print(twice(shout)("hey"))
+    print(compose(fn(s: String) -> s.len(), fn(n: Int) -> n * 2)("abcd"))
+    print(compose(shout, fn(s: String) -> s.len())("ab"))
+    print(map_all([1, 2], fn(x) -> x.to_string() + "!"))
+    val pick: fn(String, String) -> String = biggest
+    print(pick("pear", "apple"))
+    print(biggest[Int](3, 9))
+    val s = Stack[Int]([1, 2])
+    s.pusher()(3)
+    print(s.items)
+    print(s.mapped(fn(x) -> f"<{x}>").items)
+
+    # a smart cast carries into what a lambda captures
+    val maybe = found()
+    if maybe != null:
+        val loud = fn() -> maybe.upper()
+        print(loud())

@@ -1,0 +1,9 @@
+# expect-error: cannot infer the type `T` for function `biggest` used as a value
+fn biggest[T](a: T, b: T) -> T:
+    if a > b:
+        return a
+    return b
+
+fn main():
+    val m = biggest
+    print(m(1, 2))

@@ -37,6 +37,9 @@ pub struct Func {
     pub track_caller: bool,
     /// A placeholder for a generic function (see `TFunc::generic`): never emitted.
     pub generic: bool,
+    /// Called through function values (see `TFunc::closure`): its parameters
+    /// stay borrowed.
+    pub closure: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -109,6 +112,11 @@ pub enum Rvalue {
     ListNew(Type, Vec<Operand>),
     /// An empty map of the given (`Map`) type, with room for this many entries.
     MapNew(Type, usize),
+    /// A function value: closure code `.0` with the captured values (consumed),
+    /// stored in a new closure of struct `.1`. Without captures it's a constant.
+    Closure(FuncId, Option<StructId>, Vec<Operand>),
+    /// Call the function value `.0` (borrowing it and every argument).
+    CallIndirect(Operand, Vec<Operand>, Span),
 }
 
 /// What a `New` builds.
@@ -183,7 +191,7 @@ impl Func {
 /// A nullable reference is a possibly-null pointer, so it counts too. An enum
 /// does when some variant carries data.
 pub fn is_ref(t: &Type) -> bool {
-    matches!(t.non_null(), Type::Str | Type::List(_) | Type::Map(..) | Type::Struct(_) | Type::Enum(_, true))
+    matches!(t.non_null(), Type::Str | Type::List(_) | Type::Map(..) | Type::Struct(_) | Type::Enum(_, true) | Type::Func(..))
 }
 
 impl Operand {
@@ -205,7 +213,9 @@ impl Rvalue {
             | Rvalue::Builtin(_, args, _)
             | Rvalue::New(_, args)
             | Rvalue::Reuse(_, _, args)
-            | Rvalue::ListNew(_, args) => args.iter().collect(),
+            | Rvalue::ListNew(_, args)
+            | Rvalue::Closure(_, _, args) => args.iter().collect(),
+            Rvalue::CallIndirect(f, args, _) => std::iter::once(f).chain(args).collect(),
             Rvalue::Field(..) | Rvalue::Index(..) | Rvalue::Tag(_) | Rvalue::VariantField(..) | Rvalue::MapNew(..) => vec![],
             // (the list / object of a projection is a VarId, see `base`)
         }
@@ -326,6 +336,9 @@ fn print_func(out: &mut String, f: &Func, p: &Program, names: &[String]) {
         }
         Rvalue::ListNew(_, args) => format!("[{}]", ops(args)),
         Rvalue::MapNew(..) => "{}".to_string(),
+        Rvalue::Closure(fid, _, caps) if caps.is_empty() => format!("fn {}", p.funcs[*fid].name),
+        Rvalue::Closure(fid, _, caps) => format!("closure {}[{}]", p.funcs[*fid].name, ops(caps)),
+        Rvalue::CallIndirect(f, args, _) => format!("{}({})", op(f), ops(args)),
     };
     for (b, block) in f.blocks.iter().enumerate() {
         let _ = writeln!(out, "  bb{b}:");

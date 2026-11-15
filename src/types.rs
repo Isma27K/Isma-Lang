@@ -21,6 +21,9 @@ pub enum Type {
     Enum(StructId, bool),
     /// `T?`: a `T` or `null`. Never nested, and never `Unit?`.
     Nullable(Box<Type>),
+    /// `fn(Int, String) -> Bool`: a function value (a named function, or a
+    /// lambda with the values it captured). `Unit` when it returns nothing.
+    Func(Vec<Type>, Box<Type>),
     /// The type of a bare `null` literal before it meets an expected type.
     Null,
     /// A type parameter inside generic code (`T` in `fn max[T](a: T, b: T)`).
@@ -38,6 +41,7 @@ impl Type {
             Type::Error => true,
             Type::List(t) | Type::Nullable(t) => t.is_error(),
             Type::Map(k, v) => k.is_error() || v.is_error(),
+            Type::Func(ps, r) => ps.iter().any(Type::is_error) || r.is_error(),
             _ => false,
         }
     }
@@ -84,6 +88,9 @@ impl Type {
             (Type::Error, _) | (_, Type::Error) => true,
             (Type::List(a), Type::List(b)) | (Type::Nullable(a), Type::Nullable(b)) => a.compatible(b),
             (Type::Map(ak, av), Type::Map(bk, bv)) => ak.compatible(bk) && av.compatible(bv),
+            // Function types match exactly (no variance): a lambda written where
+            // one is expected takes on the expected type instead.
+            (Type::Func(ap, ar), Type::Func(bp, br)) => ap.len() == bp.len() && ap.iter().zip(bp).all(|(a, b)| a.compatible(b)) && ar.compatible(br),
             (a, b) => a == b,
         }
     }
@@ -95,6 +102,7 @@ impl Type {
             Type::Param(_) => true,
             Type::List(t) | Type::Nullable(t) => t.has_param(generic),
             Type::Map(k, v) => k.has_param(generic) || v.has_param(generic),
+            Type::Func(ps, r) => ps.iter().any(|p| p.has_param(generic)) || r.has_param(generic),
             Type::Struct(id) | Type::Enum(id, _) => generic.get(*id).copied().unwrap_or(false),
             _ => false,
         }
@@ -111,7 +119,16 @@ impl Type {
             Type::List(t) => format!("List[{}]", t.display(struct_names, param_names)),
             Type::Map(k, v) => format!("Map[{}, {}]", k.display(struct_names, param_names), v.display(struct_names, param_names)),
             Type::Struct(id) | Type::Enum(id, _) => struct_names[*id].clone(),
+            // `(fn(Int) -> Int)?`: without the parentheses the `?` would belong to the return type.
+            Type::Nullable(t) if matches!(**t, Type::Func(..)) => format!("({})?", t.display(struct_names, param_names)),
             Type::Nullable(t) => format!("{}?", t.display(struct_names, param_names)),
+            Type::Func(ps, r) => {
+                let ps: Vec<String> = ps.iter().map(|p| p.display(struct_names, param_names)).collect();
+                match **r {
+                    Type::Unit => format!("fn({})", ps.join(", ")),
+                    _ => format!("fn({}) -> {}", ps.join(", "), r.display(struct_names, param_names)),
+                }
+            }
             Type::Param(p) => param_names.get(*p).cloned().unwrap_or_else(|| "T".into()),
             Type::Null => "null".into(),
             Type::Error => "{unknown}".into(),

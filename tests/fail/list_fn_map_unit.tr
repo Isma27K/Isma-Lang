@@ -1,0 +1,4 @@
+# expect-error: the function given to `map` returns nothing
+fn main():
+    val out: List[Int] = []
+    print([1].map(fn(x) -> out.push(x)))

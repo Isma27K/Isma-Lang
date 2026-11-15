@@ -1,0 +1,6 @@
+# expect-error: `cb` might be null
+fn run(cb: (fn() -> Int)?) -> Int:
+    return cb()
+
+fn main():
+    print(run(null))

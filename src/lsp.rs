@@ -962,6 +962,36 @@ mod tests {
     }
 
     #[test]
+    fn lambdas_hover_hints_and_captures() {
+        let src = "fn main():\n    val base = 10\n    val xs = [1, 2, 3]\n    val ys = xs.map(fn(x) -> x + base)\n    val f = fn(s: String) -> s.len() + base\n    print(ys.len() + f(\"ab\"))\n";
+        let (s, uri) = server_with(src);
+        let hover = |needle: &str, delta: usize| {
+            let h = s.hover(lt::HoverParams { text_document_position_params: tdp(&uri, at(src, needle, delta)), work_done_progress_params: Default::default() }).unwrap();
+            let lt::HoverContents::Markup(m) = h.contents else { panic!() };
+            m.value
+        };
+        // An inlined lambda's parameter, typed from the list; a closure's type.
+        assert!(hover("x + base", 0).contains("x: Int"), "{}", hover("x + base", 0));
+        assert!(hover("fn(s: String)", 0).contains("fn(String) -> Int"), "{}", hover("fn(s: String)", 0));
+        // A captured name leads to its declaration outside the lambda.
+        let r = s
+            .definition(lt::GotoDefinitionParams {
+                text_document_position_params: tdp(&uri, at(src, "base\n    print", 0)),
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+            })
+            .unwrap();
+        let lt::GotoDefinitionResponse::Scalar(loc) = r else { panic!() };
+        assert_eq!(loc.range.start, at(src, "base = 10", 0));
+        // The inferred parameter type is shown inline.
+        let full = lt::Range { start: lt::Position { line: 0, character: 0 }, end: lt::Position { line: 9, character: 0 } };
+        let hints = s
+            .inlay_hints(lt::InlayHintParams { text_document: lt::TextDocumentIdentifier { uri: uri.clone() }, range: full, work_done_progress_params: Default::default() })
+            .unwrap();
+        assert!(hints.iter().any(|h| h.position == at(src, "x) ->", 1) && matches!(&h.label, lt::InlayHintLabel::String(l) if l == ": Int")));
+    }
+
+    #[test]
     fn definition_of_method() {
         let (s, uri) = server_with(SRC);
         let r = s

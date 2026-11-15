@@ -1,0 +1,4 @@
+# expect-error: `n` is an `Int`, not a function
+fn main():
+    val n = 3
+    print(n(4))

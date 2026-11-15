@@ -182,6 +182,7 @@ fn main():
         count += x
     for i in 0..3:                           # ...or a range
         print(f"{i}: {xs[i]}")               # f-strings
+    print(xs.filter(fn(x) -> x > 4).map(fn(x) -> x * 2))  # lambdas, inlined into the loops: [10, 16, 20]
     val stock = {"apple": 3, "fig": 0}       # maps (Map[String, Int]), in insertion order
     stock["pear"] = stock.get("pear", 0) + 5
     for fruit, n in stock:
@@ -220,7 +221,7 @@ fn main():
     print(dist(Point(0.0, 0.0), Point(3.0, 4.0)))
 ```
 
-The [**language guide**](docs/language.md) covers everything: types, constants, strictness rules, lints, structs, enums and `match`, operator functions, generics, lists, maps, strings, null safety, modules, built-ins and panics.
+The [**language guide**](docs/language.md) covers everything: types, constants, strictness rules, lints, functions and lambdas, structs, enums and `match`, operator functions, generics, lists, maps, strings, null safety, modules, built-ins and panics.
 
 <a id="batteries"></a>
 ## Batteries included
@@ -338,7 +339,7 @@ These are the best of 3 runs on an AMD Ryzen 5 5500. Reproduce them with `./benc
 - [x] Operator functions: `fn +(self, other: T)`, `==`, `<=>`, `[]`, so `time.now() - start` is a `Duration`
 - [x] Generics for user code: `fn max[T](a: T, b: T) -> T`, `struct Box[T]`, `enum Tree[T]`
 - [x] `Map[K, V]` with `{k: v}` literals, `in`, constants (`val pi = ...`), the `math` and `fs` modules, and string and list utilities (`split`, `join`, `trim`, `replace`, `sort`...)
-- [ ] First-class functions and lambdas: `xs.map(fn(x) -> x * 2)`, `sort_by`
+- [x] First-class functions and lambdas: `xs.map(fn(x) -> x * 2)`, `sort_by`, closures, function types
 - [ ] Interfaces, so generic code can call methods on a `T`
 - [ ] Tuples and sets
 

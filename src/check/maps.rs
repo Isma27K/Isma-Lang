@@ -83,6 +83,7 @@ impl Checker {
             Type::Nullable(_) | Type::Null => "keys can't be `null`",
             Type::List(_) | Type::Map(..) => "a key must not change while it's in the map, and lists and maps can change",
             Type::Unit => "`Unit` has no values",
+            Type::Func(..) => "functions can't be compared, so they can't be keys",
         };
         if report {
             let mut d = Diagnostic::error(format!("`{shown}` can't be a map key"), span).with_primary("not a valid key type").with_note(problem);

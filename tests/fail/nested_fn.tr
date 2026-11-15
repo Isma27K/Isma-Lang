@@ -1,0 +1,4 @@
+# expect-error: functions can't be declared inside other functions
+fn main():
+    fn helper(x: Int) -> Int:
+        return x

@@ -1,0 +1,114 @@
+# List methods that take a function. Lambdas written in the call are inlined
+# into the loop; named functions and other function values work too.
+
+struct Person:
+    name: String
+    age: Int
+    var score: Float
+
+fn double(x: Int) -> Int:
+    return x * 2
+
+# Records each element it sees, to show where the methods stop.
+fn seen(log: List[Int], x: Int) -> Int:
+    log.push(x)
+    return x
+
+fn main():
+    val xs = [5, 3, 8, 1, 9, 2]
+    val none: List[Int] = []
+
+    # map, filter
+    print(xs.map(fn(x) -> x * 2))
+    print(xs.map(double))
+    print(xs.map(fn(x) -> f"#{x}"))
+    val maybe: List[Int?] = xs.map(fn(x) -> if_even(x))
+    print(maybe)
+    print(xs.filter(fn(x) -> x % 2 == 1))
+    print(none.map(fn(x) -> x + 1))
+    print(xs.filter(fn(x) -> x > 2).map(fn(x) -> x * 10))
+    val is_big = fn(x: Int) -> x > 4
+    print(xs.filter(is_big))
+
+    # any, all, find, count: stop at the first element that decides
+    val log: List[Int] = []
+    print(xs.any(fn(x) -> seen(log, x) > 7))
+    print(log)
+    log.clear()
+    print(xs.all(fn(x) -> seen(log, x) > 2))
+    print(log)
+    print(none.any(fn(x) -> x > 0))
+    print(none.all(fn(x) -> x > 0))
+    print(xs.find(fn(x) -> x > 6))
+    print(xs.find(fn(x) -> x > 60))
+    print(xs.count(fn(x) -> x % 2 == 0))
+    print(maybe.find(fn(x) -> x != null))
+    print(maybe.count(fn(x) -> x == null))
+
+    # fold
+    print(xs.fold(0, fn(sum, x) -> sum + x))
+    print(xs.fold("", fn(s, x) -> s + x.to_string()))
+    val best: Int? = xs.fold(null, fn(b, x) -> bigger(b, x))
+    print(best)
+    print(none.fold(100, fn(a, x) -> a + x))
+    val evens: List[Int] = xs.fold([], fn(acc, x) -> keep_even(acc, x))
+    print(evens)
+
+    # sort_by: stable, the key computed once per element
+    val people = [Person("Ada", 36, 9.5), Person("Bo", 25, 7.0), Person("Cy", 36, 8.0), Person("Di", 25, 9.5), Person("Ed", 41, 6.5)]
+    people.sort_by(fn(p) -> p.age)
+    print(people.map(fn(p) -> p.name))
+    people.sort_by(fn(p) -> -p.score)
+    print(people.map(fn(p) -> f"{p.name} {p.score}"))
+    people.sort_by(fn(p) -> p.name.len())
+    print(people.map(fn(p) -> p.name))
+    val words = ["pear", "fig", "banana", "kiwi", "apple"]
+    words.sort_by(fn(w) -> w.len())
+    print(words)
+    words.sort_by(fn(w) -> w)
+    print(words)
+    log.clear()
+    val nums = [3, 1, 2]
+    nums.sort_by(fn(x) -> seen(log, x))
+    print(nums)
+    print(log)
+    none.sort_by(fn(x) -> x)
+    print(none)
+    val flags = [true, false, true, false]
+    flags.sort_by(fn(f) -> if_true(f))
+    print(flags)
+    maybe.sort_by(fn(x) -> x ?: 99)
+    print(maybe)
+
+    # min_by, max_by: the first on a tie, null when empty
+    print(people.min_by(fn(p) -> p.age)?.name)
+    print(people.max_by(fn(p) -> p.age)?.name)
+    print(people.max_by(fn(p) -> p.score)?.name)
+    print(words.max_by(fn(w) -> w.len()))
+    print(none.min_by(fn(x) -> x))
+
+    # elements are shared, not copied: filtering keeps the same people
+    val young = people.filter(fn(p) -> p.age < 30)
+    for p in young:
+        p.score = 0.0
+    print(people.map(fn(p) -> p.score))
+
+fn if_even(x: Int) -> Int?:
+    if x % 2 == 0:
+        return x
+    return null
+
+fn if_true(f: Bool) -> Int:
+    if f:
+        return 0
+    return 1
+
+fn bigger(b: Int?, x: Int) -> Int?:
+    if b == null or x > b:
+        return x
+    return b
+
+fn keep_even(acc: List[Int], x: Int) -> List[Int]:
+    if x % 2 == 0:
+        acc.push(x)
+    return acc

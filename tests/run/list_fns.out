@@ -1,0 +1,40 @@
+[10, 6, 16, 2, 18, 4]
+[10, 6, 16, 2, 18, 4]
+["#5", "#3", "#8", "#1", "#9", "#2"]
+[null, null, 8, null, null, 2]
+[5, 3, 1, 9]
+[]
+[50, 30, 80, 90]
+[5, 8, 9]
+true
+[5, 3, 8]
+false
+[5, 3, 8, 1]
+false
+true
+8
+null
+2
+8
+4
+28
+538192
+9
+100
+[8, 2]
+["Bo", "Di", "Ada", "Cy", "Ed"]
+["Di 9.5", "Ada 9.5", "Cy 8.0", "Bo 7.0", "Ed 6.5"]
+["Di", "Cy", "Bo", "Ed", "Ada"]
+["fig", "pear", "kiwi", "apple", "banana"]
+["apple", "banana", "fig", "kiwi", "pear"]
+[1, 2, 3]
+[3, 1, 2]
+[]
+[true, true, false, false]
+[2, 8, null, null, null, null]
+Di
+Ed
+Di
+banana
+null
+[0.0, 8.0, 0.0, 6.5, 9.5]

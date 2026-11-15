@@ -1,0 +1,13 @@
+# expect-max-allocs: 2001
+# Lambdas passed straight to list methods are inlined into the loops: the only
+# allocations are the input list and, per iteration, the lists that map and
+# filter return. No closure is ever built.
+fn main():
+    val xs = [1, 2, 3, 4, 5]
+    var total = 0
+    for i in 0..1000:
+        total += xs.map(fn(x) -> x * i).filter(fn(x) -> x % 2 == 0).fold(0, fn(a, x) -> a + x)
+        total += xs.count(fn(x) -> x > i % 5)
+        if xs.any(fn(x) -> x == i) or xs.all(fn(x) -> x < i):
+            total += 1
+    print(total)

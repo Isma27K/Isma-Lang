@@ -1,0 +1,6 @@
+# expect-error: a lambda can't assign to `n`, a variable from outside it
+fn main():
+    val n = 1
+    val f = fn():
+        n = 2
+    f()

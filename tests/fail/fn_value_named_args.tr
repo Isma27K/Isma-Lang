@@ -1,0 +1,4 @@
+# expect-error: a function value takes its arguments by position
+fn main():
+    val f = fn(x: Int) -> x
+    print(f(x = 1))

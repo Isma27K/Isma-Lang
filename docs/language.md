@@ -164,6 +164,66 @@ clamp(x=15, high=10, low=0)      # named arguments, in any order
 - A function without `-> T` returns nothing.
 - A `#` comment directly above a function is its documentation, and editors show it on hover.
 
+## Lambdas and function values
+
+Functions are values. A function type is written `fn(Int, String) -> Bool`, or `fn(Int)` for one that returns nothing, and `(fn(Int) -> Int)?` is one that may be `null`.
+
+```python
+fn double(x: Int) -> Int:
+    return x * 2
+
+fn apply(f: fn(Int) -> Int, x: Int) -> Int:
+    return f(x)
+
+fn make_adder(n: Int) -> fn(Int) -> Int:
+    return fn(x) -> x + n                 # a lambda: it returns its expression
+
+fn main():
+    print(apply(double, 21))              # 42: a named function, as a value
+    print(apply(fn(x) -> x * x, 7))       # 49: `x` is an Int, because `apply` says so
+    val add10 = make_adder(10)
+    print(add10(5))                       # 15: `add10` kept the `n` it was made with
+
+    val classify = fn(n: Int) -> String:  # a lambda with a block body ends its line
+        if n < 0:
+            return "negative"
+        return "not negative"
+    print(classify(-2))
+```
+
+- **Parameter types come from where a lambda is used.** `apply` takes an `fn(Int) -> Int`, so `x` is an `Int`. Where nothing says, write them: `val f = fn(x: Int) -> x * 2`.
+- **One line, or a block.** A one-line lambda returns its expression. A longer one gets a block, with its return type if it returns something (`fn(x: Int) -> Int:`), and must end its line, as after `val f =`. Inside parentheses, use one-line lambdas, or define the function first.
+- **Captures are copies.** A lambda keeps the values it uses from around it as they are when it's created, so it can only capture names that never change: `val`s, parameters and loop variables (each iteration of a loop captures its own). Capturing a `var` is an error: copy it into a `val` first. Lists, maps and structs are shared as always, so a lambda can still change what's in them.
+- **Named functions are values too**, including generic ones (`max[Int]`, or picked by the type expected: `val pick: fn(Int, Int) -> Int = max`) and module functions (`xs.map(math.sqrt)`).
+- Calls go by position (`f(1, 2)`): a function type doesn't name its parameters. Functions can't be compared with `==` or printed.
+- A lambda that captures nothing is a constant and allocates nothing. One that captures is a small reference-counted object, and cycles through closures (a node whose callback captures the node) are collected like any other.
+
+### List methods that take functions
+
+```python
+val xs = [5, 3, 8, 1]
+xs.map(fn(x) -> x * 2)                    # [10, 6, 16, 2]
+xs.filter(fn(x) -> x > 2)                 # [5, 3, 8]
+xs.any(fn(x) -> x > 7)                    # true, stopping at 8
+xs.find(fn(x) -> x % 2 == 0)              # 8 (an Int?: null if there's none)
+xs.fold(0, fn(sum, x) -> sum + x)         # 17
+people.sort_by(fn(p) -> p.age)            # in place; equal ages keep their order
+people.max_by(fn(p) -> p.score)           # a Person?, null for an empty list
+```
+
+| Method | |
+|---|---|
+| `map(f) -> List[U]` | A new list of `f` of each element |
+| `filter(f) -> List[T]` | The elements for which `f` is true |
+| `any(f)`, `all(f) -> Bool` | Is `f` true for some element, for every element? They stop as soon as they know |
+| `find(f) -> T?` | The first element for which `f` is true, or `null` |
+| `count(f) -> Int` | How many elements `f` is true for |
+| `fold(initial, f) -> A` | Combine the elements into one value, starting from `initial`: `f(acc, x)` gives the next `acc` |
+| `sort_by(key)` | Sort in place by each element's key (`Int`, `Float` or `String`), stably. Each key is computed once |
+| `min_by(key)`, `max_by(key) -> T?` | The element with the smallest (largest) key, the first on a tie; `null` for an empty list |
+
+**A lambda written right in the call is inlined**: its body runs in the method's own loop, so nothing is allocated for it and nothing is called. `xs.map(fn(x) -> x * 2).filter(...).fold(...)` runs as fast as the `for` loops you would write by hand. A named function is called directly, and any other function value through the value.
+
 ## Control flow
 
 ```python
@@ -485,6 +545,7 @@ xs[99]                               # panic: index 99 out of bounds for list of
 | `index_of(x) -> Int?` | The index of the first element equal to `x`, or `null` |
 | `reverse()` | Reverse the order, in place |
 | `sort()` | Sort in place, smallest first. For lists of `Int`, `Float` and `String` |
+| `sort_by(key)`, `map(f)`, `filter(f)`... | The methods that [take a function](#list-methods-that-take-functions) |
 | `join(sep) -> String` | For a `List[String]`: the strings with `sep` between them. `["a", "b"].join(", ")` is `"a, b"` |
 | `to_string() -> String` | The list as you'd write it, `[1, 2, 3]`. `print(xs)` and `f"{xs}"` use it |
 
@@ -797,4 +858,5 @@ Panics cover:
 - **`match` is a statement.** It doesn't produce a value; assign or `return` inside its cases.
 - **No interfaces yet.** Generic code can use operators, `to_string` and `hash` on a `T`, but no fields or other methods.
 - **No sets or tuples yet.** Use a `Map[K, Bool]` for a set, and a struct for a pair.
-- **`sort()` only sorts lists of `Int`, `Float` and `String`.**
+- **`sort()` only sorts lists of `Int`, `Float` and `String`.** For anything else, sort by a key: `people.sort_by(fn(p) -> p.name)`.
+- **Lambdas can't capture `var`s,** and a lambda with a block body can't be written inside parentheses. See [lambdas](#lambdas-and-function-values).

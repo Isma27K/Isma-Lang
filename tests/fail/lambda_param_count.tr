@@ -1,0 +1,3 @@
+# expect-error: `map` calls its function with 1 value, but this lambda takes 2
+fn main():
+    print([1, 2].map(fn(a, b) -> a + b))

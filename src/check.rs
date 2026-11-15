@@ -14,9 +14,12 @@ use std::collections::{HashMap, HashSet};
 
 mod consts;
 mod generics;
+mod lambdas;
+mod list_fns;
 mod maps;
 use consts::*;
 use generics::*;
+use lambdas::*;
 
 const BUILTINS: &[&str] = &["print", "input", "args", "panic", "assert", "sqrt", "exit", "hash"];
 const RESERVED_TYPES: &[&str] = &["Int", "Float", "Bool", "String", "List", "Map", "Unit"];
@@ -186,6 +189,8 @@ enum NullUse<'a> {
     Index,
     Value,
     Condition,
+    /// Calling it (a function value).
+    Call,
 }
 
 /// Bindings while checking one `case` pattern.
@@ -321,6 +326,20 @@ pub struct Checker {
     /// Top-level constants, and their ids by (namespace, name).
     consts: Vec<ConstDef>,
     const_index: HashMap<(usize, String), usize>,
+    // first-class functions (see `lambdas.rs`)
+    /// Lambdas whose bodies are being checked, innermost last.
+    lambda_stack: Vec<LambdaFrame>,
+    /// Closure code (lambda bodies, function wrappers) checked but not yet put in the program.
+    lambda_funcs: Vec<(FuncId, TFunc)>,
+    /// Per function: the closure code calling it through a value; and back.
+    fn_wrappers: HashMap<FuncId, FuncId>,
+    wrapped: HashMap<FuncId, FuncId>,
+    /// The function whose body is being checked.
+    cur_fn: Option<FuncId>,
+    /// Is it generic code as written (not a copy for concrete types)?
+    in_template: bool,
+    /// Inside a one-line lambda (`fn(x) -> ...`), where `return`, `break` and `continue` can't be used.
+    in_lambda_expr: usize,
 }
 
 /// Type-check: `Ok((program, warnings))` or `Err(errors and warnings)`.
@@ -386,6 +405,13 @@ pub fn analyze(files: &[SourceFile]) -> Analysis {
         map_keys: Vec::new(),
         consts: Vec::new(),
         const_index: HashMap::new(),
+        lambda_stack: Vec::new(),
+        lambda_funcs: Vec::new(),
+        fn_wrappers: HashMap::new(),
+        wrapped: HashMap::new(),
+        cur_fn: None,
+        in_template: false,
+        in_lambda_expr: 0,
     };
     for (ns, f) in files.iter().enumerate().skip(1) {
         let doc = c.leading_comment(ns);
@@ -718,6 +744,28 @@ impl Checker {
         self.ide.definitions.push((span, decl));
     }
 
+    /// Read local `id` (declared at `decl`) at `span`: marks it used, and
+    /// applies a smart cast if one holds here.
+    fn read_local(&mut self, id: LocalId, decl: Span, span: Span) -> TExpr {
+        let ty = self.locals[id].ty.clone();
+        let smart = ty.is_nullable() && self.is_smart_cast(&NullPath::local(id));
+        self.local_use(id, decl, span, smart);
+        self.local_meta[id].used = true;
+        self.narrow(Self::mk(TExprKind::Local(id), ty, span))
+    }
+
+    /// Hover and go-to-definition for a use of function `fid` at `span`.
+    fn fn_use_hover(&mut self, fid: FuncId, span: Span) {
+        let code = self.ide.functions[fid].signature.clone();
+        let fns = self.ide.functions[fid].ns;
+        let doc = (fns != self.ns).then(|| {
+            let d = self.ide.functions[fid].doc.as_ref().map(|d| format!("\n\n{d}")).unwrap_or_default();
+            format!("from module `{}`{d}", self.ns_names[fns])
+        });
+        self.hover(span, code, doc);
+        self.ide.definitions.push((span, self.funcs[fid].span));
+    }
+
     fn field_use(&mut self, sid: StructId, idx: usize, span: Span) {
         let f = &self.ide.structs[sid].fields[idx];
         let code = format!("{} {}: {}", if f.mutable { "var" } else { "val" }, f.name, f.ty);
@@ -799,7 +847,7 @@ impl Checker {
                 if !pids.is_empty() {
                     self.struct_instances.insert((id, args), id);
                 }
-                self.structs.push(TStruct { name: shown, fields: Vec::new(), variants: enum_boxed.map(|_| Vec::new()), generic: !pids.is_empty() });
+                self.structs.push(TStruct { name: shown, fields: Vec::new(), variants: enum_boxed.map(|_| Vec::new()), generic: !pids.is_empty(), closure: None });
                 self.def_types.push(match enum_boxed {
                     Some(boxed) => Type::Enum(id, boxed),
                     None => Type::Struct(id),
@@ -1010,6 +1058,9 @@ impl Checker {
             } else {
                 put_func(&mut out, fid, tf);
             }
+            for (lid, lf) in std::mem::take(&mut self.lambda_funcs) {
+                put_func(&mut out, lid, lf);
+            }
         }
         self.ns = 0;
         // Then every use of generic code is checked against those needs, and
@@ -1056,6 +1107,7 @@ impl Checker {
                     exported: false,
                     track_caller: false,
                     generic: true,
+                    closure: false,
                 })
             })
             .collect()
@@ -1645,6 +1697,9 @@ impl Checker {
     }
 
     fn resolve_type_inner(&mut self, t: &TypeExpr) -> Type {
+        if let Some(f) = &t.func {
+            return self.resolve_fn_type(f);
+        }
         let name = t.name.name.as_str();
         if let Some(m) = &t.module {
             return self.resolve_module_type(m, t);
@@ -1769,6 +1824,9 @@ impl Checker {
     // ---------- function bodies ----------
 
     fn fn_body(&mut self, f: &FnDecl, owner: Option<StructId>, fid: FuncId) -> TFunc {
+        self.cur_fn = Some(fid);
+        self.in_template = self.funcs[fid].instance.is_some() && !self.is_concrete_instance(fid);
+        self.in_lambda_expr = 0;
         self.locals.clear();
         self.local_meta.clear();
         self.nonnull.clear();
@@ -1812,6 +1870,7 @@ impl Checker {
             exported: sig.symbol == "tarn_main",
             track_caller: self.ns_kinds[self.ns] == FileKind::Std,
             generic,
+            closure: false,
         }
     }
 
@@ -2057,6 +2116,7 @@ impl Checker {
             NullUse::Index => (format!("check `if {s} != null:` first"), format!("{s}!![i]")),
             NullUse::Value => (format!("give a default with `{s} ?: {default}`, or check `if {s} != null:` first"), format!("{s}!!")),
             NullUse::Condition => (format!("compare explicitly: `{s} == true`"), format!("{s}!!")),
+            NullUse::Call => (format!("check `if {s} != null:` first"), format!("{s}!!(...)")),
         };
         let mut d = Diagnostic::error(format!("{name} might be null"), e.span)
             .with_primary(format!("this is `{tn}`"))
@@ -2908,7 +2968,16 @@ impl Checker {
         let (place, place_ty) = match &target.kind {
             ExprKind::Name(name) => {
                 let Some(b) = self.lookup(name) else {
-                    let _ = self.expr(target, None); // reports unknown name
+                    if self.is_outer_local(name) {
+                        self.err(
+                            Diagnostic::error(format!("a lambda can't assign to `{name}`, a variable from outside it"), target.span)
+                                .with_primary("assigned here, inside the lambda")
+                                .with_note("a lambda works with copies of the values it uses from around it")
+                                .with_help("return the new value from the lambda instead, or keep it in a list or struct, which the lambda shares"),
+                        );
+                    } else {
+                        let _ = self.expr(target, None); // reports unknown name
+                    }
                     let _ = self.expr(value, None);
                     return None;
                 };
@@ -3390,11 +3459,10 @@ impl Checker {
             ExprKind::Name(name) => {
                 if let Some(b) = self.lookup(name) {
                     let (id, decl) = (b.id, b.span);
-                    let ty = self.locals[id].ty.clone();
-                    let smart = ty.is_nullable() && self.is_smart_cast(&NullPath::local(id));
-                    self.local_use(id, decl, span, smart);
-                    self.local_meta[id].used = true;
-                    return self.narrow(Self::mk(TExprKind::Local(id), ty, span));
+                    return self.read_local(id, decl, span);
+                }
+                if let Some(e) = self.capture(name, span) {
+                    return e;
                 }
                 if let Some(id) = self.visible_const(name) {
                     return self.const_value(id, span);
@@ -3410,10 +3478,13 @@ impl Checker {
                 if self.import_failed(name) {
                     return Self::error_expr(span);
                 }
-                let d = if self.visible_func(name).is_some() || BUILTINS.contains(&name.as_str()) {
-                    Diagnostic::error(format!("`{name}` is a function, not a value"), span)
-                        .with_help(format!("call it: `{name}(...)`"))
-                        .with_note("functions are not first-class values yet")
+                if let Some(fid) = self.visible_func(name) {
+                    self.fn_use_hover(fid, span);
+                    return self.fn_value(fid, name, None, expected, span);
+                }
+                let d = if BUILTINS.contains(&name.as_str()) {
+                    Diagnostic::error(format!("`{name}` is built in, so it can't be used as a value"), span)
+                        .with_help(format!("wrap it in a lambda: `fn(x) -> {name}(x)`"))
                 } else if let Some(sid) = self.visible_struct(name) {
                     match self.structs[sid].variants() {
                         [] if self.structs[sid].variants.is_none() => {
@@ -3448,15 +3519,20 @@ impl Checker {
                 Self::error_expr(span)
             }
             ExprKind::Binary(op, l, r) => self.binary(*op, l, r, span),
+            ExprKind::TypeApply(inner, targs)
+                if matches!(&inner.kind, ExprKind::Name(n) if self.lookup(n).is_none() && !self.is_outer_local(n) && self.visible_func(n).is_some()) =>
+            {
+                let ExprKind::Name(n) = &inner.kind else { unreachable!() };
+                let fid = self.visible_func(n).unwrap();
+                self.fn_use_hover(fid, inner.span);
+                self.fn_value(fid, n, Some(targs), expected, span)
+            }
             ExprKind::TypeApply(inner, targs) => {
                 for t in targs {
                     let _ = self.resolve_type(t);
                 }
                 let shown = self.snippet(span).unwrap_or_else(|| "this".into());
                 let d = match &inner.kind {
-                    ExprKind::Name(n) if self.lookup(n).is_none() && self.visible_func(n).is_some() => Diagnostic::error(format!("`{shown}` is a function, not a value"), span)
-                        .with_help(format!("call it: `{shown}(...)`"))
-                        .with_note("functions are not first-class values yet"),
                     ExprKind::Name(n) if self.lookup(n).is_none() && self.visible_struct(n).is_some() => {
                         Diagnostic::error(format!("`{shown}` is a type, not a value"), span).with_help(format!("construct one with `{shown}(...)`"))
                     }
@@ -3511,6 +3587,18 @@ impl Checker {
                 if let Some((sid, targs)) = self.enum_ref(obj) {
                     return self.variant_value(sid, field, None, targs, expected, span);
                 }
+                // `geometry.area`: a module's function used as a value.
+                if let ExprKind::Name(m) = &obj.kind
+                    && self.lookup(m).is_none()
+                    && !self.is_outer_local(m)
+                    && let Some(module_ns) = self.imported_module(m)
+                    && let Some(&fid) = self.func_index.get(&(module_ns, field.name.clone()))
+                    && (!is_private(&field.name) || module_ns == self.ns)
+                {
+                    self.module_hover(module_ns, obj.span);
+                    self.fn_use_hover(fid, field.span);
+                    return self.fn_value(fid, &format!("{m}.{}", field.name), None, expected, span);
+                }
                 let t = self.expr(obj, None);
                 self.field_access(t, field, span)
             }
@@ -3552,7 +3640,21 @@ impl Checker {
                 }
             }
             ExprKind::Elvis(l, r) => self.elvis(l, r, span, expected),
+            ExprKind::Lambda(lam) => self.lambda(lam, span, expected, &[]),
             ExprKind::Jump(j) => {
+                if self.in_lambda_expr > 0 {
+                    let kw = match j {
+                        Jump::Break => "break",
+                        Jump::Continue => "continue",
+                        Jump::Return(_) => "return",
+                    };
+                    self.err(
+                        Diagnostic::error(format!("`{kw}` can't be used in a one-line lambda"), span)
+                            .with_note("a one-line lambda's value is its expression")
+                            .with_help("to leave it early, give it a block body: `val f = fn(x: Int) -> Int:` with the code under it"),
+                    );
+                    return Self::error_expr(span);
+                }
                 let stmt = match j {
                     Jump::Break => self.loop_jump(true, span),
                     Jump::Continue => self.loop_jump(false, span),
@@ -3986,12 +4088,12 @@ impl Checker {
     fn call_with(&mut self, callee: &Expr, explicit: Option<&[TypeExpr]>, args: &[Arg], span: Span, expected: Option<&Type>) -> TExpr {
         match &callee.kind {
             ExprKind::Name(name) => {
-                if self.lookup(name).is_some() {
-                    self.err(Diagnostic::error(format!("`{name}` is a variable, not a function"), callee.span));
-                    for a in args {
-                        let _ = self.expr(&a.value, None);
+                if self.lookup(name).is_some() || self.is_outer_local(name) {
+                    if explicit.is_some() {
+                        self.err(Diagnostic::error(format!("`{name}` is a variable: it takes no type arguments"), callee.span).with_help("remove the `[...]`"));
                     }
-                    return Self::error_expr(span);
+                    let f = self.expr(callee, None);
+                    return self.call_value(f, args, span);
                 }
                 if let Some(fid) = self.visible_func(name) {
                     let code = self.ide.functions[fid].signature.clone();
@@ -4085,9 +4187,8 @@ impl Checker {
                 self.safe_access(recv, op, span, |c, it| c.method_call(it, method, args, explicit, None, span))
             }
             _ => {
-                let _ = self.expr(callee, None);
-                self.err(Diagnostic::error("this expression is not callable", callee.span));
-                Self::error_expr(span)
+                let f = self.expr(callee, None);
+                self.call_value(f, args, span)
             }
         }
     }
@@ -4479,6 +4580,7 @@ impl Checker {
                 self.stringify(recv, span)
             }
             (Type::Map(..), _) => self.map_method(recv, method, args, span),
+            (Type::List(_), m) if list_fns::LIST_FNS.contains(&m) => self.list_fn(recv, method, args, expected, span),
             (Type::List(_), "contains" | "index_of") => self.list_search_method(recv, method, args, span),
             (Type::List(elem), "join") if **elem == Type::Str => self.builtin_method(recv, Builtin::ListJoin, &[Type::Str], Type::Str, method, args, span),
             (Type::List(elem), "join") => {
@@ -4555,6 +4657,12 @@ impl Checker {
                         let what = format!("method `{}`", self.funcs[decl].name);
                         self.call_fn(fid, &what, Some(recv), args, explicit, expected, method.span, span)
                     }
+                    // A field holding a function: `button.on_click(event)`.
+                    None if self.structs[sid].fields.iter().any(|f| f.name == m && matches!(f.ty.non_null(), Type::Func(..))) => {
+                        let fspan = recv.span.merge(method.span);
+                        let f = self.field_access(recv, method, fspan);
+                        self.call_value(f, args, span)
+                    }
                     None => {
                         let sname = self.structs[sid].name.clone();
                         let kind = if self.structs[sid].variants.is_some() { "enum" } else { "struct" };
@@ -4582,7 +4690,7 @@ impl Checker {
                     Type::Float => "`to_string()`, `to_int()`",
                     Type::Bool => "`to_string()`",
                     Type::Str => "`len()`, `is_empty()`, `chars()`, `lines()`, `split(sep)`, `substring(start, end)`, `contains(s)`, `find(s)`, `rfind(s)`, `count(s)`, `starts_with(s)`, `ends_with(s)`, `replace(old, new)`, `trim()`, `trim_start()`, `trim_end()`, `upper()`, `lower()`, `repeat(n)`, `pad_start(width)`, `pad_end(width)`, `to_int()`, `to_float()`, `to_int_or_null()`, `to_float_or_null()`, `to_string()`",
-                    Type::List(_) => "`len()`, `is_empty()`, `push(x)`, `pop()`, `insert(i, x)`, `remove_at(i)`, `clear()`, `contains(x)`, `index_of(x)`, `reverse()`, `sort()`, `join(sep)`",
+                    Type::List(_) => "`len()`, `is_empty()`, `push(x)`, `pop()`, `insert(i, x)`, `remove_at(i)`, `clear()`, `contains(x)`, `index_of(x)`, `reverse()`, `sort()`, `sort_by(key)`, `join(sep)`, `map(f)`, `filter(f)`, `any(f)`, `all(f)`, `find(f)`, `count(f)`, `fold(initial, f)`, `min_by(key)`, `max_by(key)`",
                     _ => "none",
                 };
                 self.err(
@@ -4697,5 +4805,8 @@ fn expr_breaks(e: &TExpr) -> bool {
         TExprKind::MapLit(entries) => entries.iter().any(|(k, v)| expr_breaks(k) || expr_breaks(v)),
         TExprKind::ListFind { list, value, .. } => expr_breaks(list) || expr_breaks(value),
         TExprKind::ListFormat { list, .. } | TExprKind::MapFormat { map: list, .. } => expr_breaks(list),
+        TExprKind::Closure { captures, .. } => any(captures),
+        TExprKind::CallValue(f, args) => expr_breaks(f) || any(args),
+        TExprKind::Block(stmts, e) => contains_break(stmts) || expr_breaks(e),
     }
 }

@@ -1,0 +1,5 @@
+# expect-error: a lambda's block must start on a new line
+fn main():
+    print([1].map(fn(x: Int) -> Int:
+        return x
+    ))

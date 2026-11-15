@@ -369,6 +369,16 @@ impl<'a> Codegen<'a> {
                 self.emit(format!("call void @tarn_list_sort(ptr {}, i64 {kind})", vals[0]));
                 return String::new();
             }
+            Builtin::ListSortBy => {
+                let kind = match list_elem(&tys[1]) {
+                    Type::Int => 0,
+                    Type::Float => 1,
+                    _ => 2,
+                };
+                let size = elem_size(&list_elem(&tys[0]));
+                self.emit(format!("call void @tarn_list_sort_by(ptr {}, ptr {}, i64 {kind}, i64 {size})", vals[0], vals[1]));
+                return String::new();
+            }
 
             // ---------- math ----------
             Builtin::MathUnary(f) => {

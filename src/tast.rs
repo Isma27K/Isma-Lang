@@ -32,6 +32,9 @@ pub struct TStruct {
     /// contain type parameters (`Box[T]`): only generic code uses it, so the
     /// back end skips it.
     pub generic: bool,
+    /// The values one lambda captured (its fields, all immutable), and the
+    /// lambda's function type. Its closures are values of that type.
+    pub closure: Option<Type>,
 }
 
 #[derive(Debug, Clone)]
@@ -69,6 +72,11 @@ pub struct TFunc {
     /// placeholder. Its copies for concrete types (`max[Int]`) are the ones
     /// that run.
     pub generic: bool,
+    /// The code of a function value: a lambda's body, or a named function
+    /// wrapped to be called through a value. Its first parameter is the
+    /// closure itself (holding the captured values), and every parameter is
+    /// borrowed, since callers can't know which function they call.
+    pub closure: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -215,6 +223,9 @@ pub enum Builtin {
     ListReverse,
     /// `xs.sort()` on a list of `Int`, `Float` or `String`.
     ListSort,
+    /// `ListSortBy(xs, keys)`: sort `xs` in place, stably, by the matching
+    /// `keys` (a list of `Int`, `Float` or `String` as long as `xs`).
+    ListSortBy,
     /// `m[k]`: panics if `k` is missing.
     MapGet,
     /// `m.get(k) -> V?`
@@ -380,6 +391,15 @@ pub enum TExprKind {
     Elvis(Box<TExpr>, Box<TExpr>),
     /// `return`/`break`/`continue` on the right of `?:`.
     Jump(Box<TStmt>),
+    /// A function value: `func` (closure code, see `TFunc::closure`) with the
+    /// captured values, which become the fields of closure struct `sid`.
+    /// Without captures, it's a constant (nothing is allocated).
+    Closure { func: FuncId, sid: Option<StructId>, captures: Vec<TExpr> },
+    /// Calling a function value: `f(x)`.
+    CallValue(Box<TExpr>, Vec<TExpr>),
+    /// Run the statements, then evaluate the expression (the code that the
+    /// list methods taking functions, like `map` and `filter`, become).
+    Block(Vec<TStmt>, Box<TExpr>),
 }
 
 impl TExpr {
