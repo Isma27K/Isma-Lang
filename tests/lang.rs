@@ -575,3 +575,28 @@ fn language_server_works_across_files() {
     lsp.stop();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `tarn doc --json` lists the standard library and the built-in types, with
+/// signatures and doc comments (the website's reference pages are made from it).
+#[test]
+fn doc_json_lists_the_standard_library() {
+    let out = tarn(&["doc", "--json"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    let module = |name: &str| v["modules"].as_array().unwrap().iter().find(|m| m["name"] == name).cloned().unwrap();
+    let names = |m: &serde_json::Value, key: &str| -> Vec<String> { m[key].as_array().unwrap().iter().map(|f| f["name"].as_str().unwrap().to_string()).collect() };
+    let math = module("math");
+    assert!(names(&math, "functions").contains(&"sqrt".to_string()));
+    assert!(names(&math, "constants").contains(&"pi".to_string()));
+    let sqrt = math["functions"].as_array().unwrap().iter().find(|f| f["name"] == "sqrt").unwrap();
+    assert_eq!(sqrt["signature"], "fn sqrt(x: Float) -> Float");
+    assert!(sqrt["doc"].as_str().unwrap().contains("square root"));
+    let time = module("time");
+    assert!(names(&time, "functions").contains(&"now".to_string()));
+    assert!(time["types"].as_array().unwrap().iter().any(|t| t["name"] == "DateTime"));
+    let map = v["types"].as_array().unwrap().iter().find(|t| t["name"] == "Map").unwrap();
+    let get = map["methods"].as_array().unwrap().iter().find(|m| m["name"] == "get").unwrap();
+    assert_eq!(get["signature"], "fn get(key: K) -> V?");
+    assert!(v["functions"].as_array().unwrap().iter().any(|f| f["name"] == "print"));
+    assert!(!tarn(&["doc"]).status.success());
+}

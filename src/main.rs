@@ -15,6 +15,7 @@ Usage
   tarn check <file.tr>              type-check and lint only
   tarn lsp                          the language server, for editors
   tarn clean                        empty the compile cache
+  tarn doc --json                   the standard library and built-ins, as JSON (for tools)
 
 Options
   -o <output>     output path (default: the file name without .tr)
@@ -40,8 +41,11 @@ fn main() -> ExitCode {
     }
 }
 
+/// Colors on a terminal, unless `NO_COLOR` is set. `CLICOLOR_FORCE=1` asks for
+/// them even when stderr isn't a terminal (tools that show the output themselves).
 fn color_enabled() -> bool {
-    std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none()
+    let forced = std::env::var_os("CLICOLOR_FORCE").is_some_and(|v| !v.is_empty() && v != "0");
+    std::env::var_os("NO_COLOR").is_none() && (forced || std::io::stderr().is_terminal())
 }
 
 fn red(s: &str) -> String {
@@ -61,7 +65,7 @@ struct Cli {
     program_args: Vec<String>,
 }
 
-const COMMANDS: &[&str] = &["run", "build", "check", "clean", "lsp", "help", "version", "-h", "--help", "-V", "--version"];
+const COMMANDS: &[&str] = &["run", "build", "check", "clean", "lsp", "doc", "help", "version", "-h", "--help", "-V", "--version"];
 
 fn parse_args(args: &[String]) -> Result<Cli, String> {
     let mut cli =
@@ -103,6 +107,14 @@ fn parse_args(args: &[String]) -> Result<Cli, String> {
 }
 
 fn run_cli(args: &[String]) -> Result<ExitCode, String> {
+    if args.first().is_some_and(|a| a == "doc") {
+        if args.len() != 2 || args[1] != "--json" {
+            return Err("usage: tarn doc --json".into());
+        }
+        let json = serde_json::to_string_pretty(&tarn::doc::reference()).map_err(|e| e.to_string())?;
+        println!("{json}");
+        return Ok(ExitCode::SUCCESS);
+    }
     let cli = parse_args(args)?;
     match cli.command.as_str() {
         "" | "-h" | "--help" | "help" => {

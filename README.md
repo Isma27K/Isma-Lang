@@ -273,6 +273,7 @@ The VS Code extension (in the companion `tarn-vscode` project) gets all its smar
 - **Multi-file aware.** Go to definition jumps into your other files. Editing a module re-checks the open files that import it, even before you save, and an error inside an imported file shows on the `import` line that leads to it.
 - **Go to definition**, an **outline view**, syntax highlighting, snippets and a **Run** button.
 - **Automatic restarts**: when you reinstall `tarn`, the extension notices and restarts the language server by itself.
+- **Tarn Light** and **Tarn Dark**, color themes in the same quiet style as this page: hairline borders and a few muted colors, on white or near-black.
 
 <a id="performance"></a>
 ## Performance

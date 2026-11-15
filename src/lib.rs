@@ -6,6 +6,7 @@ pub mod check;
 pub mod codegen;
 pub mod cycles;
 pub mod diagnostics;
+pub mod doc;
 pub mod driver;
 pub mod ide;
 pub mod lexer;
