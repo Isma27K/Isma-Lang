@@ -1,0 +1,128 @@
+# Recoverable errors: `Result[T, E]` with `Ok` / `Err`, the `?` operator,
+# `!!`, and the methods from the prelude.
+
+interface Problem:
+    fn message(self) -> String
+
+struct BadNumber:
+    text: String
+    fn message(self) -> String:
+        return f"not a number: {self.text}"
+
+struct OutOfRange:
+    n: Int
+    fn message(self) -> String:
+        return f"out of range: {self.n}"
+
+fn parse(s: String) -> Result[Int, String]:
+    val n = s.to_int_or_null() ?: return Err(f"not a number: {s}")
+    return Ok(n)
+
+fn parse_typed(s: String) -> Result[Int, BadNumber]:
+    val n = s.to_int_or_null() ?: return Err(BadNumber(s))
+    return Ok(n)
+
+# `?` passes the error on: the first `Err` is returned.
+fn add(a: String, b: String) -> Result[Int, String]:
+    return Ok(parse(a)? + parse(b)?)
+
+# The error is boxed into the interface the function fails with.
+fn port(s: String) -> Result[Int, Problem]:
+    val n = parse_typed(s)?
+    if n < 1 or n > 65535:
+        return Err(OutOfRange(n))
+    return Ok(n)
+
+# Nothing to give back: `Result[Unit, E]` and `Ok()`.
+fn check_even(s: String) -> Result[Unit, String]:
+    if parse(s)? % 2 != 0:
+        return Err(f"{s} is odd")
+    return Ok()
+
+# `?` on a nullable value returns `null`.
+fn first_long(words: List[String]) -> Int?:
+    val w = words.find(fn(x) -> x.len() > 4)?
+    return w.len()
+
+# `r?.member` is `(r?).member`.
+fn split_count(s: String) -> Result[Int, String]:
+    return Ok(words(s)?.len())
+
+fn words(s: String) -> Result[List[String], String]:
+    if s.is_empty():
+        return Err("empty")
+    return Ok(s.split(" "))
+
+# In generic code, and in a loop.
+fn total[E](rs: List[Result[Int, E]]) -> Result[Int, E]:
+    var sum = 0
+    for r in rs:
+        sum += r?
+    return Ok(sum)
+
+enum Shape:
+    Circle(r: Float)
+    Square(side: Float)
+
+fn shape(name: String, size: Float) -> Result[Shape, String]:
+    match name:
+        case "circle":
+            return Ok(Shape.Circle(size))
+        case "square":
+            return Ok(Shape.Square(size))
+        case _:
+            return Err(f"no shape called {name}")
+
+fn main():
+    print(add("1", "2"))
+    print(add("1", "x"))
+    print(add("y", "x"))
+    for s in ["80", "x", "70000"]:
+        match port(s):
+            case Ok(p):
+                print(f"port {p}")
+            case Err(e):
+                print(f"error: {e.message()}")
+    print(check_even("4"))
+    print(check_even("5"))
+    print(check_even("z"))
+    print(first_long(["a", "banana"]))
+    print(first_long(["a"]))
+    print(split_count("a b c"))
+    print(split_count(""))
+    print(total([parse("1"), parse("2"), parse("3")]))
+    print(total([parse("1"), parse("two"), parse("three")]))
+    # In a block lambda.
+    val double_parse = fn(s: String) -> Result[Int, String]:
+        return Ok(parse(s)? * 2)
+    print(double_parse("21"))
+    print(double_parse("x"))
+
+    # Methods.
+    val good = parse("42")
+    val bad = parse("forty")
+    print(f"{good.is_ok()} {good.is_err()} {bad.is_ok()} {bad.is_err()}")
+    print(f"{good.value_or_null()} {bad.value_or_null()}")
+    print(f"{good.error_or_null()} {bad.error_or_null()}")
+    print(good.value_or(0) + bad.value_or(-1))
+    print(good.map(fn(n) -> n.to_float() / 4.0))
+    print(bad.map_err(fn(e) -> e.len()))
+    print(parse("7")!! * 6)
+
+    # Results in collections and in annotations.
+    val rs: List[Result[Int, String]] = [Ok(1), Err("two"), Ok(3)]
+    print(rs)
+    print(rs.count(fn(r) -> r.is_ok()))
+    val f: Result[Float, String] = Ok(2.5)
+    print(f)
+    match shape("circle", 1.0):
+        case Ok(Shape.Circle(r)):
+            print(f"a circle of radius {r}")
+        case Ok(_):
+            print("another shape")
+        case Err(why):
+            print(why)
+    print(shape("hexagon", 1.0).error_or_null() ?: "none")
+
+    # Deliberately ignored.
+    val _ = parse("ignored")

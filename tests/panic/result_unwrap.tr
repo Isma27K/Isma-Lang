@@ -1,0 +1,8 @@
+# expect-panic: unwrapped an `Err` with `!!`: not a number: nine
+fn parse(s: String) -> Result[Int, String]:
+    val n = s.to_int_or_null() ?: return Err(f"not a number: {s}")
+    return Ok(n)
+
+fn main():
+    print(parse("9")!!)
+    print(parse("nine")!!)

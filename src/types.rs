@@ -10,6 +10,9 @@ pub enum Type {
     Float,
     Bool,
     Str,
+    /// Raw bytes (not necessarily UTF-8 text). Laid out like a `String`, and
+    /// immutable like one: `+=` appends in place when nothing else holds it.
+    Bytes,
     Unit,
     List(Box<Type>),
     /// `Map[K, V]`: a hash map that keeps its keys in insertion order.
@@ -119,6 +122,7 @@ impl Type {
             Type::Float => "Float".into(),
             Type::Bool => "Bool".into(),
             Type::Str => "String".into(),
+            Type::Bytes => "Bytes".into(),
             Type::Unit => "Unit".into(),
             Type::List(t) => format!("List[{}]", t.display(struct_names, param_names)),
             Type::Map(k, v) => format!("Map[{}, {}]", k.display(struct_names, param_names), v.display(struct_names, param_names)),

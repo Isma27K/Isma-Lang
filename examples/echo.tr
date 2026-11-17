@@ -1,0 +1,37 @@
+# A TCP echo server: whatever a client sends comes straight back.
+# It stops cleanly on Ctrl-C.
+#
+#     tarn examples/echo.tr       # then, in another terminal:
+#     nc localhost 7000           # type a line, and get it back
+import net
+import signal
+from signal import Signal
+
+# Echo one client until it hangs up: how many bytes went back, or why it failed.
+fn serve(conn: net.Conn) -> Result[Int, net.Error]:
+    var total = 0
+    while true:
+        val data = conn.read(4096)?
+        if data.is_empty():
+            return Ok(total)
+        conn.write(data)?
+        total += data.len()
+
+fn main():
+    signal.catch(Signal.Interrupt)
+    signal.catch(Signal.Terminate)
+    val server = net.listen("127.0.0.1", 7000)!!
+    print(f"echoing on {server.address()} (Ctrl-C to stop)")
+    while signal.received() == null:
+        match server.accept():
+            case Ok(conn):
+                val who = conn.peer_address()
+                match serve(conn):
+                    case Ok(n):
+                        print(f"{who}: echoed {n} bytes")
+                    case Err(e):
+                        print(f"{who}: {e}")
+            case Err(e):
+                if e.kind != net.ErrorKind.Interrupted:
+                    print(f"accept failed: {e}")
+    print("stopped")

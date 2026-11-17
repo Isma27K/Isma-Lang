@@ -233,6 +233,12 @@ The standard library is written in Tarn itself and compiled together with your p
 | [`time`](docs/time.md) | UTC dates and times, durations, clocks. Cross-checked against Python's `datetime` on 3,000 random dates |
 | [`math`](docs/math.md) | `pi`, `e`, `inf`; powers and logarithms; trigonometry; rounding; generic `min`, `max`, `clamp`, `abs`; `gcd`, `lcm`, `isqrt` |
 | [`fs`](docs/fs.md) | Read and write files, list and create folders, and take paths apart |
+| [`net`](docs/net.md) | TCP sockets: listen, accept, connect, read and write `Bytes`, with timeouts. Sockets close themselves (`fn drop`) |
+| [`env`](docs/system.md#env) | Environment variables |
+| [`signal`](docs/system.md#signal) | Catch `Ctrl-C`, `kill` and other signals, and stop cleanly |
+| [`url`](docs/system.md#url) | Percent-encoding and query strings |
+
+`Result`, `Ok`, `Err` and `Unit` are always there, without an import: see [recoverable errors](docs/language.md#recoverable-errors).
 
 ```python
 import fs
@@ -345,14 +351,14 @@ These are the best of 3 runs on an AMD Ryzen 5 5500. Reproduce them with `./benc
 
 **Main priority: getting Tarn ready for Traiz.** Traiz is a REST API framework written in Tarn. It's a separate project that programs install as a dependency with Thorn, Tarn's package manager. The language needs these first, in this order. The website's *Project → Traiz, the REST framework* page explains why each one is needed.
 
-- [ ] **1. Errors and I/O:** recoverable errors (`Result` and `?`), `Bytes`, sockets (`net`), environment variables and signals, strings by character with efficient appends and percent-encoding
+- [x] **1. Errors and I/O:** recoverable errors (`Result` and `?`), `Bytes`, sockets (`net`), environment variables and signals, strings by character with efficient appends and percent-encoding
 - [ ] **2. The type system:** static methods, default field values, generic interfaces and default methods, `match` on the type inside an interface value, `match` as an expression, closures that capture `var`s and methods as values, tuples, iterators for your own types
-- [ ] **3. Concurrency:** lightweight tasks on an event loop across every core (no `async`/`await` split), shared state that is safe across threads, panics that stop only their own task
+- [ ] **3. Concurrency:** lightweight tasks on an event loop across every core (no `async`/`await` split), shared state that is safe across threads (and `fn drop` on generic structs, for lock guards), panics that stop only their own task
 - [ ] **4. Compile-time code:** reflection over a type's fields (`struct User(Json):`) and attributes (`@get("/users/{id}")`) that libraries read at compile time
 - [ ] **5. Libraries and tools:** Thorn, the package manager, a `json` module, calling C directly (TLS, databases, zlib), crypto and encoding, a `log` module, `tarn test`
 - [ ] **Then Traiz itself,** as its own project and package: an HTTP server, routing, middleware, typed handlers, JSON bodies
 
-Later, after Traiz: sets, `xs[-1]`, operators that use the right operand's type, `sort()` for `<=>` types, interface values without a box, a bridge to Python's libraries, a `random` module, Windows support.
+Later, after Traiz: sets, `xs[-1]`, operators that use the right operand's type, `sort()` for `<=>` types, interface values without a box, `Result`s without an allocation, `Bytes` map keys and shared slices, UDP and Unix sockets, a bridge to Python's libraries, a `random` module, Windows support.
 
 <a id="development"></a>
 ## Development
@@ -368,16 +374,16 @@ python3 docs/media/generate.py      # re-render the README's media from real run
 
 ```
 src/            compiler: lexer, parser, checker, codegen, driver, language server, CLI
-stdlib/         the standard library, written in Tarn (time, math, fs)
+stdlib/         the standard library, written in Tarn (prelude, time, math, fs, url, env, signal, net)
 runtime/        the small C runtime linked into every program
-examples/       hello, fib, fizzbuzz, structs, primes_sieve, sort, collatz, guess, calc, clock, wordfreq
+examples/       hello, fib, fizzbuzz, structs, primes_sieve, sort, collatz, guess, calc, clock, wordfreq, echo
 tests/run/      programs + their expected output
 tests/fail/     programs that must not compile    (# expect-error: ...)
 tests/warn/     programs that must warn            (# expect-warning: ...)
 tests/panic/    programs that must panic           (# expect-panic: ...)
 tests/arc/      programs with an allocation budget (# expect-max-allocs: ...)
 bench/          Tarn vs Rust vs Python
-docs/           language guide, time / math / fs references, install guide, README media
+docs/           language guide, time / math / fs / net / system references, install guide, README media
 install.sh      the installer (default or custom)
 uninstall.sh    the uninstaller (everything, or pick)
 ```

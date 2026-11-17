@@ -1,0 +1,16 @@
+# The `url` module: percent-encoding and query strings.
+import url
+
+fn main():
+    print(url.encode("a b&c=d/é~"))
+    print(url.encode_path("/files/my notes.txt"))
+    print(url.encode("plain-text_1.2~"))
+    print(url.decode("caf%C3%A9%20au%2Blait+x"))
+    print(url.decode("bad%2"))
+    print(url.decode("bad%zz"))
+    print(url.decode("%FF"))
+    print(url.decode("%e2%82%ac"))
+    print(url.parse_query("name=Ada+L&lang=tarn&empty=&flag&x=%ZZ&name=Grace"))
+    print(url.query({"q": "tarn lang", "page": "2", "a&b": "c=d"}))
+    print(url.parse_query(url.query({"k": "v w+x"})))
+    print(url.parse_query(""))

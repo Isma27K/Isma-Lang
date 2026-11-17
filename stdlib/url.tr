@@ -1,0 +1,54 @@
+# Percent-encoding for URLs, and query strings.
+#
+#     import url
+#
+#     print(url.encode("a b&c"))                          # a%20b%26c
+#     print(url.decode("caf%C3%A9") ?: "malformed")       # café
+#     val q = url.parse_query("name=Ada+L&lang=tarn")
+#     print(q["name"])                                    # Ada L
+#     print(url.query({"q": "tarn lang", "page": "2"}))   # q=tarn%20lang&page=2
+#
+# Encoding works on the text's UTF-8 bytes, so `é` becomes `%C3%A9`.
+
+# `text` with every character except letters, digits and `-._~`
+# percent-encoded, so it's safe in any part of a URL: `a b&c` gives `a%20b%26c`.
+fn encode(text: String) -> String:
+    return __url_encode(text, "")
+
+# Like `encode`, but keeps the `/`s, for a path:
+# `/files/my notes.txt` gives `/files/my%20notes.txt`.
+fn encode_path(path: String) -> String:
+    return __url_encode(path, "/")
+
+# Percent-encoded text decoded, or `null` if it's malformed (a `%` without two
+# hex digits after it) or doesn't decode to valid UTF-8. A `+` stays a `+`.
+fn decode(text: String) -> String?:
+    return __url_decode(text, false)
+
+# A query string (`a=1&b=two+words`, without the `?`) as a map. A `+` is a
+# space, as in HTML forms. A key without `=` gets `""`, and when a key repeats,
+# the last value wins. A part that doesn't decode is kept as it is.
+fn parse_query(query: String) -> Map[String, String]:
+    val out: Map[String, String] = {}
+    for part in query.split("&"):
+        if part.is_empty():
+            continue
+        val eq = part.find("=")
+        if eq == null:
+            out[_form(part)] = ""
+        else:
+            out[_form(part.substring(0, eq))] = _form(part.substring(eq + 1, part.len()))
+    return out
+
+fn _form(text: String) -> String:
+    return __url_decode(text, true) ?: text
+
+# A query string from a map, keys and values encoded:
+# `{"q": "tarn lang", "page": "2"}` gives `q=tarn%20lang&page=2`.
+fn query(params: Map[String, String]) -> String:
+    var out = ""
+    for key, value in params:
+        if not out.is_empty():
+            out += "&"
+        out += f"{encode(key)}={encode(value)}"
+    return out

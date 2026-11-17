@@ -228,6 +228,7 @@ mod tests {
                 generic: false,
                 closure: None,
                 vtable: Vec::new(),
+                drop: None,
             },
             TStruct {
                 name: "Expr".into(),
@@ -240,6 +241,7 @@ mod tests {
                 generic: false,
                 closure: None,
                 vtable: Vec::new(),
+                drop: None,
             },
         ]
     }

@@ -1,0 +1,15 @@
+# The `env` module: environment variables.
+import env
+
+fn main():
+    env.remove("TARN_TEST_VAR")
+    print(env.get("TARN_TEST_VAR"))
+    print(env.get_or("TARN_TEST_VAR", "default"))
+    env.set("TARN_TEST_VAR", "héllo=world")
+    print(env.get("TARN_TEST_VAR"))
+    print(env.all()["TARN_TEST_VAR"])
+    print(env.get("TARN_TEST_VAR")?.len())
+    env.remove("TARN_TEST_VAR")
+    print("TARN_TEST_VAR" in env.all())
+    val port = env.get("TARN_TEST_PORT")?.to_int_or_null() ?: 8080
+    print(port)

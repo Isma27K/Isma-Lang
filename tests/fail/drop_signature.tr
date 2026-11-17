@@ -1,0 +1,8 @@
+# expect-error: `fn drop` takes only `self` and returns nothing
+struct File:
+    fd: Int
+    fn drop(self) -> Bool:
+        return true
+
+fn main():
+    print(File(1).fd)

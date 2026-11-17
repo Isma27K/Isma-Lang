@@ -1,0 +1,94 @@
+# Always available, in every file, without an import: `Result` with `Ok` and
+# `Err`, and `Unit`.
+
+# The outcome of something that can fail: its value (`Ok`) or what went wrong (`Err`).
+#
+#     fn parse_port(text: String) -> Result[Int, String]:
+#         val n = text.to_int_or_null() ?: return Err(f"not a number: {text}")
+#         if n < 1 or n > 65535:
+#             return Err(f"out of range: {n}")
+#         return Ok(n)
+#
+# Take one apart with `match` (`case Ok(port):` / `case Err(why):`), pass the
+# error on to your caller with `?`, or use the methods below.
+enum Result[T, E]:
+    # It worked: here's the value.
+    Ok(value: T)
+    # It failed: here's why.
+    Err(error: E)
+
+    # Is it an `Ok`?
+    fn is_ok(self) -> Bool:
+        match self:
+            case Ok(_):
+                return true
+            case Err(_):
+                return false
+
+    # Is it an `Err`?
+    fn is_err(self) -> Bool:
+        match self:
+            case Ok(_):
+                return false
+            case Err(_):
+                return true
+
+    # The value, or `null` if it's an `Err`.
+    fn value_or_null(self) -> T?:
+        match self:
+            case Ok(value):
+                return value
+            case Err(_):
+                return null
+
+    # The error, or `null` if it's an `Ok`.
+    fn error_or_null(self) -> E?:
+        match self:
+            case Ok(_):
+                return null
+            case Err(error):
+                return error
+
+    # The value, or `default` if it's an `Err`.
+    fn value_or(self, default: T) -> T:
+        match self:
+            case Ok(value):
+                return value
+            case Err(_):
+                return default
+
+    # The value changed by `f`, if it's an `Ok`; an `Err` stays as it is.
+    fn map[U](self, f: fn(T) -> U) -> Result[U, E]:
+        match self:
+            case Ok(value):
+                return Ok(f(value))
+            case Err(error):
+                return Err(error)
+
+    # The error changed by `f`, if it's an `Err`; an `Ok` stays as it is.
+    # Handy before `?` when your function fails with another error type.
+    fn map_err[F](self, f: fn(E) -> F) -> Result[T, F]:
+        match self:
+            case Ok(value):
+                return Ok(value)
+            case Err(error):
+                return Err(f(error))
+
+    # `Ok(42)` or `Err(not a number)`.
+    fn to_string(self) -> String:
+        match self:
+            case Ok(value):
+                return f"Ok({value})"
+            case Err(error):
+                return f"Err({error})"
+
+# "No value": the type to put in `Result[Unit, E]` for something that can fail
+# but has nothing to give back. `Ok()` builds the successful one.
+#
+#     fn save(path: String, text: String) -> Result[Unit, String]:
+#         if text.is_empty():
+#             return Err("nothing to save")
+#         fs.write(path, text)
+#         return Ok()
+enum Unit:
+    Unit

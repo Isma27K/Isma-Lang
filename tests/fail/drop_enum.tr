@@ -1,0 +1,9 @@
+# expect-error: only structs can have `fn drop`
+enum Light:
+    On
+    Off
+    fn drop(self):
+        pass
+
+fn main():
+    print(Light.On)

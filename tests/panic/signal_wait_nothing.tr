@@ -1,0 +1,5 @@
+# expect-panic: signal.wait() with no signal caught would wait forever
+import signal
+
+fn main():
+    print(signal.wait())

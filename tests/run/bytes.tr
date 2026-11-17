@@ -1,0 +1,44 @@
+# `Bytes`: raw bytes, the way files and sockets carry data.
+fn main():
+    val req = "GET /index.html HTTP/1.1\r\nHost: example.com\r\n\r\n".encode()
+    print(req.len())
+    print(req)
+    # Find the end of the header lines, and split them.
+    val end = req.find("\r\n\r\n".encode())!!
+    for line in req.slice(0, end).split("\r\n".encode()):
+        print(line.decode())
+    print(req[0])
+
+    # Building up, in place.
+    var buf = Bytes()
+    buf += "héllo".encode()
+    buf += Bytes([0, 255, 10])
+    print(buf)
+    print(buf.hex())
+    print(f"{buf.len()} bytes")
+    print(buf.decode_or_null())
+    print(buf.to_list())
+    var sum = 0
+    for byte in buf:
+        sum += byte
+    print(sum)
+    for i, byte in "AB".encode():
+        print(f"{i}: {byte}")
+
+    # Comparing, searching.
+    print("abc".encode() == Bytes([97, 98, 99]))
+    print("abc".encode() != "abd".encode())
+    print(buf.starts_with("hé".encode()))
+    print(buf.ends_with(Bytes([10])))
+    print(buf.contains(Bytes([0, 255])))
+    print(req.count("\r\n".encode()))
+    print(req.rfind("\r\n".encode()))
+    print(req.find("nope".encode()))
+    print("a-b-c".encode().replace("-".encode(), "+".encode()).decode())
+    print("  pad ".encode().trim().decode())
+    print(f"{"x".encode()} and {buf.slice(0, 2)}")
+    print(Bytes().is_empty())
+    print(Bytes([0xe2, 0x82, 0xac]).decode())
+    print(Bytes([0x66, 0x80, 0x6f]).decode_lossy())
+    val nums: List[Bytes] = ["a".encode(), Bytes([9])]
+    print(nums)

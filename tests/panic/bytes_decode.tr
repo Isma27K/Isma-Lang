@@ -1,0 +1,3 @@
+# expect-panic: decode(): the bytes are not valid UTF-8
+fn main():
+    print(Bytes([104, 255]).decode())

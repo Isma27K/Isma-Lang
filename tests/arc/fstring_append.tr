@@ -1,0 +1,9 @@
+# expect-max-allocs: 40
+# `s += f"..."` appends each part to `s` in place: no f-string is built
+# first, so 100 000 appends take a logarithmic number of allocations.
+fn main():
+    val name = "ab"
+    var s = ""
+    for _ in 0..100_000:
+        s += f"<{name}>"
+    print(s.len())

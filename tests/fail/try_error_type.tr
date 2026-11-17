@@ -1,0 +1,9 @@
+# expect-error: `?` can't pass this error on: it's a `String`, but `count` fails with an `Int`
+fn parse(s: String) -> Result[Int, String]:
+    return Ok(1)
+
+fn count() -> Result[Int, Int]:
+    return Ok(parse("1")?)
+
+fn main():
+    print(count())

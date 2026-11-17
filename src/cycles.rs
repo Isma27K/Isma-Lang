@@ -29,7 +29,7 @@ use crate::types::Type;
 /// The reference-counted types directly inside a value of type `t`, and
 /// whether each reference can be replaced after the value is built.
 fn children(t: &Type, structs: &[TStruct]) -> Vec<(Type, bool)> {
-    let refs = |ty: &Type| is_ref(ty) && *ty.non_null() != Type::Str;
+    let refs = |ty: &Type| is_ref(ty) && !matches!(ty.non_null(), Type::Str | Type::Bytes);
     match t {
         Type::Struct(sid) => structs[*sid].fields.iter().filter(|f| refs(&f.ty)).map(|f| (f.ty.non_null().clone(), f.mutable)).collect(),
         Type::Enum(sid, true) => {
@@ -96,6 +96,7 @@ mod tests {
             generic: false,
             closure: None,
             vtable: Vec::new(),
+            drop: None,
         }
     }
 
@@ -138,8 +139,8 @@ mod tests {
         let expr = Type::Enum(1, true);
         let structs = vec![
             fixed("Cons", &[Type::Int, Type::Struct(0).nullable()]), // a `val next`: no cycle possible
-            TStruct { name: "Expr".into(), fields: vec![], variants: Some(vec![variant("Num", &[Type::Int]), variant("Add", &[expr.clone(), expr.clone()])]), generic: false, closure: None, vtable: Vec::new() },
-            TStruct { name: "Json".into(), fields: vec![], variants: Some(vec![variant("Arr", &[Type::List(Box::new(Type::Enum(2, true)))])]), generic: false, closure: None, vtable: Vec::new() },
+            TStruct { name: "Expr".into(), fields: vec![], variants: Some(vec![variant("Num", &[Type::Int]), variant("Add", &[expr.clone(), expr.clone()])]), generic: false, closure: None, vtable: Vec::new(), drop: None },
+            TStruct { name: "Json".into(), fields: vec![], variants: Some(vec![variant("Arr", &[Type::List(Box::new(Type::Enum(2, true)))])]), generic: false, closure: None, vtable: Vec::new(), drop: None },
         ];
         assert_eq!(cyclic_structs(&structs), vec![false, false, true]); // `Arr(items)`: `items.push(json)` can close a cycle
     }

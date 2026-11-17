@@ -1,0 +1,177 @@
+# TCP networking: wait for connections, or connect to a server.
+#
+#     import net
+#
+#     val server = net.listen("127.0.0.1", 8080)!!
+#     print(f"listening on {server.address()}")
+#     val conn = server.accept()!!
+#     val got = conn.read(4096)!!
+#     conn.write("hello\n".encode())!!
+#
+#     val client = net.connect("example.com", 80)?
+#
+# Everything that can fail returns a `Result` with a `net.Error` that says
+# why. Data goes in and out as `Bytes`: `"text".encode()` and `data.decode()`
+# convert. A socket closes by itself when nothing uses it any more, and
+# `close()` closes it at once.
+#
+# Calls wait until they can finish: until a connection arrives, until data
+# comes in. A timeout (`set_timeout`) or a caught signal (see the `signal`
+# module) ends the wait with an error.
+
+import time
+
+# Why a network operation failed.
+enum ErrorKind:
+    # Nobody is listening there.
+    Refused
+    # The other side dropped the connection.
+    Reset
+    # The time limit (`set_timeout`) passed.
+    TimedOut
+    # A caught signal arrived while waiting (see the `signal` module).
+    Interrupted
+    # Something else already listens on that port.
+    AddressInUse
+    # The host name doesn't exist.
+    NotFound
+    # The address can't be reached from here.
+    Unreachable
+    # The socket is closed.
+    Closed
+    # Anything else: the message says what.
+    Other
+
+# A failed network operation: what kind of failure, and a description.
+struct Error:
+    kind: ErrorKind
+    message: String
+
+    # Like `connect to localhost:81: Connection refused`.
+    fn to_string(self) -> String:
+        return self.message
+
+# A socket waiting for connections, from `net.listen`.
+struct Listener:
+    var _fd: Int
+    _address: String
+
+    # Wait for the next connection, and return it.
+    fn accept(self) -> Result[Conn, Error]:
+        if self._fd < 0:
+            return Err(_closed("accept"))
+        val fd = __net_accept(self._fd)
+        if fd < 0:
+            return Err(_error("accept"))
+        return Ok(Conn(fd, __net_peer_address(fd) ?: "unknown"))
+
+    # The address it listens on, like `127.0.0.1:8080`.
+    fn address(self) -> String:
+        return self._address
+
+    # The port it listens on: the one the system picked, if you asked for port 0.
+    fn port(self) -> Int:
+        val colon = self._address.rfind(":") ?: return 0
+        return self._address.substring(colon + 1, self._address.len()).to_int_or_null() ?: 0
+
+    # Stop listening. (It also happens by itself when nothing uses the listener any more.)
+    fn close(self):
+        __net_close(self._fd)
+        self._fd = -1
+
+    fn drop(self):
+        self.close()
+
+# A TCP connection, from `net.connect` or `Listener.accept`.
+struct Conn:
+    var _fd: Int
+    _peer: String
+
+    # Wait for data, and return up to `max` bytes of it: whatever has arrived.
+    # Empty `Bytes` means the other side has closed the connection (or finished sending).
+    fn read(self, max: Int) -> Result[Bytes, Error]:
+        if max < 1:
+            panic(f"read({max}): read at least 1 byte")
+        if self._fd < 0:
+            return Err(_closed("read"))
+        val data = __net_read(self._fd, max) ?: return Err(_error("read"))
+        return Ok(data)
+
+    # Everything until the other side closes the connection.
+    fn read_all(self) -> Result[Bytes, Error]:
+        var all = Bytes()
+        while true:
+            val chunk = self.read(65536)?
+            if chunk.is_empty():
+                return Ok(all)
+            all += chunk
+
+    # Send all of `data`.
+    fn write(self, data: Bytes) -> Result[Unit, Error]:
+        if self._fd < 0:
+            return Err(_closed("write"))
+        if __net_write(self._fd, data) < 0:
+            return Err(_error("write"))
+        return Ok()
+
+    # Give up waiting to read or write after `limit` (like `time.seconds(5)`),
+    # with an `ErrorKind.TimedOut` error. Zero waits as long as it takes (the default).
+    fn set_timeout(self, limit: time.Duration):
+        if self._fd >= 0:
+            val _ = __net_set_timeout(self._fd, limit.nanos())
+
+    # The other side's address, like `127.0.0.1:54321`.
+    fn peer_address(self) -> String:
+        return self._peer
+
+    # Close the connection. (It also happens by itself when nothing uses the connection any more.)
+    fn close(self):
+        __net_close(self._fd)
+        self._fd = -1
+
+    fn drop(self):
+        self.close()
+
+# Listen for TCP connections on `host` and `port`. The host is an address of
+# this machine: `"127.0.0.1"` for connections from this machine only,
+# `"0.0.0.0"` (or `"::"` for IPv6) for any. Port 0 lets the system pick a free one.
+fn listen(host: String, port: Int) -> Result[Listener, Error]:
+    val fd = __net_listen(host, port)
+    if fd < 0:
+        return Err(_error(f"listen on {host}:{port}"))
+    return Ok(Listener(fd, __net_local_address(fd) ?: f"{host}:{port}"))
+
+# Connect to `host` (a name like `"example.com"` or an address) on `port`.
+fn connect(host: String, port: Int) -> Result[Conn, Error]:
+    val fd = __net_connect(host, port)
+    if fd < 0:
+        return Err(_error(f"connect to {host}:{port}"))
+    return Ok(Conn(fd, __net_peer_address(fd) ?: f"{host}:{port}"))
+
+fn _error(what: String) -> Error:
+    val code = __net_last_error()
+    return Error(_kind(__net_error_kind(code)), f"{what}: {__net_error_message(code)}")
+
+fn _closed(what: String) -> Error:
+    return Error(ErrorKind.Closed, f"{what}: the socket is closed")
+
+fn _kind(n: Int) -> ErrorKind:
+    match n:
+        case 0:
+            return ErrorKind.Refused
+        case 1:
+            return ErrorKind.Reset
+        case 2:
+            return ErrorKind.TimedOut
+        case 3:
+            return ErrorKind.Interrupted
+        case 4:
+            return ErrorKind.AddressInUse
+        case 5:
+            return ErrorKind.NotFound
+        case 6:
+            return ErrorKind.Unreachable
+        case 7:
+            return ErrorKind.Closed
+        case _:
+            return ErrorKind.Other

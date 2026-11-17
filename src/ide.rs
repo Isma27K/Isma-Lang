@@ -168,8 +168,9 @@ impl IdeInfo {
                     .collect();
                 for &fid in &s.methods {
                     let f = &self.functions[fid];
-                    // Operator functions (`fn +`) are used through their operator, not `.`.
-                    if hide_private && f.name.starts_with('_') || crate::ast::is_operator_name(&f.name) {
+                    // Operator functions (`fn +`) are used through their operator, not `.`,
+                    // and `fn drop` runs by itself: it can't be called.
+                    if hide_private && f.name.starts_with('_') || crate::ast::is_operator_name(&f.name) || f.name == "drop" && !s.iface {
                         continue;
                     }
                     let of = if s.iface { "method of interface" } else { "method of" };
@@ -278,9 +279,31 @@ pub fn builtin_methods(t: &Type, tn: &str, type_name: &dyn Fn(&Type) -> String) 
             method("to_int", "fn to_int() -> Int".into(), "Truncate toward zero (saturating at the `Int` range; NaN becomes 0).", false),
         ],
         Type::Bool => vec![to_string],
+        Type::Bytes => vec![
+            method("len", "fn len() -> Int".into(), "Number of bytes.", false),
+            method("is_empty", "fn is_empty() -> Bool".into(), "Are there no bytes?", false),
+            method("slice", "fn slice(start: Int, end: Int) -> Bytes".into(), "The bytes from index `start` up to (not including) `end`, copied. Panics if the range is outside the bytes.", true),
+            method("find", "fn find(b: Bytes) -> Int?".into(), "The index of the first `b`, or `null`.", true),
+            method("rfind", "fn rfind(b: Bytes) -> Int?".into(), "The index of the last `b`, or `null`.", true),
+            method("contains", "fn contains(b: Bytes) -> Bool".into(), "Does `b` occur in them?", true),
+            method("starts_with", "fn starts_with(b: Bytes) -> Bool".into(), "Do they start with `b`?", true),
+            method("ends_with", "fn ends_with(b: Bytes) -> Bool".into(), "Do they end with `b`?", true),
+            method("split", "fn split(sep: Bytes) -> List[Bytes]".into(), "The parts between each `sep`.", true),
+            method("count", "fn count(b: Bytes) -> Int".into(), "How many times `b` occurs (without overlapping).", true),
+            method("replace", "fn replace(old: Bytes, new: Bytes) -> Bytes".into(), "Every `old` replaced by `new`.", true),
+            method("trim", "fn trim() -> Bytes".into(), "Without ASCII whitespace at either end.", false),
+            method("decode", "fn decode() -> String".into(), "The bytes as text. They're shared, not copied. Panics if they aren't valid UTF-8.", false),
+            method("decode_or_null", "fn decode_or_null() -> String?".into(), "The bytes as text, or `null` if they aren't valid UTF-8.", false),
+            method("decode_lossy", "fn decode_lossy() -> String".into(), "The bytes as text, with `\u{FFFD}` in place of each byte that isn't valid UTF-8.", false),
+            method("hex", "fn hex() -> String".into(), "Two lowercase hex digits per byte: `\"48690a\"`.", false),
+            method("to_list", "fn to_list() -> List[Int]".into(), "The bytes as numbers from 0 to 255.", false),
+            method("to_string", "fn to_string() -> String".into(), "As written in code: `b\"GET /\\r\\n\"`, other bytes as `\\xff`.", false),
+        ],
         Type::Str => vec![
             method("len", "fn len() -> Int".into(), "Length in bytes.", false),
             method("chars", "fn chars() -> List[String]".into(), "The characters of the string, each as a one-character `String`.", false),
+            method("encode", "fn encode() -> Bytes".into(), "The text's UTF-8 bytes. They're shared, not copied.", false),
+            method("char_count", "fn char_count() -> Int".into(), "The number of characters. (`len()` counts bytes: `\"héllo\".len()` is 6, `char_count()` is 5.)", false),
             method(
                 "substring",
                 "fn substring(start: Int, end: Int) -> String".into(),
@@ -412,6 +435,7 @@ pub const BUILTIN_TYPES: &[(&str, &str)] = &[
     ("Float", "64-bit IEEE 754 floating point number."),
     ("Bool", "`true` or `false`."),
     ("String", "Immutable UTF-8 text."),
+    ("Bytes", "Raw bytes: what files and sockets carry. `s.encode()` makes one from text, `b.decode()` turns valid UTF-8 back into a `String`."),
     ("List", "`List[T]`: growable, bounds-checked list (reference type)."),
     ("Map", "`Map[K, V]`: hash map from keys to values, in insertion order (reference type)."),
 ];

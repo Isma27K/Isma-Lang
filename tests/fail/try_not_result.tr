@@ -1,0 +1,6 @@
+# expect-error: `?` needs a `Result` or a nullable value, but this is an `Int`
+fn f() -> Result[Int, String]:
+    return Ok(5?)
+
+fn main():
+    print(f())

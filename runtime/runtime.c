@@ -41,6 +41,14 @@ static void tarn_die(const char *file, int line, int col, const char *msg) {
     exit(101);
 }
 
+// A `fn drop(self)` stored a reference to the value it was dropping, which
+// is about to be freed anyway.
+void tarn_drop_kept(void) {
+    fflush(stdout);
+    fprintf(stderr, "panic: a `fn drop` kept a reference to the value it was dropping (drop runs as the value is freed: it can't keep `self`)\n");
+    exit(101);
+}
+
 void tarn_panic_msg(TarnStr *msg, const char *file, int line, int col) {
     fflush(stdout);
     fprintf(stderr, "panic at %s:%d:%d: %.*s\n", file, line, col, (int)msg->len, msg->data);
@@ -640,16 +648,42 @@ TarnList *tarn_list_new(int64_t elem_size, int64_t cap);
 void *tarn_list_push_slot(TarnList *l, int64_t elem_size);
 
 // Each UTF-8 character as its own string.
+// The 128 one-byte ASCII strings, immortal: `for c in s` and `chars()` on
+// ASCII text allocate nothing per character.
+typedef struct {
+    int64_t rc;
+    int64_t len;
+    int64_t cap;
+    char data[8];
+} AsciiChar;
+static AsciiChar ascii_chars[128];
+
+static void init_ascii_chars(void) {
+    for (int i = 0; i < 128; i++) ascii_chars[i] = (AsciiChar){RC_IMMORTAL, 1, 1, {(char)i}};
+}
+
+// The length in bytes of the character starting at byte `i` (1 for a stray byte).
+static int64_t char_len_at(TarnStr *s, int64_t i) {
+    unsigned char c = (unsigned char)s->data[i];
+    int64_t n = c < 0x80 ? 1 : (c >> 5) == 0x6 ? 2 : (c >> 4) == 0xE ? 3 : (c >> 3) == 0x1E ? 4 : 1;
+    return i + n > s->len ? s->len - i : n;
+}
+
+// The character starting at byte `i`, as a string.
+TarnStr *tarn_str_char_at(TarnStr *s, int64_t i) {
+    unsigned char c = (unsigned char)s->data[i];
+    if (c < 0x80) return (TarnStr *)&ascii_chars[c];
+    return str_from(s->data + i, char_len_at(s, i));
+}
+
 TarnList *tarn_str_chars(TarnStr *s) {
     TarnList *l = tarn_list_new((int64_t)sizeof(TarnStr *), s->len);
     int64_t i = 0;
     while (i < s->len) {
-        unsigned char c = (unsigned char)s->data[i];
-        int64_t n = c < 0x80 ? 1 : (c >> 5) == 0x6 ? 2 : (c >> 4) == 0xE ? 3 : (c >> 3) == 0x1E ? 4 : 1;
-        if (i + n > s->len) n = s->len - i;
+        TarnStr *ch = tarn_str_char_at(s, i);
         TarnStr **slot = tarn_list_push_slot(l, (int64_t)sizeof(TarnStr *));
-        *slot = str_from(s->data + i, n);
-        i += n;
+        *slot = ch;
+        i += ch->len;
     }
     return l;
 }
@@ -668,10 +702,17 @@ int64_t tarn_time_monotonic_ns(void) {
     return (int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec;
 }
 
+static int signal_any_pending(void);
+
+// Sleeps the whole time, unless a caught signal arrives (see the signal module).
 void tarn_time_sleep_ns(int64_t ns) {
     fflush(stdout);
     struct timespec req = {(time_t)(ns / 1000000000), (long)(ns % 1000000000)}, rem;
-    while (nanosleep(&req, &rem) != 0 && errno == EINTR) req = rem;
+    if (signal_any_pending()) return;
+    while (nanosleep(&req, &rem) != 0 && errno == EINTR) {
+        if (signal_any_pending()) return;
+        req = rem;
+    }
 }
 
 // ---------------------------------------------------------------- printing
@@ -1016,6 +1057,8 @@ static int64_t utf8_count(TarnStr *s) {
     return n;
 }
 
+int64_t tarn_str_char_count(TarnStr *s) { return utf8_count(s); }
+
 // Pad to `width` characters with copies of `fill` (one character) on the left or right.
 TarnStr *tarn_str_pad(TarnStr *s, int64_t width, TarnStr *fill, int64_t at_start, const char *file, int line, int col) {
     if (utf8_count(fill) != 1) tarn_die(file, line, col, "pad_start()/pad_end(): the fill must be exactly one character");
@@ -1032,6 +1075,220 @@ TarnStr *tarn_str_pad(TarnStr *s, int64_t width, TarnStr *fill, int64_t at_start
     if (at_start) memcpy(p, s->data, (size_t)s->len);
     return r;
 }
+
+// ---------------------------------------------------------------- UTF-8 and URLs
+
+// Is `p[0..n)` valid UTF-8 (no overlong forms, surrogates or code points past U+10FFFF)?
+static int utf8_valid(const unsigned char *p, int64_t n) {
+    int64_t i = 0;
+    while (i < n) {
+        unsigned char c = p[i];
+        if (c < 0x80) {
+            i++;
+            continue;
+        }
+        int64_t k;
+        uint32_t cp;
+        if ((c & 0xE0) == 0xC0) k = 1, cp = c & 0x1F;
+        else if ((c & 0xF0) == 0xE0) k = 2, cp = c & 0x0F;
+        else if ((c & 0xF8) == 0xF0) k = 3, cp = c & 0x07;
+        else return 0;
+        if (i + k >= n) return 0; // cut short
+        for (int64_t j = 1; j <= k; j++) {
+            if ((p[i + j] & 0xC0) != 0x80) return 0;
+            cp = (cp << 6) | (p[i + j] & 0x3F);
+        }
+        if ((k == 1 && cp < 0x80) || (k == 2 && cp < 0x800) || (k == 3 && cp < 0x10000)) return 0; // overlong
+        if (cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) return 0;
+        i += k + 1;
+    }
+    return 1;
+}
+
+// Percent-encoding (RFC 3986): every byte but the unreserved characters
+// (letters, digits, `-._~`) and those in `keep` becomes `%XX`.
+TarnStr *tarn_rt_url_encode(TarnStr *s, TarnStr *keep) {
+    static const char hex[] = "0123456789ABCDEF";
+    int64_t n = 0;
+    for (int64_t i = 0; i < s->len; i++) {
+        unsigned char c = (unsigned char)s->data[i];
+        int plain = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '.' || c == '_' || c == '~' ||
+                    (c < 0x80 && memchr(keep->data, c, (size_t)keep->len));
+        n += plain ? 1 : 3;
+    }
+    if (n == s->len) return str_dup(s);
+    TarnStr *r = str_new(n);
+    char *o = r->data;
+    for (int64_t i = 0; i < s->len; i++) {
+        unsigned char c = (unsigned char)s->data[i];
+        int plain = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '.' || c == '_' || c == '~' ||
+                    (c < 0x80 && memchr(keep->data, c, (size_t)keep->len));
+        if (plain) {
+            *o++ = (char)c;
+        } else {
+            *o++ = '%';
+            *o++ = hex[c >> 4];
+            *o++ = hex[c & 15];
+        }
+    }
+    return r;
+}
+
+static int hex_digit(unsigned char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+// `%XX` back to bytes (and `+` to a space, for form data): NULL if a `%` isn't
+// followed by two hex digits, or the result isn't valid UTF-8.
+TarnStr *tarn_rt_url_decode(TarnStr *s, int64_t plus) {
+    if (!memchr(s->data, '%', (size_t)s->len) && !(plus && memchr(s->data, '+', (size_t)s->len))) return str_dup(s);
+    TarnStr *r = str_new(s->len);
+    int64_t n = 0;
+    for (int64_t i = 0; i < s->len; i++) {
+        unsigned char c = (unsigned char)s->data[i];
+        if (c == '%') {
+            int hi = i + 2 < s->len ? hex_digit((unsigned char)s->data[i + 1]) : -1;
+            int lo = i + 2 < s->len ? hex_digit((unsigned char)s->data[i + 2]) : -1;
+            if (hi < 0 || lo < 0) {
+                tarn_str_free(r);
+                return NULL;
+            }
+            r->data[n++] = (char)(hi * 16 + lo);
+            i += 2;
+        } else {
+            r->data[n++] = plus && c == '+' ? ' ' : (char)c;
+        }
+    }
+    r->len = n;
+    if (!utf8_valid((unsigned char *)r->data, n)) {
+        tarn_str_free(r);
+        return NULL;
+    }
+    return r;
+}
+
+// ---------------------------------------------------------------- bytes
+// `Bytes` share `TarnStr`'s layout (and its concatenation, search and
+// splitting): only the methods that differ are here.
+
+TarnStr *tarn_rt_bytes_new(void) { return str_alloc(0); }
+
+TarnStr *tarn_rt_bytes_from_list(TarnList *l, const char *file, int line, int col) {
+    TarnStr *b = str_new(l->len);
+    int64_t *v = (int64_t *)l->data;
+    for (int64_t i = 0; i < l->len; i++) {
+        if (v[i] < 0 || v[i] > 255) {
+            char msg[96];
+            snprintf(msg, sizeof msg, "Bytes([...]): %lld at index %lld is not a byte (0 to 255)", (long long)v[i], (long long)i);
+            tarn_die(file, line, col, msg);
+        }
+        b->data[i] = (char)v[i];
+    }
+    return b;
+}
+
+int64_t tarn_rt_bytes_get(TarnStr *b, int64_t i, const char *file, int line, int col) {
+    if (i < 0 || i >= b->len) {
+        char msg[96];
+        snprintf(msg, sizeof msg, "index %lld out of bounds for %lld bytes", (long long)i, (long long)b->len);
+        tarn_die(file, line, col, msg);
+    }
+    return (unsigned char)b->data[i];
+}
+
+int64_t tarn_rt_bytes_at(TarnStr *b, int64_t i) { return (unsigned char)b->data[i]; }
+
+TarnStr *tarn_rt_bytes_slice(TarnStr *b, int64_t start, int64_t end, const char *file, int line, int col) {
+    if (start < 0 || end > b->len || start > end) {
+        char msg[128];
+        snprintf(msg, sizeof msg, "slice(%lld, %lld) out of range for %lld bytes", (long long)start, (long long)end, (long long)b->len);
+        tarn_die(file, line, col, msg);
+    }
+    if (start == 0 && end == b->len) return str_dup(b);
+    return str_from(b->data + start, end - start);
+}
+
+// Valid UTF-8 becomes a `String` without copying: the same object, shared.
+TarnStr *tarn_rt_bytes_decode_or_null(TarnStr *b) { return utf8_valid((unsigned char *)b->data, b->len) ? str_dup(b) : NULL; }
+
+TarnStr *tarn_rt_bytes_decode(TarnStr *b, const char *file, int line, int col) {
+    if (!utf8_valid((unsigned char *)b->data, b->len)) tarn_die(file, line, col, "decode(): the bytes are not valid UTF-8 (use decode_or_null() or decode_lossy())");
+    return str_dup(b);
+}
+
+// Invalid sequences become U+FFFD (the replacement character), one per bad byte.
+TarnStr *tarn_rt_bytes_decode_lossy(TarnStr *b) {
+    if (utf8_valid((unsigned char *)b->data, b->len)) return str_dup(b);
+    TarnStr *r = str_alloc(b->len * 3);
+    int64_t i = 0, n = 0;
+    while (i < b->len) {
+        int64_t k = char_len_at(b, i);
+        if (k > 1 || (unsigned char)b->data[i] < 0x80) {
+            if (utf8_valid((unsigned char *)b->data + i, k)) {
+                memcpy(r->data + n, b->data + i, (size_t)k);
+                n += k;
+                i += k;
+                continue;
+            }
+        }
+        memcpy(r->data + n, "\xEF\xBF\xBD", 3);
+        n += 3;
+        i++;
+    }
+    r->len = n;
+    return r;
+}
+
+TarnStr *tarn_rt_bytes_hex(TarnStr *b) {
+    static const char hex[] = "0123456789abcdef";
+    TarnStr *r = str_new(b->len * 2);
+    for (int64_t i = 0; i < b->len; i++) {
+        unsigned char c = (unsigned char)b->data[i];
+        r->data[2 * i] = hex[c >> 4];
+        r->data[2 * i + 1] = hex[c & 15];
+    }
+    return r;
+}
+
+TarnList *tarn_rt_bytes_to_list(TarnStr *b) {
+    TarnList *l = tarn_list_new((int64_t)sizeof(int64_t), b->len);
+    for (int64_t i = 0; i < b->len; i++) *(int64_t *)tarn_list_push_slot(l, (int64_t)sizeof(int64_t)) = (unsigned char)b->data[i];
+    return l;
+}
+
+// `b"GET /\r\n\xff"`: printable ASCII as it is, the rest escaped.
+TarnStr *tarn_rt_bytes_repr(TarnStr *b) {
+    static const char hex[] = "0123456789abcdef";
+    TarnStr *r = str_alloc(b->len * 4 + 3);
+    char *o = r->data;
+    *o++ = 'b';
+    *o++ = '"';
+    for (int64_t i = 0; i < b->len; i++) {
+        unsigned char c = (unsigned char)b->data[i];
+        switch (c) {
+        case '\n': *o++ = '\\', *o++ = 'n'; break;
+        case '\r': *o++ = '\\', *o++ = 'r'; break;
+        case '\t': *o++ = '\\', *o++ = 't'; break;
+        case '"': *o++ = '\\', *o++ = '"'; break;
+        case '\\': *o++ = '\\', *o++ = '\\'; break;
+        default:
+            if (c >= 0x20 && c < 0x7f) {
+                *o++ = (char)c;
+            } else {
+                *o++ = '\\', *o++ = 'x', *o++ = hex[c >> 4], *o++ = hex[c & 15];
+            }
+        }
+    }
+    *o++ = '"';
+    r->len = o - r->data;
+    return r;
+}
+
+// `s.encode()`: a `String` is already UTF-8 bytes, so it's the same object.
+TarnStr *tarn_rt_str_encode(TarnStr *s) { return str_dup(s); }
 
 // ---------------------------------------------------------------- hashing
 
@@ -1552,6 +1809,370 @@ TarnList *tarn_args(void) {
 
 // `TARN_ARC_STATS=1` (set by `tarn run --arc-stats`) prints memory counters at
 // exit; `TARN_ARC_CHECK=1` reports leaked objects (used by the test suite).
+// ---------------------------------------------------------------- environment (the env module)
+
+extern char **environ;
+
+// A NUL-terminated copy, or NULL if the text itself contains a NUL byte.
+static char *cstr_or_null(TarnStr *s) {
+    if (memchr(s->data, 0, (size_t)s->len)) return NULL;
+    return cpath(s);
+}
+
+TarnStr *tarn_rt_env_get(TarnStr *name) {
+    char *n = cstr_or_null(name);
+    if (!n) return NULL;
+    const char *v = getenv(n);
+    free(n);
+    return v ? str_from(v, (int64_t)strlen(v)) : NULL;
+}
+
+// `name` must be non-empty, without `=` or NUL; `value` without NUL.
+int64_t tarn_rt_env_set(TarnStr *name, TarnStr *value) {
+    char *n = cstr_or_null(name), *v = cstr_or_null(value);
+    int ok = n && v && name->len > 0 && !memchr(name->data, '=', (size_t)name->len) && setenv(n, v, 1) == 0;
+    free(n);
+    free(v);
+    return ok;
+}
+
+int64_t tarn_rt_env_remove(TarnStr *name) {
+    char *n = cstr_or_null(name);
+    int ok = n && name->len > 0 && !memchr(name->data, '=', (size_t)name->len) && unsetenv(n) == 0;
+    free(n);
+    return ok;
+}
+
+// Every variable as `NAME=value`, in the order the system keeps them.
+TarnList *tarn_rt_env_all(void) {
+    TarnList *l = tarn_list_new((int64_t)sizeof(TarnStr *), 0);
+    for (char **e = environ; *e; e++) list_push_str(l, *e, (int64_t)strlen(*e));
+    return l;
+}
+
+// ---------------------------------------------------------------- signals (the signal module)
+// A caught signal only bumps a counter: the program asks for it later
+// (`received`, `wait`). Handlers are installed without SA_RESTART, so a
+// blocking call (`accept`, `read`, `sleep`) returns early when one arrives.
+
+#include <signal.h>
+
+// The `signal.Signal` variants, in order.
+static const int signal_numbers[] = {SIGINT, SIGTERM, SIGHUP, SIGUSR1, SIGUSR2, SIGQUIT};
+#define N_SIGNALS ((int)(sizeof signal_numbers / sizeof signal_numbers[0]))
+static volatile sig_atomic_t signal_pending[N_SIGNALS];
+static int signal_caught[N_SIGNALS];
+
+static int signal_any_pending(void) {
+    for (int i = 0; i < N_SIGNALS; i++)
+        if (signal_pending[i] > 0) return 1;
+    return 0;
+}
+
+static void on_signal(int s) {
+    for (int i = 0; i < N_SIGNALS; i++)
+        if (signal_numbers[i] == s) signal_pending[i] = signal_pending[i] + 1;
+}
+
+static int sigisemptyset_portable(const sigset_t *set) {
+    for (int i = 0; i < N_SIGNALS; i++)
+        if (sigismember(set, signal_numbers[i])) return 0;
+    return 1;
+}
+
+static void signal_mask(sigset_t *set) {
+    sigemptyset(set);
+    for (int i = 0; i < N_SIGNALS; i++)
+        if (signal_caught[i]) sigaddset(set, signal_numbers[i]);
+}
+
+void tarn_rt_signal_catch(int64_t which) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = on_signal;
+    sigemptyset(&sa.sa_mask);
+    sigaction(signal_numbers[which], &sa, NULL);
+    signal_caught[which] = 1;
+}
+
+void tarn_rt_signal_reset(int64_t which) {
+    signal(signal_numbers[which], SIG_DFL);
+    signal_caught[which] = 0;
+    signal_pending[which] = 0;
+}
+
+// The first caught signal that arrived and hasn't been received yet, or -1.
+int64_t tarn_rt_signal_next(void) {
+    sigset_t caught, old;
+    signal_mask(&caught);
+    sigprocmask(SIG_BLOCK, &caught, &old);
+    int64_t got = -1;
+    for (int i = 0; i < N_SIGNALS && got < 0; i++) {
+        if (signal_pending[i] > 0) {
+            signal_pending[i] = signal_pending[i] - 1;
+            got = i;
+        }
+    }
+    sigprocmask(SIG_SETMASK, &old, NULL);
+    return got;
+}
+
+// Waits for a caught signal (-1 if none is caught: it would wait forever).
+int64_t tarn_rt_signal_wait(void) {
+    sigset_t caught, old;
+    signal_mask(&caught);
+    if (sigisemptyset_portable(&caught)) return -1;
+    sigprocmask(SIG_BLOCK, &caught, &old);
+    int64_t got = -1;
+    while (got < 0) {
+        for (int i = 0; i < N_SIGNALS && got < 0; i++) {
+            if (signal_pending[i] > 0) {
+                signal_pending[i] = signal_pending[i] - 1;
+                got = i;
+            }
+        }
+        if (got < 0) sigsuspend(&old);
+    }
+    sigprocmask(SIG_SETMASK, &old, NULL);
+    return got;
+}
+
+// Sends `which` to this program (for tests, and for a program to stop itself the usual way).
+void tarn_rt_signal_send(int64_t which) { raise(signal_numbers[which]); }
+
+// ---------------------------------------------------------------- TCP sockets (the net module)
+// Functions return -1 (or NULL) on failure and leave the reason in
+// `net_error`: an errno value, or NET_EAI_BASE + a getaddrinfo error.
+
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <sys/socket.h>
+
+#define NET_EAI_BASE 100000
+static int64_t net_error;
+
+int64_t tarn_rt_net_last_error(void) { return net_error; }
+
+// A fresh socket: closed on exec, and (on macOS) without SIGPIPE when the peer is gone.
+static int net_socket(int family) {
+    int fd = socket(family, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
+#ifdef SO_NOSIGPIPE
+    int one = 1;
+    setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+#endif
+    return fd;
+}
+
+static struct addrinfo *net_resolve(TarnStr *host, int64_t port, int passive) {
+    if (port < 0 || port > 65535) {
+        net_error = EINVAL;
+        return NULL;
+    }
+    char *h = cstr_or_null(host);
+    if (!h) {
+        net_error = EINVAL;
+        return NULL;
+    }
+    char service[16];
+    snprintf(service, sizeof service, "%lld", (long long)port);
+    struct addrinfo hints, *res = NULL;
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = passive ? AI_PASSIVE : 0;
+    int rc = getaddrinfo(host->len ? h : NULL, service, &hints, &res);
+    free(h);
+    if (rc != 0) {
+        net_error = rc == EAI_SYSTEM ? errno : NET_EAI_BASE + (rc < 0 ? -rc : rc);
+        return NULL;
+    }
+    return res;
+}
+
+// Listen on `host` (an address like "127.0.0.1", "0.0.0.0" or "::", a name,
+// or "" for every address) and `port` (0: any free port).
+int64_t tarn_rt_net_listen(TarnStr *host, int64_t port) {
+    struct addrinfo *res = net_resolve(host, port, 1);
+    if (!res) return -1;
+    int fd = -1;
+    for (struct addrinfo *a = res; a; a = a->ai_next) {
+        fd = net_socket(a->ai_family);
+        if (fd < 0) {
+            net_error = errno;
+            continue;
+        }
+        int one = 1;
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+        if (bind(fd, a->ai_addr, a->ai_addrlen) == 0 && listen(fd, SOMAXCONN) == 0) break;
+        net_error = errno;
+        close(fd);
+        fd = -1;
+    }
+    freeaddrinfo(res);
+    return fd;
+}
+
+// A caught signal that hasn't been received yet ends any wait at once.
+static int net_interrupted(void) {
+    if (!signal_any_pending()) return 0;
+    net_error = EINTR;
+    return 1;
+}
+
+int64_t tarn_rt_net_accept(int64_t lfd) {
+    if (net_interrupted()) return -1;
+    int fd;
+    do {
+        fd = accept((int)lfd, NULL, NULL);
+    } while (fd < 0 && errno == EINTR && !signal_any_pending());
+    if (fd < 0) {
+        net_error = errno;
+        return -1;
+    }
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
+#ifdef SO_NOSIGPIPE
+    int one = 1;
+    setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+#endif
+    return fd;
+}
+
+int64_t tarn_rt_net_connect(TarnStr *host, int64_t port) {
+    if (net_interrupted()) return -1;
+    struct addrinfo *res = net_resolve(host, port, 0);
+    if (!res) return -1;
+    int fd = -1;
+    for (struct addrinfo *a = res; a; a = a->ai_next) {
+        fd = net_socket(a->ai_family);
+        if (fd < 0) {
+            net_error = errno;
+            continue;
+        }
+        int rc;
+        do {
+            rc = connect(fd, a->ai_addr, a->ai_addrlen);
+        } while (rc < 0 && errno == EINTR && !signal_any_pending());
+        if (rc == 0) break;
+        net_error = errno;
+        close(fd);
+        fd = -1;
+    }
+    freeaddrinfo(res);
+    if (fd >= 0) {
+        int one = 1;
+        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+    }
+    return fd;
+}
+
+// Up to `max` bytes (empty at the end of the stream), or NULL on failure.
+TarnStr *tarn_rt_net_read(int64_t fd, int64_t max) {
+    if (net_interrupted()) return NULL;
+    if (max <= 0) max = 1;
+    TarnStr *b = str_alloc(max);
+    ssize_t n;
+    do {
+        n = recv((int)fd, b->data, (size_t)max, 0);
+    } while (n < 0 && errno == EINTR && !signal_any_pending());
+    if (n < 0) {
+        net_error = errno;
+        tarn_str_free(b);
+        return NULL;
+    }
+    b->len = n;
+    return b;
+}
+
+// Writes all of `data`: 0, or -1 on failure.
+int64_t tarn_rt_net_write(int64_t fd, TarnStr *data) {
+#ifdef MSG_NOSIGNAL
+    int flags = MSG_NOSIGNAL;
+#else
+    int flags = 0;
+#endif
+    int64_t off = 0;
+    while (off < data->len) {
+        ssize_t n = send((int)fd, data->data + off, (size_t)(data->len - off), flags);
+        if (n < 0) {
+            if (errno == EINTR && !signal_any_pending()) continue;
+            net_error = errno;
+            return -1;
+        }
+        off += n;
+    }
+    return 0;
+}
+
+// Reads and writes give up after `ns` nanoseconds (0: never).
+int64_t tarn_rt_net_set_timeout(int64_t fd, int64_t ns) {
+    struct timeval tv = {(time_t)(ns / 1000000000), (suseconds_t)(ns % 1000000000 / 1000)};
+    if (ns > 0 && tv.tv_sec == 0 && tv.tv_usec == 0) tv.tv_usec = 1;
+    if (setsockopt((int)fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv) != 0 || setsockopt((int)fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv) != 0) {
+        net_error = errno;
+        return -1;
+    }
+    return 0;
+}
+
+void tarn_rt_net_close(int64_t fd) {
+    if (fd >= 0) close((int)fd);
+}
+
+// "address:port" of one end of a connection (`[address]:port` for IPv6).
+static TarnStr *net_address(int64_t fd, int peer) {
+    struct sockaddr_storage ss;
+    socklen_t len = sizeof ss;
+    int rc = peer ? getpeername((int)fd, (struct sockaddr *)&ss, &len) : getsockname((int)fd, (struct sockaddr *)&ss, &len);
+    if (rc != 0) {
+        net_error = errno;
+        return NULL;
+    }
+    char ip[INET6_ADDRSTRLEN], out[INET6_ADDRSTRLEN + 16];
+    if (ss.ss_family == AF_INET6) {
+        struct sockaddr_in6 *a = (struct sockaddr_in6 *)&ss;
+        inet_ntop(AF_INET6, &a->sin6_addr, ip, sizeof ip);
+        snprintf(out, sizeof out, "[%s]:%d", ip, ntohs(a->sin6_port));
+    } else {
+        struct sockaddr_in *a = (struct sockaddr_in *)&ss;
+        inet_ntop(AF_INET, &a->sin_addr, ip, sizeof ip);
+        snprintf(out, sizeof out, "%s:%d", ip, ntohs(a->sin_port));
+    }
+    return str_from(out, (int64_t)strlen(out));
+}
+
+TarnStr *tarn_rt_net_peer_address(int64_t fd) { return net_address(fd, 1); }
+TarnStr *tarn_rt_net_local_address(int64_t fd) { return net_address(fd, 0); }
+
+// The `net.ErrorKind` of a failure (its variants, in order).
+int64_t tarn_rt_net_error_kind(int64_t code) {
+    if (code >= NET_EAI_BASE) return 5; // NotFound
+    switch (code) {
+    case ECONNREFUSED: return 0;        // Refused
+    case ECONNRESET: case EPIPE: case ENOTCONN: case ECONNABORTED: return 1; // Reset
+    case EAGAIN: case ETIMEDOUT: return 2;
+#if EWOULDBLOCK != EAGAIN
+    case EWOULDBLOCK: return 2;         // TimedOut
+#endif
+    case EINTR: return 3;               // Interrupted
+    case EADDRINUSE: return 4;          // AddressInUse
+    case EADDRNOTAVAIL: case EHOSTUNREACH: case ENETUNREACH: return 6; // Unreachable
+    case EBADF: return 7;               // Closed
+    default: return 8;                  // Other
+    }
+}
+
+TarnStr *tarn_rt_net_error_message(int64_t code) {
+    const char *m = code >= NET_EAI_BASE ? gai_strerror((int)(code - NET_EAI_BASE)) : strerror((int)code);
+    if (code == EAGAIN || code == EWOULDBLOCK) m = "timed out";
+    if (code == EINTR) m = "interrupted by a signal";
+    return str_from(m, (int64_t)strlen(m));
+}
+
 static int env_flag(const char *name) {
     const char *v = getenv(name);
     return v && *v && *v != '0';
@@ -1573,6 +2194,7 @@ static void arc_report(void) {
 int main(int argc, char **argv) {
     saved_argc = argc;
     saved_argv = argv;
+    init_ascii_chars();
     tarn_main();
     fflush(stdout);
     arc_report();

@@ -1,0 +1,9 @@
+# expect-error: `drop` can't be called: it runs by itself when the last reference to a `File` goes away
+struct File:
+    fd: Int
+    fn drop(self):
+        pass
+
+fn main():
+    val f = File(3)
+    f.drop()

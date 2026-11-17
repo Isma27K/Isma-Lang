@@ -1,0 +1,4 @@
+# expect-panic: index 3 out of bounds for 3 bytes
+fn main():
+    val b = "abc".encode()
+    print(b[3])

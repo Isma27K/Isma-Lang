@@ -629,6 +629,7 @@ impl Checker {
             track_caller: false,
             generic: false,
             closure: true,
+            is_drop: false,
         };
         self.add_closure_code(tf, span, &Type::Func(params, Box::new(ret)))
     }

@@ -1,0 +1,6 @@
+# expect-error: `Unit` is a built-in type name
+enum Unit:
+    Nothing
+
+fn main():
+    pass

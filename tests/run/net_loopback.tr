@@ -1,0 +1,42 @@
+# The `net` module over loopback: listen on a free port, connect, talk.
+import net
+import time
+
+fn exchange(server: net.Listener) -> Result[String, net.Error]:
+    val client = net.connect("127.0.0.1", server.port())?
+    val conn = server.accept()?
+    client.write("ping".encode())?
+    val got = conn.read(100)?.decode()
+    conn.write(f"{got} pong".encode())?
+    conn.close()
+    val reply = client.read_all()?.decode()
+    val after = client.read(10)?
+    return Ok(f"{reply} (then {after.len()} bytes)")
+
+fn main():
+    val server = net.listen("127.0.0.1", 0)!!
+    print(server.port() > 0)
+    print(server.address().starts_with("127.0.0.1:"))
+    print(exchange(server))
+
+    # Errors are values.
+    match net.listen("127.0.0.1", server.port()):
+        case Ok(_):
+            print("listening twice?")
+        case Err(e):
+            print(e.kind)
+    val client = net.connect("127.0.0.1", server.port())!!
+    val conn = server.accept()!!
+    print(conn.peer_address().starts_with("127.0.0.1:"))
+    conn.set_timeout(time.millis(50))
+    print(conn.read(10).error_or_null()?.kind)
+    conn.close()
+    print(conn.read(10).error_or_null())
+    print(conn.write("x".encode()).is_err())
+    server.close()
+    match server.accept():
+        case Ok(_):
+            print("accepted after close?")
+        case Err(e):
+            print(e)
+    print(client.read(10)!!.len())

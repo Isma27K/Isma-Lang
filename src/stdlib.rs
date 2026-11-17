@@ -7,13 +7,31 @@ pub struct StdModule {
 }
 
 pub const MODULES: &[StdModule] = &[
+    StdModule { name: PRELUDE, source: include_str!("../stdlib/prelude.tr") },
     StdModule { name: "time", source: include_str!("../stdlib/time.tr") },
     StdModule { name: "math", source: include_str!("../stdlib/math.tr") },
     StdModule { name: "fs", source: include_str!("../stdlib/fs.tr") },
+    StdModule { name: "url", source: include_str!("../stdlib/url.tr") },
+    StdModule { name: "env", source: include_str!("../stdlib/env.tr") },
+    StdModule { name: "signal", source: include_str!("../stdlib/signal.tr") },
+    StdModule { name: "net", source: include_str!("../stdlib/net.tr") },
 ];
 
+/// The module every program gets without importing it: `Result`, `Ok`, `Err`, `Unit`.
+pub const PRELUDE: &str = "prelude";
+
+/// A module that can be imported by name (the prelude can't: it's always there).
 pub fn find(name: &str) -> Option<&'static StdModule> {
-    MODULES.iter().find(|m| m.name == name)
+    MODULES.iter().find(|m| m.name == name && m.name != PRELUDE)
+}
+
+/// The modules an `import` can name (all but the prelude).
+pub fn importable() -> impl Iterator<Item = &'static StdModule> {
+    MODULES.iter().filter(|m| m.name != PRELUDE)
+}
+
+pub fn prelude() -> &'static StdModule {
+    MODULES.iter().find(|m| m.name == PRELUDE).unwrap()
 }
 
 /// Built-in hooks that only standard-library modules may call:
@@ -57,6 +75,92 @@ pub const INTRINSICS: &[(&str, &[&str], &str)] = &[
     ("__fs_cwd", &[], "String"),
     ("__fs_read_stdin", &[], "String"),
 ];
+
+/// Runtime functions called directly, by standard-library modules
+/// (`__url_encode(...)` calls the C function `tarn_rt_url_encode`) and by
+/// built-in methods: (name, parameter types, return type, whether the C
+/// function also takes the caller's location, for panics).
+///
+/// The C side borrows its arguments and returns new references. `Bool`s
+/// cross as `int64_t` (0 or 1); a nullable result must be a reference (a
+/// null pointer), never a nullable `Int`, `Float` or `Bool`.
+pub const RT: &[(&str, &[&str], &str, bool)] = &[
+    // Bytes (the methods of the built-in type)
+    ("bytes_new", &[], "Bytes", false),
+    ("bytes_from_list", &["List[Int]"], "Bytes", true),
+    ("bytes_get", &["Bytes", "Int"], "Int", true),
+    ("bytes_at", &["Bytes", "Int"], "Int", false),
+    ("bytes_slice", &["Bytes", "Int", "Int"], "Bytes", true),
+    ("bytes_decode", &["Bytes"], "String", true),
+    ("bytes_decode_or_null", &["Bytes"], "String?", false),
+    ("bytes_decode_lossy", &["Bytes"], "String", false),
+    ("bytes_hex", &["Bytes"], "String", false),
+    ("bytes_to_list", &["Bytes"], "List[Int]", false),
+    ("bytes_repr", &["Bytes"], "String", false),
+    ("str_encode", &["String"], "Bytes", false),
+    // env
+    ("env_get", &["String"], "String?", false),
+    ("env_set", &["String", "String"], "Bool", false),
+    ("env_remove", &["String"], "Bool", false),
+    ("env_all", &[], "List[String]", false),
+    // signal
+    ("signal_catch", &["Int"], "Unit", false),
+    ("signal_reset", &["Int"], "Unit", false),
+    ("signal_next", &[], "Int", false),
+    ("signal_wait", &[], "Int", false),
+    ("signal_send", &["Int"], "Unit", false),
+    // net
+    ("net_listen", &["String", "Int"], "Int", false),
+    ("net_accept", &["Int"], "Int", false),
+    ("net_connect", &["String", "Int"], "Int", false),
+    ("net_read", &["Int", "Int"], "Bytes?", false),
+    ("net_write", &["Int", "Bytes"], "Int", false),
+    ("net_set_timeout", &["Int", "Int"], "Int", false),
+    ("net_close", &["Int"], "Unit", false),
+    ("net_peer_address", &["Int"], "String?", false),
+    ("net_local_address", &["Int"], "String?", false),
+    ("net_last_error", &[], "Int", false),
+    ("net_error_kind", &["Int"], "Int", false),
+    ("net_error_message", &["Int"], "String", false),
+    // url
+    ("url_encode", &["String", "String"], "String", false),
+    ("url_decode", &["String", "Bool"], "String?", false),
+];
+
+/// `Builtin::Rt` of the runtime function `name`.
+pub fn rt(name: &str) -> crate::tast::Builtin {
+    crate::tast::Builtin::Rt(rt_index(name).unwrap_or_else(|| panic!("no runtime function `{name}`")) as u16)
+}
+
+/// The index in `RT` of the runtime function `name` (without the `__`).
+pub fn rt_index(name: &str) -> Option<usize> {
+    RT.iter().position(|(n, ..)| *n == name)
+}
+
+/// A standard-library module may call `name` (`__fs_read`, `__url_encode`...).
+pub fn is_intrinsic(name: &str) -> bool {
+    INTRINSICS.iter().any(|(n, _, _)| *n == name) || name.strip_prefix("__").is_some_and(|n| rt_index(n).is_some())
+}
+
+/// The type written `s` in the tables above.
+pub fn parse_type(s: &str) -> crate::types::Type {
+    use crate::types::Type;
+    if let Some(inner) = s.strip_suffix('?') {
+        return parse_type(inner).nullable();
+    }
+    if let Some(inner) = s.strip_prefix("List[").and_then(|r| r.strip_suffix(']')) {
+        return Type::List(Box::new(parse_type(inner)));
+    }
+    match s {
+        "Int" => Type::Int,
+        "Float" => Type::Float,
+        "Bool" => Type::Bool,
+        "String" => Type::Str,
+        "Bytes" => Type::Bytes,
+        "Unit" => Type::Unit,
+        _ => panic!("unknown type `{s}` in a runtime function table"),
+    }
+}
 
 /// Display path for a module in panic messages.
 pub fn display_path(name: &str) -> String {

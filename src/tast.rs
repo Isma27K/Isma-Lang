@@ -43,6 +43,9 @@ pub struct TStruct {
     /// A box's method table: for each method of its interface, in order, the
     /// closure code that calls it on the boxed value. Empty otherwise.
     pub vtable: Vec<FuncId>,
+    /// A struct's `fn drop(self)`: run when its last reference goes away,
+    /// before its fields are released.
+    pub drop: Option<FuncId>,
 }
 
 #[derive(Debug, Clone)]
@@ -80,6 +83,9 @@ pub struct TFunc {
     /// placeholder. Its copies for concrete types (`max[Int]`) are the ones
     /// that run.
     pub generic: bool,
+    /// A `fn drop(self)`: its parameter stays borrowed (it runs while the
+    /// value is being freed).
+    pub is_drop: bool,
     /// The code of a function value: a lambda's body, or a named function
     /// wrapped to be called through a value. Its first parameter is the
     /// closure itself (holding the captured values), and every parameter is
@@ -187,6 +193,10 @@ pub enum Builtin {
     StrToInt,
     StrToFloat,
     StrChars,
+    /// `s.char_count()`: the number of characters (not bytes).
+    StrCharCount,
+    /// Internal (`for c in s`): the character starting at byte index `i`, as a string.
+    StrCharAt,
     StrSubstring,
     StrContains,
     StrStartsWith,
@@ -269,6 +279,8 @@ pub enum Builtin {
     MathAtan2,
     /// File system (`fs` module intrinsics).
     Fs(FsOp),
+    /// A runtime function of `stdlib::RT` (its index there), called directly.
+    Rt(u16),
     /// Internal (nullable primitives): is it `null`? / `T` -> `T?` / `T?` -> `T` (unchecked).
     IsNull,
     Wrap,
@@ -392,6 +404,9 @@ pub enum TExprKind {
     Unwrap(Box<TExpr>),
     /// `e!!`: panics if `e` is null.
     NotNull(Box<TExpr>),
+    /// `e?` (and `e!!`) on a `Result`: the `Ok`'s value; for an `Err`,
+    /// `binder` is set to its error and `on_err` runs (a `return`, or a panic).
+    Try { value: Box<TExpr>, binder: LocalId, on_err: Box<TExpr> },
     /// `recv?.member`: if `recv` is null the result is null; otherwise `binder`
     /// is set to the (non-null) receiver and `body` is evaluated.
     SafeCall { recv: Box<TExpr>, binder: LocalId, body: Box<TExpr> },

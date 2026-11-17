@@ -24,7 +24,7 @@ use ifaces::*;
 use lambdas::*;
 
 const BUILTINS: &[&str] = &["print", "input", "args", "panic", "assert", "sqrt", "exit", "hash"];
-const RESERVED_TYPES: &[&str] = &["Int", "Float", "Bool", "String", "List", "Map", "Unit"];
+const RESERVED_TYPES: &[&str] = &["Int", "Float", "Bool", "String", "Bytes", "List", "Map", "Unit"];
 
 struct FuncSig {
     name: String,
@@ -353,7 +353,13 @@ pub struct Checker {
     pending_bounds: Vec<PendingBound>,
     /// `struct Circle(Shape):`: the interfaces types say they fit, checked once the methods are known.
     implements: Vec<(StructId, Vec<(Type, Span)>)>,
+    /// The namespace of the prelude (`Result`, `Ok`, `Err`, `Unit`), whose
+    /// types every file sees by their bare names.
+    prelude_ns: Option<usize>,
 }
+
+/// `Bytes`'s methods, for "no method" errors.
+const BYTES_METHODS: &str = "`len()`, `is_empty()`, `slice(start, end)`, `find(b)`, `rfind(b)`, `contains(b)`, `starts_with(b)`, `ends_with(b)`, `split(sep)`, `count(b)`, `replace(old, new)`, `trim()`, `decode()`, `decode_or_null()`, `decode_lossy()`, `hex()`, `to_list()`, `to_string()`";
 
 /// Type-check: `Ok((program, warnings))` or `Err(errors and warnings)`.
 pub fn check(files: &[SourceFile]) -> Result<(TProgram, Vec<Diagnostic>), Vec<Diagnostic>> {
@@ -430,6 +436,7 @@ pub fn analyze(files: &[SourceFile]) -> Analysis {
         sigs_ready: false,
         pending_bounds: Vec::new(),
         implements: Vec::new(),
+        prelude_ns: files.iter().position(|f| f.kind == FileKind::Std && f.name == crate::stdlib::PRELUDE),
     };
     for (ns, f) in files.iter().enumerate().skip(1) {
         let doc = c.leading_comment(ns);
@@ -580,7 +587,7 @@ impl Checker {
     }
 
     fn display_struct(&self, ns: usize, name: &str) -> String {
-        if ns == 0 { name.to_string() } else { format!("{}.{name}", self.ns_names[ns]) }
+        if ns == 0 || Some(ns) == self.prelude_ns { name.to_string() } else { format!("{}.{name}", self.ns_names[ns]) }
     }
 
     /// Resolve `module` as imported in the current namespace (marking it used).
@@ -622,7 +629,7 @@ impl Checker {
                 return Some(format!("did you mean `{binding}.{name}`?"));
             }
         }
-        for m in crate::stdlib::MODULES {
+        for m in crate::stdlib::importable() {
             if here.iter().any(|(_, mns)| self.ns_kinds[*mns] == FileKind::Std && self.ns_names[*mns] == m.name) {
                 continue;
             }
@@ -662,10 +669,25 @@ impl Checker {
         if let Some(&sid) = self.struct_index.get(&(self.ns, name.to_string())) {
             return Some(sid);
         }
-        let n = self.names.get_mut(&(self.ns, name.to_string()))?;
-        let Imported::Struct(sid) = n.target else { return None };
-        n.used = true;
-        Some(sid)
+        if let Some(n) = self.names.get_mut(&(self.ns, name.to_string()))
+            && let Imported::Struct(sid) = n.target
+        {
+            n.used = true;
+            return Some(sid);
+        }
+        // `Result` and `Unit`, in every file.
+        self.prelude_ns.and_then(|p| self.struct_index.get(&(p, name.to_string())).copied())
+    }
+
+    /// The prelude's type `name` (`Result`, `Unit`).
+    fn prelude_type(&self, name: &str) -> Option<StructId> {
+        self.prelude_ns.and_then(|p| self.struct_index.get(&(p, name.to_string())).copied())
+    }
+
+    /// Is `t` a `Result[T, E]` (of the prelude)? Its instance id.
+    fn result_sid(&self, t: &Type) -> Option<StructId> {
+        let Type::Enum(sid, _) = t else { return None };
+        (Some(self.struct_origin[*sid]) == self.prelude_type("Result")).then_some(*sid)
     }
 
     /// A top-level function known by its bare name in the current file.
@@ -856,7 +878,7 @@ impl Checker {
                 } else {
                     "struct"
                 };
-                if RESERVED_TYPES.contains(&name.as_str()) {
+                if RESERVED_TYPES.contains(&name.as_str()) && self.ns_kinds[ns] != FileKind::Std {
                     self.err(Diagnostic::error(format!("`{name}` is a built-in type name"), name_id.span));
                     continue;
                 }
@@ -883,7 +905,7 @@ impl Checker {
                 if !pids.is_empty() {
                     self.struct_instances.insert((id, args), id);
                 }
-                self.structs.push(TStruct { name: shown, fields: Vec::new(), variants: enum_boxed.map(|_| Vec::new()), generic: !pids.is_empty(), closure: None, vtable: Vec::new() });
+                self.structs.push(TStruct { name: shown, fields: Vec::new(), variants: enum_boxed.map(|_| Vec::new()), generic: !pids.is_empty(), closure: None, vtable: Vec::new(), drop: None });
                 self.def_types.push(match enum_boxed {
                     _ if iface => Type::Iface(id),
                     Some(boxed) => Type::Enum(id, boxed),
@@ -1146,6 +1168,24 @@ impl Checker {
             self.instantiate(&templates, &mut out);
         }
         self.ns = 0;
+        // A cycle is freed by the cycle collector all at once: there's no
+        // right order to run `drop`s in, so types with one can't be on a cycle.
+        if self.error_count() == 0 {
+            let cyclic = crate::cycles::cyclic_structs(&self.structs);
+            for (sid, &is_cyclic) in cyclic.iter().enumerate() {
+                if let Some(fid) = self.structs[sid].drop
+                    && is_cyclic
+                {
+                    let tname = self.structs[sid].name.clone();
+                    self.err(
+                        Diagnostic::error(format!("`{tname}` has a `fn drop`, so it can't be part of a reference cycle"), self.funcs[fid].span)
+                            .with_label(self.struct_spans[sid], format!("a `{tname}` can end up referring back to itself"))
+                            .with_note("values on a cycle are freed together by the cycle collector, which has no right order to run `drop`s in")
+                            .with_help("keep the resource in a struct of its own, one that can't lead back to itself, and hold that here"),
+                    );
+                }
+            }
+        }
 
         // Lint: unused imports (in the user's own files).
         let mut unused: Vec<(String, Span, bool)> = self
@@ -1182,6 +1222,7 @@ impl Checker {
                     track_caller: false,
                     generic: true,
                     closure: false,
+                    is_drop: false,
                 })
             })
             .collect()
@@ -1458,6 +1499,28 @@ impl Checker {
             self.methods.insert((sid, m.name.name.clone()), fid);
             self.ide.structs[sid].methods.push(fid);
             bodies.push((m, Some(sid), ns, fid));
+            if m.name.name == "drop" {
+                self.declare_drop(sid, m, fid);
+            }
+        }
+    }
+
+    /// `fn drop(self)`: what runs when the last reference to a value goes away.
+    fn declare_drop(&mut self, sid: StructId, m: &FnDecl, fid: FuncId) {
+        let tname = self.structs[sid].name.clone();
+        let short = short_name(&tname).to_string();
+        let problem = if self.structs[sid].variants.is_some() {
+            Some(("only structs can have `fn drop`".to_string(), format!("move what `{short}` owns into a struct with `fn drop`, and put that in the enum")))
+        } else if !self.struct_params[sid].is_empty() {
+            Some(("a generic struct can't have `fn drop` yet".to_string(), "move what needs cleaning up into a struct without type parameters".to_string()))
+        } else if !m.params.is_empty() || self.funcs[fid].ret != Type::Unit || !m.type_params.is_empty() {
+            Some(("`fn drop` takes only `self` and returns nothing".to_string(), "write it as `fn drop(self):`".to_string()))
+        } else {
+            None
+        };
+        match problem {
+            Some((msg, help)) => self.err(Diagnostic::error(msg, m.sig_span).with_help(help)),
+            None => self.structs[sid].drop = Some(fid),
         }
     }
 
@@ -1708,7 +1771,7 @@ impl Checker {
             params.push((p.name.name.clone(), ty));
         }
         let ret = match &f.ret {
-            Some(t) => self.resolve_type(t),
+            Some(t) => self.resolve_ret_type(t),
             None => Type::Unit,
         };
         self.type_env.clear();
@@ -1776,6 +1839,16 @@ impl Checker {
         self.implements.push((sid, types));
     }
 
+    /// A return type: `-> Unit` is the same as no return type (elsewhere,
+    /// as in `Result[Unit, String]`, `Unit` is the prelude's one-value type).
+    fn resolve_ret_type(&mut self, t: &TypeExpr) -> Type {
+        if t.name.name == "Unit" && t.module.is_none() && t.args.is_empty() && !t.nullable && t.func.is_none() && self.visible_struct("Unit") == self.prelude_type("Unit") {
+            self.hover(t.name.span, "Unit".into(), Some("returns nothing".into()));
+            return Type::Unit;
+        }
+        self.resolve_type(t)
+    }
+
     fn resolve_type(&mut self, t: &TypeExpr) -> Type {
         let ty = self.resolve_type_inner(t);
         if t.nullable { ty.nullable() } else { ty }
@@ -1828,6 +1901,12 @@ impl Checker {
                 Type::List(Box::new(inner))
             }
             "Map" => self.resolve_map_type(t),
+            "Bytes" => {
+                if !expect_args(self, 0) {
+                    return Type::Error;
+                }
+                Type::Bytes
+            }
             _ => {
                 if let Some(sid) = self.visible_struct(name) {
                     self.ide.definitions.push((t.name.span, self.struct_spans[sid]));
@@ -1953,9 +2032,11 @@ impl Checker {
             locals: std::mem::take(&mut self.locals),
             body,
             exported: sig.symbol == "tarn_main",
-            track_caller: self.ns_kinds[self.ns] == FileKind::Std,
+            // (`drop` runs when a value is freed, not where it's called from.)
+            track_caller: self.ns_kinds[self.ns] == FileKind::Std && !owner.is_some_and(|s| self.structs[s].drop == Some(fid)),
             generic,
             closure: false,
+            is_drop: owner.is_some_and(|s| self.structs[s].drop == Some(fid)),
         }
     }
 
@@ -1977,7 +2058,9 @@ impl Checker {
             if m.name.starts_with('_') || m.name == "self" {
                 continue;
             }
-            if !m.used {
+            // A value with a `fn drop` held to the end of the block is the point (a guard).
+            let holds = matches!(self.locals.get(id).map(|l| l.ty.non_null()), Some(Type::Struct(sid)) if self.structs[*sid].drop.is_some());
+            if !m.used && !(holds && m.kind != LocalKind::Param) {
                 let (what, help) = match m.kind {
                     LocalKind::Param => ("parameter", format!("if this is intentional, prefix it with an underscore: `_{}`", m.name)),
                     LocalKind::LoopVar => ("loop variable", "if you only need the repetition, write `for _ in ...`".to_string()),
@@ -2340,7 +2423,14 @@ impl Checker {
             StmtKind::Expr(e) => {
                 let t = self.expr(e, None);
                 // `x!!` and `x ?: return` are fine on their own: they check, and smart-cast `x`.
-                let checks = matches!(&t.kind, TExprKind::NotNull(_)) || matches!(&t.kind, TExprKind::Elvis(_, r) if r.diverges());
+                let checks = matches!(&t.kind, TExprKind::NotNull(_) | TExprKind::Try { .. }) || matches!(&t.kind, TExprKind::Elvis(_, r) if r.diverges());
+                if self.result_sid(&t.ty).is_some() && matches!(e.kind, ExprKind::Call { .. }) {
+                    self.diags.push(
+                        Diagnostic::warning("this `Result` is ignored", e.span)
+                            .with_primary("if it's an `Err`, the error is lost")
+                            .with_help("pass the error on with `?`, handle it with `match`, or panic on it with `!!`; if you really don't care, write `val _ = ...`"),
+                    );
+                }
                 if !matches!(e.kind, ExprKind::Call { .. } | ExprKind::Error) && !t.ty.is_error() && !checks {
                     let mut d = Diagnostic::error("expression result is unused", e.span)
                         .with_primary("this value is computed and thrown away");
@@ -2441,6 +2531,10 @@ impl Checker {
                     }
                     let elem = match &tl.ty {
                         Type::List(t) => (**t).clone(),
+                        // `for c in s`: each character, as a one-character string.
+                        Type::Str => Type::Str,
+                        // `for byte in b`: each byte, an `Int` from 0 to 255.
+                        Type::Bytes => Type::Int,
                         Type::Error => Type::Error,
                         Type::Nullable(inner) if matches!(**inner, Type::List(_) | Type::Map(..)) => {
                             self.null_use_error(&tl, NullUse::Value);
@@ -2452,7 +2546,6 @@ impl Checker {
                                 .with_primary("not iterable");
                             d = match other {
                                 Type::Int => d.with_help("to loop over numbers use a range, e.g. `for i in 0..n:`"),
-                                Type::Str => d.with_note("iterating over strings is not supported yet"),
                                 _ => d.with_note("only lists, maps and ranges (`a..b`) can be iterated"),
                             };
                             self.err(d);
@@ -3021,6 +3114,241 @@ impl Checker {
         }
     }
 
+    /// `Ok(value)` / `Err(error)`: `Result.Ok(...)` without the `Result.`,
+    /// its type arguments taken from the values and the type expected here.
+    /// `Ok()` is `Ok(Unit.Unit)`, for a `Result[Unit, E]`.
+    #[allow(clippy::too_many_arguments)]
+    fn result_variant(&mut self, rid: StructId, name: &str, name_span: Span, args: &[Arg], explicit: Option<&[TypeExpr]>, expected: Option<&Type>, span: Span) -> TExpr {
+        let ident = Ident { name: name.to_string(), span: name_span };
+        if name == "Ok" && args.is_empty() {
+            let unit = self.prelude_type("Unit").map(|u| self.def_types[u].clone());
+            if let Some(want) = expected.and_then(|t| self.result_sid(t.non_null())).map(|r| self.struct_args[r][0].clone())
+                && want != Type::Error
+                && Some(&want) != unit.as_ref()
+            {
+                let (w, r) = (self.tn(&want), self.tn(expected.unwrap().non_null()));
+                self.err(
+                    Diagnostic::error(format!("`Ok()` needs a value here: a `{r}` holds {}", a_type(&w)), span)
+                        .with_primary("missing the value")
+                        .with_help(format!("pass it: `Ok(...)` with {}. (`Ok()` alone is for `Result[Unit, ...]`, which has no value to give)", a_type(&w))),
+                );
+                return Self::error_expr(span);
+            }
+            let unit_expr = Expr { kind: ExprKind::Field(Box::new(Expr { kind: ExprKind::Name("Unit".into()), span: name_span }), Ident { name: "Unit".into(), span: name_span }), span: name_span };
+            let arg = [Arg { name: None, value: unit_expr }];
+            return self.result_variant_in(rid, &ident, &arg, explicit, expected, span);
+        }
+        self.result_variant_in(rid, &ident, args, explicit, expected, span)
+    }
+
+    fn result_variant_in(&mut self, rid: StructId, ident: &Ident, args: &[Arg], explicit: Option<&[TypeExpr]>, expected: Option<&Type>, span: Span) -> TExpr {
+        // The whole `Result` type is known from where it's used (a return, an
+        // annotation): the value is checked against it, so an error that fits
+        // an interface is boxed as one (`Err(RangeError(n))` for a `Result[Int, Error]`).
+        if explicit.is_none()
+            && let Some(r) = expected.and_then(|t| self.result_sid(t.non_null()))
+            && !self.struct_args[r].iter().any(Type::is_error)
+        {
+            let k = usize::from(ident.name == "Err");
+            let field = self.structs[r].variants()[k].fields[0].clone();
+            self.variant_use(rid, k, ident.span);
+            return match self.match_args(&format!("`{}`", ident.name), &[(field.name, field.ty)], args, span) {
+                Some(a) => Self::mk(TExprKind::EnumNew(r, k, a), self.def_types[r].clone(), span),
+                None => Self::error_expr(span),
+            };
+        }
+        self.variant_value(rid, ident, Some(args), explicit, expected, span)
+    }
+
+    /// `Bytes()` (empty) or `Bytes([72, 105])` (from numbers 0 to 255).
+    fn bytes_constructor(&mut self, args: &[Arg], name_span: Span, span: Span) -> TExpr {
+        self.hover(name_span, "Bytes(values: List[Int] = [])".into(), BUILTIN_TYPES.iter().find(|(n, _)| *n == "Bytes").map(|(_, d)| d.to_string()));
+        if self.reject_named(args, "`Bytes(...)`") {
+            return Self::error_expr(span);
+        }
+        match args {
+            [] => Self::mk(TExprKind::Builtin(crate::stdlib::rt("bytes_new"), Vec::new()), Type::Bytes, span),
+            [a] => {
+                let want = Type::List(Box::new(Type::Int));
+                let t = self.expr(&a.value, Some(&want));
+                let t = self.coerce(t, &want, None);
+                Self::mk(TExprKind::Builtin(crate::stdlib::rt("bytes_from_list"), vec![t]), Type::Bytes, span)
+            }
+            _ => {
+                self.err(Diagnostic::error(format!("`Bytes(...)` takes one list of numbers, but {} values were given", args.len()), span).with_help("write `Bytes([72, 105])`"));
+                Self::error_expr(span)
+            }
+        }
+    }
+
+    fn bytes_method_known(&self, m: &str) -> bool {
+        matches!(
+            m,
+            "len" | "slice" | "find" | "rfind" | "contains" | "starts_with" | "ends_with" | "split" | "count" | "replace" | "trim" | "decode" | "decode_or_null" | "decode_lossy" | "hex" | "to_list" | "to_string"
+        )
+    }
+
+    /// A method of `Bytes`. Most share the code of `String`'s (both are bytes
+    /// in memory); those work on bytes, not characters.
+    fn bytes_method(&mut self, recv: TExpr, method: &Ident, args: &[Arg], span: Span) -> TExpr {
+        let rt = crate::stdlib::rt;
+        let b = Type::Bytes;
+        let (builtin, params, ret) = match method.name.as_str() {
+            "len" => (Builtin::StrLen, vec![], Type::Int),
+            "slice" => (rt("bytes_slice"), vec![Type::Int, Type::Int], b),
+            "find" => (Builtin::StrFind, vec![b], Type::Int.nullable()),
+            "rfind" => (Builtin::StrRfind, vec![b], Type::Int.nullable()),
+            "contains" => (Builtin::StrContains, vec![b], Type::Bool),
+            "starts_with" => (Builtin::StrStartsWith, vec![b], Type::Bool),
+            "ends_with" => (Builtin::StrEndsWith, vec![b], Type::Bool),
+            "split" => (Builtin::StrSplit, vec![b], Type::List(Box::new(Type::Bytes))),
+            "count" => (Builtin::StrCount, vec![b], Type::Int),
+            "replace" => (Builtin::StrReplace, vec![b.clone(), b], Type::Bytes),
+            "trim" => (Builtin::StrTrim, vec![], b),
+            "decode" => (rt("bytes_decode"), vec![], Type::Str),
+            "decode_or_null" => (rt("bytes_decode_or_null"), vec![], Type::Str.nullable()),
+            "decode_lossy" => (rt("bytes_decode_lossy"), vec![], Type::Str),
+            "hex" => (rt("bytes_hex"), vec![], Type::Str),
+            "to_list" => (rt("bytes_to_list"), vec![], Type::List(Box::new(Type::Int))),
+            "to_string" => (rt("bytes_repr"), vec![], Type::Str),
+            _ => unreachable!("checked by bytes_method_known"),
+        };
+        self.builtin_method(recv, builtin, &params, ret, method, args, span)
+    }
+
+    /// The name of the function being checked, for messages (`this lambda` inside one).
+    fn current_fn_name(&self) -> String {
+        match self.cur_fn {
+            _ if !self.lambda_stack.is_empty() => "this lambda".into(),
+            Some(fid) => format!("`{}`", short_name(&self.funcs[fid].name)),
+            None => "this function".into(),
+        }
+    }
+
+    /// `t?`: for a `Result`, its value, or return its error from the current
+    /// function (converted to the function's error type, when that's an
+    /// interface the error fits); for a `T?`, the `T`, or return `null`.
+    /// `inner` is `t`'s span, `span` the whole `t?`.
+    fn try_value(&mut self, t: TExpr, inner: Span, span: Span) -> TExpr {
+        let q = Span { start: inner.end, end: span.end };
+        if t.ty.is_error() {
+            return t;
+        }
+        if self.in_lambda_expr > 0 {
+            self.err(
+                Diagnostic::error("`?` can't be used in a one-line lambda", q)
+                    .with_note("`?` returns from the function, and a one-line lambda's value is just its expression")
+                    .with_help("give it a block body: `fn(x: Int) -> Result[Int, String]:` with the code under it"),
+            );
+            return Self::error_expr(span);
+        }
+        let ret = self.ret_ty.clone();
+        let fname = self.current_fn_name();
+        if let Some(rid) = self.result_sid(&t.ty) {
+            let (ok_ty, err_ty) = (self.struct_args[rid][0].clone(), self.struct_args[rid][1].clone());
+            let Some(ret_rid) = self.result_sid(&ret) else {
+                if ret.is_error() {
+                    return Self::error_expr(span);
+                }
+                let (e, rt) = (self.tn(&err_ty), self.tn(&ret));
+                let want = if ret == Type::Unit { format!("Result[Unit, {e}]") } else { format!("Result[{rt}, {e}]") };
+                let mut d = Diagnostic::error(format!("`?` passes an error on to the caller, but {fname} doesn't return a `Result`"), q)
+                    .with_primary("would return the `Err` from here")
+                    .with_label(inner, format!("this is a `{}`", self.tn(&t.ty)));
+                d = if ret == Type::Unit {
+                    d.with_help(format!("make it return one: `-> {want}`, with `return Ok()` at the end; or handle the error here with `match`, or panic on it with `!!`"))
+                } else {
+                    d.with_help(format!("make it return `{want}`; or handle the error here with `match`, or panic on it with `!!`"))
+                };
+                self.err(d);
+                return Self::error_expr(span);
+            };
+            let want_err = self.struct_args[ret_rid][1].clone();
+            if !want_err.is_error() && !err_ty.is_error() && !self.can_coerce(&err_ty, &want_err) {
+                let (have, want) = (self.tn(&err_ty), self.tn(&want_err));
+                let snip = self.snippet(inner).unwrap_or_else(|| "r".into());
+                self.err(
+                    Diagnostic::error(format!("`?` can't pass this error on: it's {}, but {fname} fails with {}", a_type(&have), a_type(&want)), q)
+                        .with_primary(format!("the `Err` would hold {}", a_type(&have)))
+                        .with_label(inner, format!("this is a `{}`", self.tn(&t.ty)))
+                        .with_help(format!("convert the error first: `{snip}.map_err(fn(e) -> ...)?`")),
+                );
+                return Self::error_expr(span);
+            }
+            let binder = self.hidden_local(err_ty.clone());
+            let err = Self::mk(TExprKind::Local(binder), err_ty, span);
+            let err = self.coerce(err, &want_err, None);
+            let returned = Self::mk(TExprKind::EnumNew(ret_rid, 1, vec![err]), ret, span);
+            let on_err = Self::mk(TExprKind::Jump(Box::new(TStmt::Return(Some(returned)))), Type::Unit, span);
+            return Self::mk(TExprKind::Try { value: Box::new(t), binder, on_err: Box::new(on_err) }, ok_ty, span);
+        }
+        match t.ty.clone() {
+            Type::Nullable(inner_ty) => {
+                if !ret.is_nullable() {
+                    if ret.is_error() {
+                        return Self::error_expr(span);
+                    }
+                    let (it, rt) = (self.tn(&inner_ty), self.tn(&ret));
+                    let snip = self.snippet(inner).unwrap_or_else(|| "x".into());
+                    let mut d = Diagnostic::error(format!("`?` on a nullable value returns `null`, but {fname} can't return `null`"), q)
+                        .with_primary("would return `null` from here")
+                        .with_label(inner, format!("this is `{it}?`"));
+                    d = if ret == Type::Unit {
+                        d.with_help(format!("leave early with `{snip} ?: return`, or give a default with `{snip} ?: ...`"))
+                    } else {
+                        d.with_help(format!("give a default with `{snip} ?: ...`, or make {fname} return `{rt}?`"))
+                    };
+                    self.err(d);
+                    return Self::error_expr(span);
+                }
+                self.add_facts(Self::nonnull_when_nonnull(&t));
+                let null = Self::mk(TExprKind::Null, ret, span);
+                let jump = Self::mk(TExprKind::Jump(Box::new(TStmt::Return(Some(null)))), Type::Unit, span);
+                Self::mk(TExprKind::Elvis(Box::new(t), Box::new(jump)), *inner_ty, span)
+            }
+            other => {
+                let found = self.tn(&other);
+                let mut d = Diagnostic::error(format!("`?` needs a `Result` or a nullable value, but this is {}", a_type(&found)), q)
+                    .with_primary("nothing to pass on")
+                    .with_label(inner, format!("this is `{found}`"));
+                if other == Type::Unit {
+                    d = d.with_note("it doesn't produce a value");
+                } else {
+                    d = d.with_help("remove the `?`");
+                }
+                self.err(d);
+                Self::error_expr(span)
+            }
+        }
+    }
+
+    /// `r!!` on a `Result`: its value, or a panic showing the error.
+    fn unwrap_result(&mut self, t: TExpr, span: Span) -> TExpr {
+        let rid = self.result_sid(&t.ty).unwrap();
+        let (ok_ty, err_ty) = (self.struct_args[rid][0].clone(), self.struct_args[rid][1].clone());
+        let binder = self.hidden_local(err_ty.clone());
+        let lead = Self::mk(TExprKind::Str("unwrapped an `Err` with `!!`".into()), Type::Str, span);
+        // (In generic code as written, the error's type is unknown: the copies for real types show it.)
+        let msg = if !matches!(err_ty.non_null(), Type::Param(_)) && self.formattable_quietly(&err_ty) {
+            let colon = Self::mk(TExprKind::Str(": ".into()), Type::Str, span);
+            let err = Self::mk(TExprKind::Local(binder), err_ty, span);
+            let shown = self.stringify(err, span);
+            Self::mk(TExprKind::FString(vec![lead, colon, shown]), Type::Str, span)
+        } else {
+            lead
+        };
+        let on_err = Self::mk(TExprKind::Builtin(Builtin::Panic, vec![msg]), Type::Unit, span);
+        Self::mk(TExprKind::Try { value: Box::new(t), binder, on_err: Box::new(on_err) }, ok_ty, span)
+    }
+
+    /// Can values of type `t` be shown in an f-string, without reporting anything if not?
+    fn formattable_quietly(&mut self, t: &Type) -> bool {
+        let before = self.diags.len();
+        let ok = self.formattable(t);
+        self.diags.truncate(before);
+        ok
+    }
+
     fn loop_jump(&mut self, is_break: bool, span: Span) -> TStmt {
         if self.loop_depth == 0 {
             let kw = if is_break { "break" } else { "continue" };
@@ -3249,7 +3577,7 @@ impl Checker {
                 if !place_ty.is_error() && !v.ty.is_error() {
                     let ok = place_ty == v.ty
                         && match op {
-                            BinOp::Add => matches!(place_ty, Type::Int | Type::Float | Type::Str),
+                            BinOp::Add => matches!(place_ty, Type::Int | Type::Float | Type::Str | Type::Bytes),
                             _ => place_ty.is_numeric(),
                         };
                     if !ok {
@@ -3716,6 +4044,11 @@ impl Checker {
             ExprKind::SafeField(obj, field) => {
                 let t = self.expr(obj, None);
                 let op = Span { start: obj.span.end, end: field.span.start };
+                // `r?.field` on a `Result`: `(r?).field`.
+                if self.result_sid(&t.ty).is_some() {
+                    let v = self.try_value(t, obj.span, Span { start: obj.span.start, end: op.start + 1 });
+                    return self.field_access(v, field, span);
+                }
                 self.safe_access(t, op, span, |c, it| c.field_access(it, field, span))
             }
             ExprKind::Null => {
@@ -3727,6 +4060,9 @@ impl Checker {
             }
             ExprKind::NotNull(inner) => {
                 let t = self.expr(inner, expected.map(|t| t.clone().nullable()).as_ref());
+                if self.result_sid(&t.ty).is_some() {
+                    return self.unwrap_result(t, span);
+                }
                 match t.ty.clone() {
                     Type::Nullable(ty) => {
                         // Past this point it isn't null (or the program stopped).
@@ -3751,6 +4087,10 @@ impl Checker {
                 }
             }
             ExprKind::Elvis(l, r) => self.elvis(l, r, span, expected),
+            ExprKind::Try(inner) => {
+                let t = self.expr(inner, None);
+                self.try_value(t, inner.span, span)
+            }
             ExprKind::Lambda(lam) => self.lambda(lam, span, expected, &[]),
             ExprKind::Jump(j) => {
                 if self.in_lambda_expr > 0 {
@@ -3782,6 +4122,12 @@ impl Checker {
                 }
                 if matches!(tl.ty, Type::Map(..)) {
                     return self.map_index(tl, index, span);
+                }
+                // `b[i]`: the byte at `i`, an `Int` from 0 to 255.
+                if tl.ty == Type::Bytes {
+                    let ti = self.expr(index, Some(&Type::Int));
+                    let ti = self.coerce(ti, &Type::Int, None);
+                    return Self::mk(TExprKind::Builtin(crate::stdlib::rt("bytes_get"), vec![tl, ti]), Type::Int, span);
                 }
                 if matches!(&tl.ty, Type::Nullable(m) if matches!(**m, Type::Map(..))) {
                     self.null_use_error(&tl, NullUse::Index);
@@ -3984,7 +4330,7 @@ impl Checker {
     /// Can a value of type `t` be printed and put in f-strings?
     fn formattable(&mut self, t: &Type) -> bool {
         match t {
-            Type::Int | Type::Float | Type::Bool | Type::Str | Type::Enum(_, false) | Type::Null | Type::Param(_) | Type::Error => true,
+            Type::Int | Type::Float | Type::Bool | Type::Str | Type::Bytes | Type::Enum(_, false) | Type::Null | Type::Param(_) | Type::Error => true,
             Type::Nullable(inner) => self.formattable(inner),
             Type::List(e) => self.formattable(e),
             Type::Map(k, v) => self.formattable(k) && self.formattable(v),
@@ -4025,6 +4371,8 @@ impl Checker {
         match &t.ty {
             Type::Str => t,
             Type::Int | Type::Float | Type::Bool | Type::Enum(_, false) => Self::mk(TExprKind::Builtin(Builtin::ToStr, vec![t]), Type::Str, span),
+            // `b"GET /\r\n"`
+            Type::Bytes => Self::mk(TExprKind::Builtin(crate::stdlib::rt("bytes_repr"), vec![t]), Type::Str, span),
             // `[1, 2, 3]`, `{"a": 1}`
             Type::List(e) if self.formattable(e) => {
                 let e = (**e).clone();
@@ -4138,9 +4486,9 @@ impl Checker {
         let same = tl.ty == tr.ty;
         let ok = same
             && match op {
-                BinOp::Add => matches!(tl.ty, Type::Int | Type::Float | Type::Str),
+                BinOp::Add => matches!(tl.ty, Type::Int | Type::Float | Type::Str | Type::Bytes),
                 BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => tl.ty.is_numeric(),
-                BinOp::Eq | BinOp::Ne => tl.ty.is_primitive(),
+                BinOp::Eq | BinOp::Ne => tl.ty.is_primitive() || tl.ty == Type::Bytes,
                 BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Cmp => matches!(tl.ty, Type::Int | Type::Float | Type::Str),
                 BinOp::And | BinOp::Or => unreachable!(),
             };
@@ -4253,11 +4601,19 @@ impl Checker {
                 if let Some(sid) = self.visible_struct(name) {
                     return self.construct(sid, name, callee.span, args, explicit, expected, span);
                 }
-                if explicit.is_some() && (BUILTINS.contains(&name.as_str()) || self.ns_kinds[self.ns] == FileKind::Std && crate::stdlib::INTRINSICS.iter().any(|(n, _, _)| n == name)) {
+                if name == "Bytes" {
+                    return self.bytes_constructor(args, callee.span, span);
+                }
+                if matches!(name.as_str(), "Ok" | "Err")
+                    && let Some(rid) = self.prelude_type("Result")
+                {
+                    return self.result_variant(rid, name, callee.span, args, explicit, expected, span);
+                }
+                if explicit.is_some() && (BUILTINS.contains(&name.as_str()) || self.ns_kinds[self.ns] == FileKind::Std && crate::stdlib::is_intrinsic(name)) {
                     let _ = self.infer_args(&format!("`{name}`"), &[], &[], &Type::Unit, args, explicit, None, span);
                     return Self::error_expr(span);
                 }
-                if self.ns_kinds[self.ns] == FileKind::Std && crate::stdlib::INTRINSICS.iter().any(|(n, _, _)| n == name) {
+                if self.ns_kinds[self.ns] == FileKind::Std && crate::stdlib::is_intrinsic(name) {
                     return self.intrinsic_call(name, args, span);
                 }
                 if BUILTINS.contains(&name.as_str()) {
@@ -4327,6 +4683,11 @@ impl Checker {
             ExprKind::SafeField(obj, method) => {
                 let recv = self.expr(obj, None);
                 let op = Span { start: obj.span.end, end: method.span.start };
+                // `r?.method()` on a `Result`: `(r?).method()`.
+                if self.result_sid(&recv.ty).is_some() {
+                    let v = self.try_value(recv, obj.span, Span { start: obj.span.start, end: op.start + 1 });
+                    return self.method_call(v, method, args, explicit, expected, span);
+                }
                 self.safe_access(recv, op, span, |c, it| c.method_call(it, method, args, explicit, None, span))
             }
             _ => {
@@ -4473,6 +4834,19 @@ impl Checker {
 
     /// Hooks into the runtime that only standard-library modules may call.
     fn intrinsic_call(&mut self, name: &str, args: &[Arg], span: Span) -> TExpr {
+        if let Some(i) = name.strip_prefix("__").and_then(crate::stdlib::rt_index) {
+            let (_, params, ret, _) = crate::stdlib::RT[i];
+            if !self.arity(args, params.len(), &format!("`{name}`"), span) {
+                return Self::error_expr(span);
+            }
+            let mut targs = Vec::new();
+            for (a, p) in args.iter().zip(params.iter()) {
+                let pt = crate::stdlib::parse_type(p);
+                let t = self.expr(&a.value, Some(&pt));
+                targs.push(self.coerce(t, &pt, None));
+            }
+            return Self::mk(TExprKind::Builtin(Builtin::Rt(i as u16), targs), crate::stdlib::parse_type(ret), span);
+        }
         let (_, params, ret) = crate::stdlib::INTRINSICS.iter().find(|(n, _, _)| *n == name).unwrap();
         let ty_of = |t: &str| match t {
             "Int" => Type::Int,
@@ -4583,7 +4957,7 @@ impl Checker {
                     || t.ty.is_nullable() && t.ty.non_null().is_primitive()
                     || matches!(t.ty, Type::Enum(_, false))
                     || matches!(t.ty.non_null(), Type::Param(_))
-                    || matches!(t.ty.non_null(), Type::List(_) | Type::Map(..) | Type::Iface(_)) && self.formattable(&t.ty)
+                    || matches!(t.ty.non_null(), Type::List(_) | Type::Map(..) | Type::Iface(_) | Type::Bytes) && self.formattable(&t.ty)
                     || self.user_to_string(t.ty.non_null()).is_some() =>
                 {
                     t = self.stringify(t, a.value.span)
@@ -4705,6 +5079,9 @@ impl Checker {
             (Type::Str, "len") => simple(self, recv, Builtin::StrLen, Type::Int, args),
             (Type::Str, "to_int") => simple(self, recv, Builtin::StrToInt, Type::Int, args),
             (Type::Str, "chars") => simple(self, recv, Builtin::StrChars, Type::List(Box::new(Type::Str)), args),
+            (Type::Str, "char_count") => simple(self, recv, Builtin::StrCharCount, Type::Int, args),
+            (Type::Str, "encode") => simple(self, recv, crate::stdlib::rt("str_encode"), Type::Bytes, args),
+            (Type::Bytes, _) if self.bytes_method_known(m) => self.bytes_method(recv, method, args, span),
             (Type::Str, "substring") => self.builtin_method(recv, Builtin::StrSubstring, &[Type::Int, Type::Int], Type::Str, method, args, span),
             (Type::Str, "contains") => self.builtin_method(recv, Builtin::StrContains, &[Type::Str], Type::Bool, method, args, span),
             (Type::Str, "starts_with") => self.builtin_method(recv, Builtin::StrStartsWith, &[Type::Str], Type::Bool, method, args, span),
@@ -4738,8 +5115,8 @@ impl Checker {
                     self.builtin_method(recv, b, &[Type::Int, Type::Str], Type::Str, method, args, span)
                 }
             }
-            (Type::Str | Type::List(_), "is_empty") => {
-                let b = if rty == Type::Str { Builtin::StrLen } else { Builtin::ListLen };
+            (Type::Str | Type::Bytes | Type::List(_), "is_empty") => {
+                let b = if matches!(rty, Type::List(_)) { Builtin::ListLen } else { Builtin::StrLen };
                 let len = simple(self, recv, b, Type::Int, args);
                 self.is_zero(len, span)
             }
@@ -4821,6 +5198,17 @@ impl Checker {
                         }
                         Self::error_expr(span)
                     }
+                    Some(fid) if self.structs[sid].drop == Some(fid) => {
+                        let sname = self.structs[sid].name.clone();
+                        self.err(
+                            Diagnostic::error(format!("`drop` can't be called: it runs by itself when the last reference to a `{sname}` goes away"), method.span)
+                                .with_help("to release what it holds earlier, give it a method like `fn close(self)` that `drop` calls too"),
+                        );
+                        for a in args {
+                            let _ = self.expr(&a.value, None);
+                        }
+                        Self::error_expr(span)
+                    }
                     Some(fid) => {
                         let code = self.ide.functions[fid].signature.clone();
                         let comment = self.ide.functions[fid].doc.clone();
@@ -4863,7 +5251,8 @@ impl Checker {
                     Type::Int => "`to_string()`, `to_float()`",
                     Type::Float => "`to_string()`, `to_int()`",
                     Type::Bool => "`to_string()`",
-                    Type::Str => "`len()`, `is_empty()`, `chars()`, `lines()`, `split(sep)`, `substring(start, end)`, `contains(s)`, `find(s)`, `rfind(s)`, `count(s)`, `starts_with(s)`, `ends_with(s)`, `replace(old, new)`, `trim()`, `trim_start()`, `trim_end()`, `upper()`, `lower()`, `repeat(n)`, `pad_start(width)`, `pad_end(width)`, `to_int()`, `to_float()`, `to_int_or_null()`, `to_float_or_null()`, `to_string()`",
+                    Type::Str => "`len()`, `is_empty()`, `chars()`, `char_count()`, `lines()`, `split(sep)`, `substring(start, end)`, `contains(s)`, `find(s)`, `rfind(s)`, `count(s)`, `starts_with(s)`, `ends_with(s)`, `replace(old, new)`, `trim()`, `trim_start()`, `trim_end()`, `upper()`, `lower()`, `repeat(n)`, `pad_start(width)`, `pad_end(width)`, `to_int()`, `to_float()`, `to_int_or_null()`, `to_float_or_null()`, `to_string()`",
+                    Type::Bytes => BYTES_METHODS,
                     Type::List(_) => "`len()`, `is_empty()`, `push(x)`, `pop()`, `insert(i, x)`, `remove_at(i)`, `clear()`, `contains(x)`, `index_of(x)`, `reverse()`, `sort()`, `sort_by(key)`, `join(sep)`, `map(f)`, `filter(f)`, `any(f)`, `all(f)`, `find(f)`, `count(f)`, `fold(initial, f)`, `min_by(key)`, `max_by(key)`",
                     _ => "none",
                 };
@@ -4982,6 +5371,7 @@ fn expr_breaks(e: &TExpr) -> bool {
         TExprKind::Closure { captures, .. } => any(captures),
         TExprKind::CallValue(f, args) | TExprKind::CallMethod(f, _, args) => expr_breaks(f) || any(args),
         TExprKind::Boxed(_, x) => expr_breaks(x),
+        TExprKind::Try { value, on_err, .. } => expr_breaks(value) || expr_breaks(on_err),
         TExprKind::Block(stmts, e) => contains_break(stmts) || expr_breaks(e),
     }
 }

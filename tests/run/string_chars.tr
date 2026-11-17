@@ -1,0 +1,29 @@
+# Strings by character: `for c in s` and `char_count()`. Indexes stay byte-based.
+fn main():
+    val s = "héllo, wörld 👋"
+    print(f"{s.len()} bytes, {s.char_count()} characters")
+    var shout = ""
+    for c in s:
+        if c == "l":
+            continue
+        shout += c.upper()
+    print(shout)
+    for i, c in "añb":
+        print(f"{i}: {c} ({c.len()} bytes)")
+    var n = 0
+    for _ in "":
+        n += 1
+    print(n)
+    # The loop goes over the string as it was when the loop started.
+    var t = "abc"
+    for c in t:
+        t = "zz"
+        print(c)
+    print(t)
+    var vowels = 0
+    for c in "Programming in Tarn":
+        if c in ["a", "e", "i", "o", "u"]:
+            vowels += 1
+    print(vowels)
+    print("日本".chars())
+    print("".char_count())

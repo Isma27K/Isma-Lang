@@ -1,0 +1,22 @@
+# The `signal` module: catching signals instead of being stopped by them.
+import signal
+import time
+from signal import Signal
+
+fn main():
+    print(signal.received())
+    signal.catch(Signal.User1)
+    signal.catch(Signal.Terminate)
+    signal.send(Signal.User1)
+    signal.send(Signal.Terminate)
+    print(signal.received())
+    print(signal.received())
+    print(signal.received())
+    # A caught signal ends a sleep early.
+    signal.send(Signal.User1)
+    val start = time.monotonic()
+    time.sleep_ms(2000)
+    print(time.monotonic() - start < time.seconds(1))
+    print(signal.wait())
+    signal.reset(Signal.User1)
+    print("still running")

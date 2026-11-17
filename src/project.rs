@@ -109,6 +109,9 @@ pub fn load(path: Option<&Path>, display: &str, src: &str, read: Reader) -> Proj
         l.resolve_imports(next, root_dir.as_deref(), &display_dir);
         next += 1;
     }
+    // The prelude (`Result`, `Ok`, `Err`, `Unit`) is part of every program, as its last file.
+    let prelude = stdlib::prelude();
+    l.add(FileKind::Std, None, stdlib::display_path(prelude.name), prelude.name.to_string(), prelude.source.to_string(), None);
     Project { files: l.files, diags: l.diags }
 }
 
@@ -189,7 +192,7 @@ impl Loader<'_> {
             if let Some(m) = std_name {
                 return Target::File(self.std(m, file, im.span));
             }
-            return Target::Missing { tried: Vec::new(), nearby: stdlib::MODULES.iter().map(|m| m.name.to_string()).collect() };
+            return Target::Missing { tried: Vec::new(), nearby: stdlib::importable().map(|m| m.name.to_string()).collect() };
         };
         let mut base = dir.to_path_buf();
         for _ in 1..im.level.max(1) {
@@ -216,7 +219,7 @@ impl Loader<'_> {
         let parent = file_path.parent().unwrap_or(&base).to_path_buf();
         let mut nearby: Vec<String> = module_names(&parent);
         if im.level == 0 && segs.len() == 1 {
-            nearby.extend(stdlib::MODULES.iter().map(|m| m.name.to_string()));
+            nearby.extend(stdlib::importable().map(|m| m.name.to_string()));
         }
         Target::Missing { tried: vec![shown(&file_path, root_dir, display_dir)], nearby }
     }
@@ -353,9 +356,9 @@ mod tests {
         let p = load_at(&dir, "main.tr");
         assert!(p.diags.is_empty());
         let names: Vec<&str> = p.files.iter().map(|f| f.name.as_str()).collect();
-        assert_eq!(names, ["", "geometry", "time", "circle", "square"]);
+        assert_eq!(names, ["", "geometry", "time", "circle", "square", "prelude"]);
         let displays: Vec<&str> = p.files.iter().map(|f| f.display.as_str()).collect();
-        assert_eq!(displays, ["main.tr", "geometry.tr", "<std>/time.tr", "shapes/circle.tr", "shapes/square.tr"]);
+        assert_eq!(displays, ["main.tr", "geometry.tr", "<std>/time.tr", "shapes/circle.tr", "shapes/square.tr", "<std>/prelude.tr"]);
         let root = &p.files[0].imports;
         assert!(matches!(root[0].target, Target::File(1)));
         assert!(matches!(root[1].target, Target::File(2)));
@@ -386,7 +389,7 @@ mod tests {
     fn cycles_load_each_file_once() {
         let dir = tree("cycle", &[("main.tr", "import a\n"), ("a.tr", "import b\n"), ("b.tr", "import a\nimport main\n")]);
         let p = load_at(&dir, "main.tr");
-        assert_eq!(p.files.len(), 3);
+        assert_eq!(p.files.len(), 4); // and the prelude
         assert!(matches!(p.files[2].imports[0].target, Target::File(1)));
         assert!(matches!(p.files[2].imports[1].target, Target::File(0)));
         let _ = std::fs::remove_dir_all(&dir);

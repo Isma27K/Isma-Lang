@@ -1,0 +1,3 @@
+# expect-panic: Bytes([...]): 300 at index 1 is not a byte (0 to 255)
+fn main():
+    print(Bytes([1, 300]))

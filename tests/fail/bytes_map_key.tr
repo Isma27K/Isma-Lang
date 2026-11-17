@@ -1,0 +1,4 @@
+# expect-error: `Bytes` can't be a map key
+fn main():
+    val m: Map[Bytes, Int] = {}
+    print(m.len())

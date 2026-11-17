@@ -1,0 +1,4 @@
+# expect-error: cannot infer the type `E` for `Result.Ok`
+fn main():
+    val r = Ok(1)
+    print(r)

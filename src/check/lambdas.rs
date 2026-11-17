@@ -61,7 +61,7 @@ impl Checker {
     /// `fn(Int, String) -> Bool`
     pub(super) fn resolve_fn_type(&mut self, f: &FnTypeExpr) -> Type {
         let params = f.params.iter().map(|p| self.resolve_type(p)).collect();
-        let ret = f.ret.as_ref().map(|r| self.resolve_type(r)).unwrap_or(Type::Unit);
+        let ret = f.ret.as_ref().map(|r| self.resolve_ret_type(r)).unwrap_or(Type::Unit);
         Type::Func(params, Box::new(ret))
     }
 
@@ -82,7 +82,7 @@ impl Checker {
     pub(super) fn closure_struct(&mut self, span: Span, generic: bool) -> StructId {
         let id = self.structs.len();
         let name = format!("<lambda {id}>");
-        self.structs.push(TStruct { name: name.clone(), fields: Vec::new(), variants: None, generic, closure: None, vtable: Vec::new() });
+        self.structs.push(TStruct { name: name.clone(), fields: Vec::new(), variants: None, generic, closure: None, vtable: Vec::new(), drop: None });
         self.def_types.push(Type::Struct(id));
         self.struct_spans.push(span);
         self.struct_ns.push(self.ns);
@@ -182,7 +182,7 @@ impl Checker {
             params.push((p.name.clone(), ty));
         }
         let target = match &lam.ret {
-            Some(t) => Some(self.resolve_type(t)),
+            Some(t) => Some(self.resolve_ret_type(t)),
             None => exp.as_ref().map(|(_, r)| r.clone()).filter(|r| known(self, r)),
         };
 
@@ -273,6 +273,7 @@ impl Checker {
             track_caller: false,
             generic,
             closure: true,
+            is_drop: false,
         };
         let func = self.add_closure_code(tf, lam.head, &fty);
         let captures: Vec<TExpr> = frame.captures.into_iter().map(|(_, e)| e).collect();
@@ -422,6 +423,7 @@ impl Checker {
             track_caller: false,
             generic,
             closure: true,
+            is_drop: false,
         };
         let w = self.add_closure_code(tf, span, &fty);
         self.fn_wrappers.insert(fid, w);

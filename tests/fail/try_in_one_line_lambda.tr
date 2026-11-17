@@ -1,0 +1,7 @@
+# expect-error: `?` can't be used in a one-line lambda
+fn parse(s: String) -> Result[Int, String]:
+    return Ok(1)
+
+fn main():
+    val f = fn(s: String) -> parse(s)?
+    print(f("1"))

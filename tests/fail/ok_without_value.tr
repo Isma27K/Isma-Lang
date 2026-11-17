@@ -1,0 +1,6 @@
+# expect-error: `Ok()` needs a value here: a `Result[Int, String]` holds an `Int`
+fn f() -> Result[Int, String]:
+    return Ok()
+
+fn main():
+    print(f())

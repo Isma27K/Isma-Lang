@@ -1,0 +1,6 @@
+# expect-error: mismatched types: expected `Int`, found `String`
+fn f() -> Result[Int, String]:
+    return Ok("one")
+
+fn main():
+    print(f())

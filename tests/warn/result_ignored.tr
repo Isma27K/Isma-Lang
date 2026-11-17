@@ -1,0 +1,8 @@
+# expect-warning: this `Result` is ignored
+fn save(text: String) -> Result[Unit, String]:
+    if text.is_empty():
+        return Err("nothing to save")
+    return Ok()
+
+fn main():
+    save("")

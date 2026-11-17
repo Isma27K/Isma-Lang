@@ -83,6 +83,7 @@ impl Checker {
             Type::Nullable(_) | Type::Null => "keys can't be `null`",
             Type::List(_) | Type::Map(..) => "a key must not change while it's in the map, and lists and maps can change",
             Type::Unit => "`Unit` has no values",
+            Type::Bytes => "`Bytes` can't be map keys yet",
             Type::Func(..) => "functions can't be compared, so they can't be keys",
             Type::Iface(_) => "interface values can't be compared with `==`, so they can't be keys",
         };
@@ -91,6 +92,7 @@ impl Checker {
             d = match k {
                 Type::Float => d.with_help("use `Int` or `String` keys (e.g. scale and round the number)"),
                 Type::Nullable(inner) => d.with_help(format!("use `{}` keys, and leave null keys out", self.tn(inner))),
+                Type::Bytes => d.with_help("use the bytes as text (`b.decode()`) or in hex (`b.hex()`) as the key"),
                 _ => d.with_help("keys can be `Int`, `Bool`, `String`, enums, and types with `fn ==` and `fn hash`"),
             };
             self.err(d);

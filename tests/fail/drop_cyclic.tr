@@ -1,0 +1,8 @@
+# expect-error: `Node` has a `fn drop`, so it can't be part of a reference cycle
+struct Node:
+    var next: Node?
+    fn drop(self):
+        pass
+
+fn main():
+    print(Node(null).next == null)

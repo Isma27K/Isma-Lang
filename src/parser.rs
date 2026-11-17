@@ -1483,6 +1483,12 @@ impl Parser {
                     let span = e.span.merge(end);
                     e = Expr { kind: ExprKind::NotNull(Box::new(e)), span };
                 }
+                // `x?` (but not the `?` of `x ?: y`, nor a `c ? a : b` someone tried).
+                Tok::Question if !self.at_elvis() && !starts_operand(self.peek_nth(1)) => {
+                    let end = self.bump().span;
+                    let span = e.span.merge(end);
+                    e = Expr { kind: ExprKind::Try(Box::new(e)), span };
+                }
                 Tok::LBracket => {
                     if let Some(args) = self.try_type_args(&e) {
                         let span = e.span.merge(self.prev_span);
@@ -1649,7 +1655,12 @@ impl Parser {
 }
 
 fn is_postfix_start(t: &Tok) -> bool {
-    matches!(t, Tok::Dot | Tok::LParen | Tok::LBracket | Tok::QuestionDot | Tok::BangBang)
+    matches!(t, Tok::Dot | Tok::LParen | Tok::LBracket | Tok::QuestionDot | Tok::BangBang | Tok::Question)
+}
+
+/// Can `t` start an operand (so a `?` before it can't be the postfix `?`)?
+fn starts_operand(t: &Tok) -> bool {
+    matches!(t, Tok::Ident(_) | Tok::Int(_) | Tok::Float(_) | Tok::Str(_) | Tok::FStr(_) | Tok::True | Tok::False | Tok::Null | Tok::Not)
 }
 
 #[cfg(test)]
@@ -1683,6 +1694,7 @@ mod tests {
             ExprKind::Field(e, f) => format!("{}.{}", show(e), f.name),
             ExprKind::SafeField(e, f) => format!("{}?.{}", show(e), f.name),
             ExprKind::NotNull(e) => format!("{}!!", show(e)),
+            ExprKind::Try(e) => format!("{}?", show(e)),
             ExprKind::Elvis(a, b) => format!("({} ?: {})", show(a), show(b)),
             ExprKind::Index(e, i) => format!("{}[{}]", show(e), show(i)),
             ExprKind::TypeApply(e, ts) => {

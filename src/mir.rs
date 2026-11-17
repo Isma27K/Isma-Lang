@@ -40,6 +40,8 @@ pub struct Func {
     /// Called through function values (see `TFunc::closure`): its parameters
     /// stay borrowed.
     pub closure: bool,
+    /// A `fn drop(self)`: its parameter stays borrowed too.
+    pub is_drop: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -78,6 +80,9 @@ pub enum Stmt {
     /// Drop `.0`, but if this was the last reference keep its memory in the
     /// reuse token `.1` (null otherwise) for a following `Reuse` (Perceus FBIP).
     DropReuse(VarId, VarId),
+    /// Keep the variable's value alive until here (a use that does nothing):
+    /// a value with a `fn drop` lives to the end of its variable's block.
+    KeepAlive(VarId),
 }
 
 #[derive(Debug, Clone)]
@@ -197,7 +202,7 @@ impl Func {
 /// A nullable reference is a possibly-null pointer, so it counts too. An enum
 /// does when some variant carries data.
 pub fn is_ref(t: &Type) -> bool {
-    matches!(t.non_null(), Type::Str | Type::List(_) | Type::Map(..) | Type::Struct(_) | Type::Enum(_, true) | Type::Func(..) | Type::Iface(_))
+    matches!(t.non_null(), Type::Str | Type::Bytes | Type::List(_) | Type::Map(..) | Type::Struct(_) | Type::Enum(_, true) | Type::Func(..) | Type::Iface(_))
 }
 
 impl Operand {
@@ -270,7 +275,7 @@ impl Stmt {
                 out.extend(value.var());
                 out
             }
-            Stmt::Dup(v) | Stmt::Drop(v) | Stmt::DropReuse(v, _) => vec![*v],
+            Stmt::Dup(v) | Stmt::Drop(v) | Stmt::DropReuse(v, _) | Stmt::KeepAlive(v) => vec![*v],
         }
     }
 
@@ -368,6 +373,7 @@ fn print_func(out: &mut String, f: &Func, p: &Program, names: &[String]) {
                 Stmt::Dup(v) => format!("dup {}", var(*v)),
                 Stmt::Drop(v) => format!("drop {}", var(*v)),
                 Stmt::DropReuse(v, tok) => format!("{} = drop-reuse {}", var(*tok), var(*v)),
+                Stmt::KeepAlive(v) => format!("keep-alive {}", var(*v)),
             };
             let _ = writeln!(out, "    {line}");
         }

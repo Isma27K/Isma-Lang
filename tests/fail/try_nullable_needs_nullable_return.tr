@@ -1,0 +1,6 @@
+# expect-error: `?` on a nullable value returns `null`, but `first` can't return `null`
+fn first(xs: List[String]) -> String:
+    return xs.find(fn(x) -> x.len() > 1)?
+
+fn main():
+    print(first(["ab"]))

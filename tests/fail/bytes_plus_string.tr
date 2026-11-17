@@ -1,0 +1,4 @@
+# expect-error: operator `+` cannot be applied to `Bytes` and `String`
+fn main():
+    val b = "a".encode() + "b"
+    print(b)

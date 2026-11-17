@@ -233,6 +233,10 @@ fn calls_in_expr(e: &TExpr, out: &mut Vec<(FuncId, Span)>) {
             args.iter().for_each(|a| calls_in_expr(a, out));
         }
         TExprKind::Boxed(_, x) => calls_in_expr(x, out),
+        TExprKind::Try { value, on_err, .. } => {
+            calls_in_expr(value, out);
+            calls_in_expr(on_err, out);
+        }
         TExprKind::Block(stmts, e) => {
             calls_in(stmts, out);
             calls_in_expr(e, out);
@@ -466,7 +470,7 @@ impl Checker {
         let name = format!("{base}[{}]", shown.join(", "));
         let has_param = args.iter().any(|a| a.has_param(&self.struct_has_param));
         let variants = self.structs[origin].variants.as_ref().map(|_| Vec::new());
-        self.structs.push(TStruct { name: name.clone(), fields: Vec::new(), variants, generic: has_param, closure: None, vtable: Vec::new() });
+        self.structs.push(TStruct { name: name.clone(), fields: Vec::new(), variants, generic: has_param, closure: None, vtable: Vec::new(), drop: None });
         self.def_types.push(match self.def_types[origin] {
             Type::Enum(_, boxed) => Type::Enum(id, boxed),
             _ => Type::Struct(id),
@@ -1159,6 +1163,10 @@ impl Checker {
             },
             Type::Str => match need {
                 Need::Eq | Need::EqNullable | Need::Ord | Need::Arith(BinOp::Add) | Need::Format | Need::ToStr | Need::Hash | Need::Key => Ok(Vec::new()),
+                _ => fail(t),
+            },
+            Type::Bytes => match need {
+                Need::Eq | Need::Arith(BinOp::Add) | Need::Format | Need::ToStr => Ok(Vec::new()),
                 _ => fail(t),
             },
             Type::Struct(sid) | Type::Enum(sid, _) => {

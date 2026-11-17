@@ -1,0 +1,10 @@
+# expect-max-allocs: 1
+# `for c in s` on ASCII text hands out shared one-character strings: nothing
+# is allocated per character (the one allocation is the string being read).
+fn main():
+    val s = "abcdefghij".repeat(10_000)
+    var n = 0
+    for c in s:
+        if c == "e":
+            n += 1
+    print(n)

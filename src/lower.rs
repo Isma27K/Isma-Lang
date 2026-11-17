@@ -22,8 +22,11 @@ struct Lower<'a> {
     /// Blocks under construction: statements + terminator (once known).
     blocks: Vec<(Vec<Stmt>, Option<Term>)>,
     cur: BlockId,
-    /// (continue target, break target)
-    loops: Vec<(BlockId, BlockId)>,
+    /// (continue target, break target, how many `scopes` are outside the loop)
+    loops: Vec<(BlockId, BlockId, usize)>,
+    /// Per enclosing block: its variables holding values with a `fn drop`,
+    /// kept alive to the end of the block (or a jump out of it).
+    scopes: Vec<Vec<VarId>>,
     /// Locals that are assigned after their declaration (`var`s that change).
     reassigned: Vec<bool>,
 }
@@ -42,7 +45,7 @@ impl<'a> Lower<'a> {
             .collect();
         let mut reassigned = vec![false; f.locals.len()];
         mark_reassigned(&f.body, &mut reassigned);
-        let mut l = Lower { prog, vars, blocks: vec![(Vec::new(), None)], cur: 0, loops: Vec::new(), reassigned };
+        let mut l = Lower { prog, vars, blocks: vec![(Vec::new(), None)], cur: 0, loops: Vec::new(), scopes: Vec::new(), reassigned };
         l.stmts(&f.body);
         if !l.terminated() {
             l.term(if f.ret == Type::Unit { Term::Return(None) } else { Term::Unreachable });
@@ -60,6 +63,7 @@ impl<'a> Lower<'a> {
             track_caller: f.track_caller,
             generic: f.generic,
             closure: f.closure,
+            is_drop: f.is_drop,
         }
     }
 
@@ -111,9 +115,58 @@ impl<'a> Lower<'a> {
 
     // ---------- statements ----------
 
+    /// A block of statements: also a scope for values with a `fn drop`.
     fn stmts(&mut self, stmts: &[TStmt]) {
-        for s in stmts {
-            self.stmt(s);
+        self.scoped(Vec::new(), |l| {
+            for s in stmts {
+                l.stmt(s);
+                if let TStmt::Let(id, _) = s
+                    && l.scoped_type(&l.vars[*id].ty)
+                {
+                    l.scopes.last_mut().unwrap().push(*id);
+                }
+            }
+        });
+    }
+
+    /// Run `body` in a new scope that starts with variables `vars`; at its end,
+    /// they're kept alive (when the end is reached).
+    fn scoped(&mut self, vars: Vec<VarId>, body: impl FnOnce(&mut Self)) {
+        self.scopes.push(vars);
+        body(self);
+        let frame = self.scopes.pop().unwrap();
+        if !self.terminated() {
+            for v in frame.into_iter().rev() {
+                self.push(Stmt::KeepAlive(v));
+            }
+        }
+    }
+
+    /// Before jumping out of the scopes from `depth` on: keep their variables alive up to here.
+    fn keep_alive_from(&mut self, depth: usize) {
+        let vars: Vec<VarId> = self.scopes[depth..].iter().rev().flat_map(|f| f.iter().rev().copied()).collect();
+        for v in vars {
+            self.push(Stmt::KeepAlive(v));
+        }
+    }
+
+    /// Values of this type live to the end of their variable's block: structs with a `fn drop`.
+    fn scoped_type(&self, t: &Type) -> bool {
+        matches!(t.non_null(), Type::Struct(sid) if self.prog.structs[*sid].drop.is_some())
+    }
+
+    /// The variables a pattern binds to values with a `fn drop`.
+    fn scoped_binds(&self, p: &TPat, out: &mut Vec<VarId>) {
+        match &p.kind {
+            TPatKind::Bind(id, inner) => {
+                if self.scoped_type(&self.vars[*id].ty) {
+                    out.push(*id);
+                }
+                self.scoped_binds(inner, out);
+            }
+            TPatKind::Variant(_, _, subs) | TPatKind::Struct(_, subs) | TPatKind::Or(subs) => subs.iter().for_each(|s| self.scoped_binds(s, out)),
+            TPatKind::Some(inner) => self.scoped_binds(inner, out),
+            _ => {}
         }
     }
 
@@ -122,6 +175,18 @@ impl<'a> Lower<'a> {
             TStmt::Let(id, e) => {
                 let r = self.rvalue(e);
                 self.push(Stmt::Assign(*id, r));
+            }
+            // `s += f"line {i}\n"`: each part is appended to `s` in turn (in place
+            // when `s` has one owner), instead of building the f-string first.
+            TStmt::Assign { place: tast::Place::Local(id), op: Some(tast::CompoundOp::Builtin(BinOp::Add)), value, span }
+                if self.vars[*id].ty == Type::Str
+                    && matches!(&value.kind, TExprKind::FString(parts) if parts.iter().all(|p| independent_of(p, *id))) =>
+            {
+                let TExprKind::FString(parts) = &value.kind else { unreachable!() };
+                for p in parts {
+                    let v = self.operand(p);
+                    self.push(Stmt::Assign(*id, Rvalue::Binary(BinOp::Add, Type::Str, Operand::Var(*id), v, *span)));
+                }
             }
             TStmt::Assign { place, op, value, span } => {
                 // The value is evaluated first (it may e.g. grow a list).
@@ -231,7 +296,7 @@ impl<'a> Lower<'a> {
                 let c = self.operand(cond);
                 self.term(Term::Branch(c, lb, le));
                 self.cur = lb;
-                self.loops.push((lc, le));
+                self.loops.push((lc, le, self.scopes.len()));
                 self.stmts(body);
                 self.loops.pop();
                 self.goto(lc);
@@ -255,7 +320,7 @@ impl<'a> Lower<'a> {
                 self.term(Term::Branch(Operand::Var(c), lb, le));
                 self.cur = lb;
                 self.push(Stmt::Assign(*var, Rvalue::Use(Operand::Var(ctr))));
-                self.loops.push((ls, le));
+                self.loops.push((ls, le, self.scopes.len()));
                 self.stmts(body);
                 self.loops.pop();
                 self.start(ls);
@@ -282,6 +347,68 @@ impl<'a> Lower<'a> {
                     l.stmts(body);
                 });
             }
+            // `for byte in b`: each byte, as an `Int`.
+            TStmt::ForList { var, index, list, body } if list.ty == Type::Bytes => {
+                let b = self.operand(list);
+                let b = self.iterated(b, &list.ty);
+                let ctr = self.temp(Type::Int);
+                self.push(Stmt::Assign(ctr, Rvalue::Use(Operand::Int(0))));
+                let (lc, lb, ls, le) = (self.new_block(), self.new_block(), self.new_block(), self.new_block());
+                self.start(lc);
+                let len = self.temp(Type::Int);
+                self.push(Stmt::Assign(len, Rvalue::Builtin(Builtin::StrLen, vec![Operand::Var(b)], Default::default())));
+                let c = self.temp(Type::Bool);
+                self.push(Stmt::Assign(c, Rvalue::Binary(BinOp::Lt, Type::Int, Operand::Var(ctr), Operand::Var(len), Default::default())));
+                self.term(Term::Branch(Operand::Var(c), lb, le));
+                self.cur = lb;
+                if let Some(ix) = index {
+                    self.push(Stmt::Assign(*ix, Rvalue::Use(Operand::Var(ctr))));
+                }
+                self.push(Stmt::Assign(*var, Rvalue::Builtin(crate::stdlib::rt("bytes_at"), vec![Operand::Var(b), Operand::Var(ctr)], Default::default())));
+                self.loops.push((ls, le, self.scopes.len()));
+                self.stmts(body);
+                self.loops.pop();
+                self.start(ls);
+                self.push(Stmt::Assign(ctr, Rvalue::Builtin(Builtin::Inc, vec![Operand::Var(ctr)], Default::default())));
+                self.goto(lc);
+                self.cur = le;
+            }
+            // `for c in s`: `ctr` is the byte index of the next character.
+            TStmt::ForList { var, index, list, body } if list.ty == Type::Str => {
+                let s = self.operand(list);
+                let s = self.iterated(s, &list.ty);
+                let ctr = self.temp(Type::Int);
+                self.push(Stmt::Assign(ctr, Rvalue::Use(Operand::Int(0))));
+                let nth = index.map(|_| {
+                    let n = self.temp(Type::Int);
+                    self.push(Stmt::Assign(n, Rvalue::Use(Operand::Int(0))));
+                    n
+                });
+                let (lc, lb, ls, le) = (self.new_block(), self.new_block(), self.new_block(), self.new_block());
+                self.start(lc);
+                let len = self.temp(Type::Int);
+                self.push(Stmt::Assign(len, Rvalue::Builtin(Builtin::StrLen, vec![Operand::Var(s)], Default::default())));
+                let c = self.temp(Type::Bool);
+                self.push(Stmt::Assign(c, Rvalue::Binary(BinOp::Lt, Type::Int, Operand::Var(ctr), Operand::Var(len), Default::default())));
+                self.term(Term::Branch(Operand::Var(c), lb, le));
+                self.cur = lb;
+                if let (Some(ix), Some(n)) = (index, nth) {
+                    self.push(Stmt::Assign(*ix, Rvalue::Use(Operand::Var(n))));
+                }
+                self.push(Stmt::Assign(*var, Rvalue::Builtin(Builtin::StrCharAt, vec![Operand::Var(s), Operand::Var(ctr)], Default::default())));
+                let step = self.temp(Type::Int);
+                self.push(Stmt::Assign(step, Rvalue::Builtin(Builtin::StrLen, vec![Operand::Var(*var)], Default::default())));
+                self.loops.push((ls, le, self.scopes.len()));
+                self.stmts(body);
+                self.loops.pop();
+                self.start(ls);
+                self.push(Stmt::Assign(ctr, Rvalue::Binary(BinOp::Add, Type::Int, Operand::Var(ctr), Operand::Var(step), Default::default())));
+                if let Some(n) = nth {
+                    self.push(Stmt::Assign(n, Rvalue::Builtin(Builtin::Inc, vec![Operand::Var(n)], Default::default())));
+                }
+                self.goto(lc);
+                self.cur = le;
+            }
             TStmt::ForList { var, index, list, body } => {
                 let l = self.operand(list);
                 // Iterate over the list the expression evaluated to, even if the body rebinds the variable.
@@ -303,7 +430,7 @@ impl<'a> Lower<'a> {
                     self.push(Stmt::Assign(*ix, Rvalue::Use(Operand::Var(ctr))));
                 }
                 self.push(Stmt::Assign(*var, Rvalue::Index(l, Operand::Var(ctr), None)));
-                self.loops.push((ls, le));
+                self.loops.push((ls, le, self.scopes.len()));
                 self.stmts(body);
                 self.loops.pop();
                 self.start(ls);
@@ -325,7 +452,9 @@ impl<'a> Lower<'a> {
                         self.term(Term::Branch(c, body, next));
                         self.cur = body;
                     }
-                    self.stmts(&arm.body);
+                    let mut binds = Vec::new();
+                    self.scoped_binds(&arm.pat, &mut binds);
+                    self.scoped(binds, |l| l.stmts(&arm.body));
                     self.goto(end);
                     self.cur = next;
                 }
@@ -334,20 +463,27 @@ impl<'a> Lower<'a> {
                 self.cur = end;
             }
             TStmt::Break => {
-                let target = self.loops.last().expect("break outside loop").1;
+                let (_, target, depth) = *self.loops.last().expect("break outside loop");
+                self.keep_alive_from(depth);
                 self.term(Term::Goto(target));
             }
             TStmt::Continue => {
-                let target = self.loops.last().expect("continue outside loop").0;
+                let (target, _, depth) = *self.loops.last().expect("continue outside loop");
+                self.keep_alive_from(depth);
                 self.term(Term::Goto(target));
             }
-            TStmt::Return(None) => self.term(Term::Return(None)),
+            TStmt::Return(None) => {
+                self.keep_alive_from(0);
+                self.term(Term::Return(None));
+            }
             TStmt::Return(Some(e)) => {
                 if e.ty == Type::Unit {
                     self.effect(e);
+                    self.keep_alive_from(0);
                     self.term(Term::Return(None));
                 } else {
                     let o = self.operand(e);
+                    self.keep_alive_from(0);
                     self.term(Term::Return(Some(o)));
                 }
             }
@@ -401,7 +537,7 @@ impl<'a> Lower<'a> {
         self.push(Stmt::Assign(c, Rvalue::Binary(BinOp::Ge, Type::Int, Operand::Var(i), Operand::Int(0), Default::default())));
         self.term(Term::Branch(Operand::Var(c), lb, le));
         self.cur = lb;
-        self.loops.push((ls, le));
+        self.loops.push((ls, le, self.scopes.len()));
         each(self, i);
         self.loops.pop();
         self.start(ls);
@@ -873,6 +1009,29 @@ impl<'a> Lower<'a> {
                 self.cur = some;
                 self.unwrap(o, &inner.ty)
             }
+            TExprKind::Try { value, binder, on_err } => {
+                let o = self.operand(value);
+                let v = self.as_var(o, &value.ty);
+                let Type::Enum(sid, _) = value.ty else { unreachable!("checked: `?` on a Result") };
+                // `Ok` is variant 0 and `Err` variant 1 (see the prelude).
+                let tag = self.temp(Type::Int);
+                self.push(Stmt::Assign(tag, Rvalue::Tag(v)));
+                let is_err = self.temp(Type::Bool);
+                self.push(Stmt::Assign(is_err, Rvalue::Binary(BinOp::Eq, Type::Int, Operand::Var(tag), Operand::Int(1), Default::default())));
+                let (err, ok) = (self.new_block(), self.new_block());
+                self.term(Term::Branch(Operand::Var(is_err), err, ok));
+                self.cur = err;
+                self.push(Stmt::Assign(*binder, Rvalue::VariantField(v, sid, 1, 0)));
+                match &on_err.kind {
+                    TExprKind::Jump(s) => self.stmt(s),
+                    _ => self.effect(on_err),
+                }
+                if !self.terminated() {
+                    self.term(Term::Unreachable);
+                }
+                self.cur = ok;
+                Rvalue::VariantField(v, sid, 0, 0)
+            }
             TExprKind::SafeCall { recv, binder, body } => {
                 let r = self.operand(recv);
                 let res = (e.ty != Type::Unit).then(|| self.temp(e.ty.clone()));
@@ -954,6 +1113,18 @@ impl<'a> Lower<'a> {
                 Rvalue::Use(Operand::Bool(false))
             }
         }
+    }
+}
+
+/// Is `e` a simple expression (literals, other locals, fields, calls and
+/// built-ins of those) that can't read local `id`?
+fn independent_of(e: &TExpr, id: LocalId) -> bool {
+    match &e.kind {
+        TExprKind::Int(_) | TExprKind::Float(_) | TExprKind::Bool(_) | TExprKind::Str(_) => true,
+        TExprKind::Local(x) => *x != id,
+        TExprKind::Field(x, ..) => independent_of(x, id),
+        TExprKind::Call(_, args) | TExprKind::Builtin(_, args) => args.iter().all(|a| independent_of(a, id)),
+        _ => false,
     }
 }
 

@@ -1,0 +1,4 @@
+# expect-panic: slice(2, 9) out of range for 3 bytes
+fn main():
+    val b = "abc".encode()
+    print(b.slice(2, 9))

@@ -20,8 +20,11 @@ Tarn reads like Python, checks like Kotlin and compiles to native code. This gui
 - [Lists](#lists)
 - [Maps](#maps)
 - [Strings and f-strings](#strings-and-f-strings)
+- [Bytes](#bytes)
 - [Null safety](#null-safety)
+- [Recoverable errors](#recoverable-errors)
 - [Memory](#memory)
+- [Cleaning up: `fn drop`](#cleaning-up-fn-drop)
 - [Modules: `import`](#modules-import)
   - [Your own files](#your-own-files)
   - [The standard library](#the-standard-library)
@@ -738,7 +741,7 @@ val s = f"pi is about {3.14159}, 2 + 2 = {2 + 2}, ok = {true}"
 "abc" <=> "abd"          # -1 (see operator functions)
 " 42 ".to_int()          # 42. Invalid input panics, like Kotlin's toInt().
 "2.5".to_float()
-for c in "héllo".chars():
+for c in "héllo":       # each character, as a one-character string
     print(c)
 ```
 
@@ -746,6 +749,8 @@ for c in "héllo".chars():
 |---|---|
 | `len() -> Int`, `is_empty() -> Bool` | Length in bytes; is it `""`? |
 | `chars() -> List[String]` | Each character as a one-character string |
+| `char_count() -> Int` | The number of characters (`len()` counts bytes) |
+| `encode() -> Bytes` | The UTF-8 bytes, shared rather than copied |
 | `lines() -> List[String]` | The lines, without their `\n` or `\r\n` |
 | `split(sep) -> List[String]` | The parts between each `sep`: `"a,b,,c".split(",")` is `["a", "b", "", "c"]` |
 | `split() -> List[String]` | The words: split on runs of whitespace, with no empty parts |
@@ -762,6 +767,35 @@ for c in "héllo".chars():
 | `to_int_or_null()`, `to_float_or_null()` | `-> Int?` / `-> Float?`: `null` instead of a panic on bad input |
 
 `Int`, `Float` and `Bool` have `.to_string()`; `Int` has `.to_float()`; `Float` has `.to_int()`, which truncates.
+
+**Bytes and characters.** Lengths and indexes count bytes: they're fast, and what parsing needs. `for c in s` (and `for i, c in s`) goes through the characters, and `char_count()` counts them. There's no `s[i]`, so a byte index and a character index can't be mixed up.
+
+**Building strings.** `s += x` appends in place when nothing else holds `s`, and `s += f"..."` appends each part of the f-string in turn: building a long string in a loop is linear, with no builder type needed.
+
+## Bytes
+
+`Bytes` is raw data, numbers from 0 to 255: what sockets and files carry. `s.encode()` gives a string's UTF-8 bytes and `b.decode()` turns valid UTF-8 back into text; neither copies.
+
+```python
+val request = "GET / HTTP/1.1\r\n\r\n".encode()
+print(request[0])                              # 71
+val end = request.find("\r\n".encode())!!
+print(request.slice(0, end).decode())          # GET / HTTP/1.1
+var buf = Bytes()                              # or Bytes([72, 105])
+buf += request                                 # appends in place
+print(Bytes([104, 255]).decode_or_null())      # null: not UTF-8
+```
+
+| Method | |
+|---|---|
+| `len()`, `is_empty()`, `b[i]` | The number of bytes; the byte at `i` (an `Int`, bounds-checked) |
+| `slice(start, end) -> Bytes` | The bytes `start..end`, copied |
+| `find`, `rfind`, `contains`, `count`, `starts_with`, `ends_with` | Search, with `Bytes` |
+| `split(sep)`, `replace(old, new)`, `trim()` | As for strings |
+| `decode()`, `decode_or_null()`, `decode_lossy()` | As text: panics, `null`, or `\u{FFFD}` for bytes that aren't UTF-8 |
+| `hex()`, `to_list()`, `to_string()` | `"48690a"`, `[72, 105, 10]`, `b"Hi\n"` |
+
+`==`, `!=`, `+` and `for byte in b` work as you'd expect. `Bytes` can't be map keys yet.
 
 ## Null safety
 
@@ -834,6 +868,39 @@ Smart casts apply to local variables, parameters, and chains of `val` fields (`o
 
 Null safety costs nothing at run time. A `String?`, `List[T]?` or `User?` is a pointer that may be null. An `Int?`, `Float?` or `Bool?` is the value plus a flag, which stays in registers, so nothing is ever allocated ("boxed") for it.
 
+## Recoverable errors
+
+A function that can fail in an expected way returns a `Result[T, E]`: `Ok(value)` or `Err(error)`. `Result`, `Ok`, `Err` and `Unit` are always available, without an import (they live in the prelude, [`stdlib/prelude.tr`](../stdlib/prelude.tr)).
+
+```python
+fn parse_port(text: String) -> Result[Int, String]:
+    val n = text.to_int_or_null() ?: return Err(f"not a number: {text}")
+    if n < 1 or n > 65535:
+        return Err(f"out of range: {n}")
+    return Ok(n)
+
+fn parse_address(text: String) -> Result[String, String]:
+    val colon = text.find(":") ?: return Err("no port")
+    val port = parse_port(text.substring(colon + 1, text.len()))?   # the Err, returned
+    return Ok(f"{text.substring(0, colon)} on {port}")
+
+fn main():
+    match parse_address("example.com:https"):
+        case Ok(a):
+            print(a)
+        case Err(why):
+            print(f"bad address: {why}")    # bad address: not a number: https
+```
+
+- **`?`** gives the `Ok`'s value, or returns the `Err` from the current function, which must return a `Result`. When the function's error type is an [interface](#interfaces) the error fits, it's boxed into it, so one function can pass on several kinds of error. On a `T?` in a function returning a nullable type, `x?` returns `null`.
+- **`r?.member`** is `(r?).member`.
+- **`r!!`** is the value, or a panic that shows the error.
+- **`Result[Unit, E]`** is for something that can fail but gives nothing back: `return Ok()`.
+- **Methods:** `is_ok()`, `is_err()`, `value_or(default)`, `value_or_null()`, `error_or_null()`, `map(f)`, `map_err(f)`, `to_string()`.
+- **A `Result` that's thrown away** (`save(text)` as a statement) gets a warning. Write `val _ = save(text)` when that's really what you mean.
+
+Use a panic for bugs, `null` for "there isn't one", and a `Result` for "it didn't work, and here's why".
+
 ## Memory
 
 Tarn frees memory automatically, without a garbage collector and without pauses. Every string, list and struct counts its references, and it is freed the moment the last one goes away. The compiler works out each value's **last use**, so a value dies right after it, not at the end of the block:
@@ -863,6 +930,25 @@ tarn arc: 3 allocations, 3 frees, 0 live, peak 96 bytes, 0 cycle collections fre
 ```
 
 `tarn build app.tr --emit-mir` writes the mid-level IR, with every `dup` (a new reference), `drop` (a reference released) and `drop-reuse` (memory recycled in place) the compiler inserted.
+
+## Cleaning up: `fn drop`
+
+A struct that holds something besides memory (a socket, a file, a lock) can release it in `fn drop(self)`, which runs by itself when the last reference goes away:
+
+```python
+struct TempFile:
+    path: String
+
+    fn drop(self):
+        fs.remove(self.path)
+```
+
+- **A variable keeps such a value until the end of its block** (or a `return`, `break` or `continue` that leaves it), like C++ and Rust, not just until its last use as with plain memory. Assigning a new value to a `var` drops the old one at once.
+- `self` is borrowed inside `drop`. A `drop` that keeps a reference to `self` panics.
+- Only non-generic structs can have one, it can't be called (write a `close()` for that), and the type can't be part of a reference cycle (the compiler checks).
+- `drop`s don't run when the program panics or calls `exit`.
+
+The `net` module's sockets close themselves this way.
 
 ## Modules: `import`
 
@@ -936,6 +1022,12 @@ Available modules:
 | [`time`](time.md) | UTC dates and times, durations, clocks |
 | [`math`](math.md) | Constants (`pi`, `e`, `inf`), powers and logarithms, trigonometry, rounding, `min`/`max`/`clamp`, `gcd` |
 | [`fs`](fs.md) | Reading and writing files, folders, paths |
+| [`net`](net.md) | TCP sockets |
+| [`env`](system.md#env) | Environment variables |
+| [`signal`](system.md#signal) | Catching signals |
+| [`url`](system.md#url) | Percent-encoding and query strings |
+
+`Result`, `Ok`, `Err` and `Unit` come from the prelude, which every file has without importing it.
 
 ## Built-in functions
 
@@ -969,7 +1061,11 @@ Panics cover:
 
 - **No packages to install.** Modules come from your own folders and the standard library; there is no package manager or search path.
 - **No global variables.** Top-level `val`s are [constants](#constants) (numbers, `Bool`s and `String`s); everything that changes lives in functions.
-- **Byte-based strings.** `String.len()` and `substring()` count bytes, and there's no `s[i]` indexing; use `chars()`.
+- **Byte-based strings.** `String.len()` and `substring()` count bytes, and there's no `s[i]` indexing; use `for c in s`, `char_count()` or `chars()`.
+- **One thing at a time.** A `net` call waits until it's done and there's no concurrency yet, so a server handles one connection at a time. No TLS yet.
+- **`fn drop` only on structs,** not generic ones, and not on types that can be part of a reference cycle.
+- **A `Result` is allocated,** like every enum whose variants carry data.
+- **`Bytes` can't be map keys.**
 - **No negative indexing.** `xs[-1]` panics.
 - **Operators look at the left operand.** `2.0 * v` can't use `Vec2`'s `fn *`; write `v * 2.0`.
 - **`==` from `fn ==` needs non-null values.** Check for `null` first (a smart cast then does the rest).

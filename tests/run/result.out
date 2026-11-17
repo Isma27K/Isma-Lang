@@ -1,0 +1,29 @@
+Ok(3)
+Err(not a number: x)
+Err(not a number: y)
+port 80
+error: not a number: x
+error: out of range: 70000
+Ok(Unit)
+Err(5 is odd)
+Err(not a number: z)
+6
+null
+Ok(3)
+Err(empty)
+Ok(6)
+Err(not a number: two)
+Ok(42)
+Err(not a number: x)
+true false false true
+42 null
+null not a number: forty
+41
+Ok(10.5)
+Err(19)
+42
+[Ok(1), Err(two), Ok(3)]
+2
+Ok(2.5)
+a circle of radius 1.0
+no shape called hexagon

@@ -35,7 +35,9 @@ pub fn run(prog: &mut Program) {
         split_critical_edges(f);
     }
     let sizes: Vec<u64> = (0..prog.structs.len()).map(|s| struct_alloc_size(&prog.structs, s)).collect();
-    let cyclic = crate::cycles::cyclic_structs(&prog.structs);
+    // Memory is never reused in place for types that can form cycles, nor
+    // for those with a `fn drop` (which must run first).
+    let cyclic: Vec<bool> = crate::cycles::cyclic_structs(&prog.structs).iter().zip(&prog.structs).map(|(c, s)| *c || s.drop.is_some()).collect();
     let writes = write_effects(prog);
     let sigs = infer_borrows(prog, &sizes, &cyclic);
     for (i, f) in prog.funcs.iter_mut().enumerate() {
@@ -236,6 +238,11 @@ fn stmt_roles(f: &Func, s: &Stmt, sigs: &[Vec<bool>], borrowed: Option<&[bool]>)
                 r.consumed.push(v);
             }
             r.def = *old;
+        }
+        Stmt::KeepAlive(v) => {
+            if rc(f, *v) {
+                r.borrowed.push(*v);
+            }
         }
         Stmt::Dup(_) | Stmt::Drop(_) | Stmt::DropReuse(..) => {}
     }
@@ -571,13 +578,13 @@ fn infer_borrows(prog: &Program, sizes: &[u64], cyclic: &[bool]) -> Vec<Vec<bool
     // Reuse candidates don't depend on other functions' signatures. (Closure
     // code keeps every parameter borrowed: its callers can't know whose code they run.)
     for (fi, f) in prog.funcs.iter().enumerate() {
-        if !f.closure {
+        if !f.closure && !f.is_drop {
             sigs[fi] = reuse_params(f, sizes, cyclic, &sigs);
         }
     }
     loop {
         let mut changed = false;
-        for (fi, f) in prog.funcs.iter().enumerate().filter(|(_, f)| !f.closure) {
+        for (fi, f) in prog.funcs.iter().enumerate().filter(|(_, f)| !f.closure && !f.is_drop) {
             for (i, &p) in f.params.iter().enumerate() {
                 if sigs[fi][i] || !rc(f, p) {
                     continue;
@@ -754,7 +761,7 @@ fn use_owned_append(f: &mut Func, sigs: &[Vec<bool>], own: &Ownership) {
     for (b, out) in live_out.iter().enumerate() {
         let mut rewrite: Vec<usize> = Vec::new();
         walk_block(f, b, out, sigs, own, |i, r, live, _| {
-            if let Stmt::Assign(_, Rvalue::Binary(BinOp::Add, Type::Str, Operand::Var(a), _, _)) = &f.blocks[b].stmts[i] {
+            if let Stmt::Assign(_, Rvalue::Binary(BinOp::Add, Type::Str | Type::Bytes, Operand::Var(a), _, _)) = &f.blocks[b].stmts[i] {
                 let a = *a;
                 // `a` must be ours, dead afterwards, and not also read (directly or
                 // through something borrowed from it) by the right-hand side.

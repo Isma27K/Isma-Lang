@@ -482,6 +482,18 @@ impl Server {
         for (name, d) in BUILTIN_TYPES {
             add(name, lt::CompletionItemKind::CLASS, Some(format!("type {name}")), Some((*d).into()), "3");
         }
+        // The prelude, in every file: `Result` (with `Ok` and `Err`) and `Unit`.
+        if let Some(p) = doc.ide.modules.iter().find(|m| m.name == crate::stdlib::PRELUDE).map(|m| m.ns) {
+            for s in doc.ide.structs.iter().filter(|s| s.ns == p && !s.instance) {
+                let shown = if s.type_params.is_empty() { s.name.clone() } else { format!("{}[{}]", s.name, s.type_params.join(", ")) };
+                add(&s.name, lt::CompletionItemKind::ENUM, Some(format!("enum {shown}")), s.doc.clone(), "3");
+                if s.name == "Result" {
+                    for v in s.variants.iter().flatten() {
+                        add(&v.name, lt::CompletionItemKind::ENUM_MEMBER, Some(v.signature.clone()), v.doc.clone(), "3");
+                    }
+                }
+            }
+        }
         for k in KEYWORDS {
             add(k, lt::CompletionItemKind::KEYWORD, None, None, "4");
         }
@@ -512,8 +524,8 @@ impl Server {
         let folders = &segs[..segs.len() - 1];
         let mut items = Vec::new();
         if level == 0 && folders.is_empty() {
-            for m in crate::stdlib::MODULES {
-                let doc = crate::analyze(&format!("import {}\nfn main():\n    pass\n", m.name)).ide.modules.first().and_then(|m| m.doc.clone());
+            for m in crate::stdlib::importable() {
+                let doc = crate::analyze(&format!("import {}\nfn main():\n    pass\n", m.name)).ide.modules.iter().find(|x| x.name == m.name).and_then(|m| m.doc.clone());
                 items.push(module_item(m.name, format!("import {}", m.name), doc, lt::CompletionItemKind::MODULE));
             }
         }
@@ -1132,11 +1144,40 @@ mod tests {
         assert!(got.iter().any(|(l, d)| *l == "value" && d.contains("Int")), "{got:?}");
         // The outline lists what's declared, not the copies made for `Int`.
         let a = crate::analyze(GEN_SRC);
-        assert_eq!(a.ide.structs.iter().filter(|s| !s.instance).count(), 1);
+        assert_eq!(a.ide.structs.iter().filter(|s| !s.instance && s.ns == 0).count(), 1);
         assert!(a.ide.structs.iter().any(|s| s.instance && s.name == "Box[Int]"));
     }
 
     const IFACE_SRC: &str = "# Things with an area.\ninterface Shape:\n    # How much room it takes.\n    fn area(self) -> Float\n\ninterface Solid(Shape):\n    fn volume(self) -> Float\n\nstruct Cube(Solid):\n    side: Float\n\n    fn area(self) -> Float:\n        return 6.0 * self.side * self.side\n\n    fn volume(self) -> Float:\n        return self.side * self.side * self.side\n\nfn total[T: Shape](xs: List[T]) -> Float:\n    var sum = 0.0\n    for x in xs:\n        sum += x.area()\n    return sum\n\nfn main():\n    val s: Solid = Cube(1.0)\n    print(s.volume() + total([Cube(2.0)]))\n    s.\n";
+
+    #[test]
+    fn results_bytes_hover_and_complete() {
+        const SRC: &str = "fn parse(s: String) -> Result[Int, String]:\n    val n = s.to_int_or_null() ?: return Err(\"bad\")\n    return Ok(n)\n\nfn main():\n    val r = parse(\"1\")\n    val b = \"hi\".encode()\n    print(b.hex())\n    r.\n    b.\n    \n";
+        let (s, uri) = server_with(SRC);
+        let hover = |needle: &str, delta: usize| {
+            let h = s.hover(lt::HoverParams { text_document_position_params: tdp(&uri, at(SRC, needle, delta)), work_done_progress_params: Default::default() });
+            let lt::HoverContents::Markup(m) = h.unwrap().contents else { panic!() };
+            m.value
+        };
+        // `Ok`/`Err` are the prelude's `Result` variants; `Bytes` methods have docs.
+        let shown = hover("Ok(n)", 0);
+        assert!(shown.contains("Ok(value: T)"), "{shown}");
+        let shown = hover("hex()", 0);
+        assert!(shown.contains("fn hex() -> String") && shown.contains("hex digits"), "{shown}");
+        let shown = hover("encode()", 0);
+        assert!(shown.contains("fn encode() -> Bytes"), "{shown}");
+        // `r.` offers `Result`'s methods, `b.` those of `Bytes`.
+        let labels = |pos| complete(&s, &uri, pos).iter().map(|i| i.label.clone()).collect::<Vec<_>>();
+        let got = labels(at(SRC, "    r.\n", 6));
+        assert!(got.iter().any(|l| l == "is_ok") && got.iter().any(|l| l == "map_err"), "{got:?}");
+        let got = labels(at(SRC, "    b.\n", 6));
+        assert!(got.iter().any(|l| l == "decode") && got.iter().any(|l| l == "slice"), "{got:?}");
+        // Anywhere, `Result`, `Ok`, `Err`, `Unit` and `Bytes` are offered.
+        let got = labels(at(SRC, "    \n", 4));
+        for name in ["Result", "Ok", "Err", "Unit", "Bytes"] {
+            assert!(got.iter().any(|l| l == name), "{name} missing from {got:?}");
+        }
+    }
 
     #[test]
     fn interfaces_hover_complete_and_outline() {

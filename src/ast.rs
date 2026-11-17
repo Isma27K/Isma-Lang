@@ -316,6 +316,8 @@ pub enum ExprKind {
     Null,
     /// `x!!`
     NotNull(Box<Expr>),
+    /// `x?`: the value of a `Result` (or of a `T?`), or else return its error (or `null`).
+    Try(Box<Expr>),
     /// `a ?: b`
     Elvis(Box<Expr>, Box<Expr>),
     /// `return`, `break` or `continue` on the right of `?:`.

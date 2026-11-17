@@ -1,0 +1,5 @@
+# expect-panic: env.set(): `A=B` can't be a variable name
+import env
+
+fn main():
+    env.set("A=B", "x")

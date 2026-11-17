@@ -1,0 +1,84 @@
+# Signals: how the system, or you with `Ctrl-C` or `kill`, asks a running
+# program to stop, to reload, and so on.
+#
+#     import signal
+#     from signal import Signal
+#
+#     signal.catch(Signal.Interrupt)
+#     signal.catch(Signal.Terminate)
+#     while signal.received() == null:
+#         do_some_work()
+#     print("stopping cleanly")
+#
+# A signal you haven't caught does what it always does: most stop the program
+# at once. A caught one is only recorded, and you ask for it with `received()`
+# or `wait()`. Until you do, calls that wait (`time.sleep_ms`, a socket's
+# `accept` or `read`) return at once instead of waiting, so the program
+# notices it soon.
+
+# The signals a program can catch.
+enum Signal:
+    # `Ctrl-C` in a terminal (SIGINT).
+    Interrupt
+    # A polite "please stop", from `kill` or a service manager (SIGTERM).
+    Terminate
+    # The terminal went away (SIGHUP). Programs that run in the background often take it as "reload your settings".
+    Hangup
+    # Yours to give a meaning (SIGUSR1).
+    User1
+    # Yours to give a meaning (SIGUSR2).
+    User2
+    # `Ctrl-\` in a terminal (SIGQUIT).
+    Quit
+
+# From now on, `s` doesn't stop the program: it's recorded, for `received()` and `wait()`.
+fn catch(s: Signal):
+    __signal_catch(_number(s))
+
+# Back to what `s` does by default (usually: stop the program). Forgets it if it was pending.
+fn reset(s: Signal):
+    __signal_reset(_number(s))
+
+# A caught signal that arrived and hasn't been received yet, or `null`. Doesn't wait.
+fn received() -> Signal?:
+    return _signal(__signal_next())
+
+# Wait until a caught signal arrives, and return it. Panics if no signal is caught (it would wait forever).
+fn wait() -> Signal:
+    return _signal(__signal_wait()) ?: panic("signal.wait() with no signal caught would wait forever: call signal.catch(...) first")
+
+# Send `s` to this program, as if it came from outside.
+fn send(s: Signal):
+    __signal_send(_number(s))
+
+fn _number(s: Signal) -> Int:
+    match s:
+        case Interrupt:
+            return 0
+        case Terminate:
+            return 1
+        case Hangup:
+            return 2
+        case User1:
+            return 3
+        case User2:
+            return 4
+        case Quit:
+            return 5
+
+fn _signal(n: Int) -> Signal?:
+    match n:
+        case 0:
+            return Signal.Interrupt
+        case 1:
+            return Signal.Terminate
+        case 2:
+            return Signal.Hangup
+        case 3:
+            return Signal.User1
+        case 4:
+            return Signal.User2
+        case 5:
+            return Signal.Quit
+        case _:
+            return null

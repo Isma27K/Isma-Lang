@@ -1,0 +1,6 @@
+# expect-error: `?` passes an error on to the caller, but `main` doesn't return a `Result`
+fn parse(s: String) -> Result[Int, String]:
+    return Ok(1)
+
+fn main():
+    print(parse("1")?)

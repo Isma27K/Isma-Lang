@@ -28,13 +28,18 @@ fn short(name: &str) -> &str {
 /// The whole reference.
 pub fn reference() -> Value {
     let names: Vec<&str> = crate::stdlib::MODULES.iter().map(|m| m.name).collect();
-    let probe: String = names.iter().map(|m| format!("import {m}\n")).collect();
+    let probe: String = crate::stdlib::importable().map(|m| format!("import {}\n", m.name)).collect();
     let a = crate::analyze(&probe);
     let info = &a.ide;
 
     let mut modules = Vec::new();
     for name in &names {
-        let Some(ns) = info.imported_module(name) else { continue };
+        // The prelude is in every program without an import.
+        let ns = match *name {
+            crate::stdlib::PRELUDE => info.modules.iter().find(|m| m.name == *name).map(|m| m.ns),
+            _ => info.imported_module(name),
+        };
+        let Some(ns) = ns else { continue };
         let doc = info.modules.iter().find(|m| m.ns == ns).and_then(|m| m.doc.clone());
         let members = info.module_members(ns);
         let of = |k: MemberKind| members.iter().filter(|m| m.kind == k).map(member).collect::<Vec<_>>();
@@ -85,6 +90,7 @@ pub fn reference() -> Value {
         ("Float", "Float", Type::Float, false),
         ("Bool", "Bool", Type::Bool, false),
         ("String", "String", Type::Str, false),
+        ("Bytes", "Bytes", Type::Bytes, false),
         ("List", "List[T]", Type::List(Box::new(Type::Param(0))), false),
         ("Map", "Map[K, V]", Type::Map(Box::new(Type::Param(0)), Box::new(Type::Param(1))), true),
     ]

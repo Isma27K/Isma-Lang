@@ -1,0 +1,64 @@
+# `fn drop(self)` runs when the last reference to a value goes away. A
+# variable holding one keeps it until the end of its block (or a `return`,
+# `break` or `continue` that leaves the block); a value not held in a
+# variable goes after its last use.
+struct Resource:
+    name: String
+    log: List[String]
+
+    fn drop(self):
+        self.log.push(f"closed {self.name}")
+
+struct Holder:
+    r: Resource
+
+fn open(name: String, log: List[String]) -> Resource:
+    return Resource(name, log)
+
+fn use_it(r: Resource) -> Int:
+    return r.name.len()
+
+fn early(log: List[String], leave: Bool) -> Int:
+    val g = open("guard", log)
+    if leave:
+        log.push("returning early")
+        return 1
+    log.push("returning late")
+    return 2
+
+fn scenario(log: List[String]):
+    val a = open("a", log)
+    log.push(f"opened {a.name}")
+    if true:
+        val b = open("b", log)
+        log.push(f"using {b.name}")
+        log.push("end of the block")
+    var c = open("c", log)
+    c = open("c2", log)
+    log.push("replaced c")
+    val _held = Holder(open("held", log))
+    val rs = [open("x", log), open("y", log)]
+    rs.pop()
+    log.push(f"popped, {rs.len()} left")
+    log.push(f"{use_it(open("temp", log))}")
+    for i in 0..3:
+        val l = open(f"loop {i}", log)
+        if i == 1:
+            continue
+        if i == 2:
+            break
+        log.push(f"body {i}")
+    log.push(f"{early(log, true)} {early(log, false)}")
+    val r: Result[Resource, String] = Ok(open("matched", log))
+    match r:
+        case Ok(m):
+            log.push("in the case")
+        case Err(e):
+            log.push(e)
+    log.push("end of scenario")
+
+fn main():
+    val log: List[String] = []
+    scenario(log)
+    for line in log:
+        print(line)

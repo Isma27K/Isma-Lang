@@ -1,0 +1,28 @@
+47
+b"GET /index.html HTTP/1.1\r\nHost: example.com\r\n\r\n"
+GET /index.html HTTP/1.1
+Host: example.com
+71
+b"h\xc3\xa9llo\x00\xff\n"
+68c3a96c6c6f00ff0a
+9 bytes
+null
+[104, 195, 169, 108, 108, 111, 0, 255, 10]
+1060
+0: 65
+1: 66
+true
+true
+true
+true
+true
+3
+45
+null
+a+b+c
+pad
+b"x" and b"h\xc3"
+true
+€
+f�o
+[b"a", b"\t"]

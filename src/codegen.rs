@@ -109,6 +109,13 @@ pub fn generate(prog: &Program, sources: &SourceMap, target_triple: Option<&str>
     out.push_str(&g.globals);
     out.push('\n');
     out.push_str(RUNTIME_DECLS);
+    for (name, params, ret, loc) in crate::stdlib::RT {
+        let mut ps: Vec<&str> = params.iter().map(|p| rt_llty(p)).collect();
+        if *loc {
+            ps.extend(["ptr", "i32", "i32"]);
+        }
+        let _ = writeln!(out, "declare {} @tarn_rt_{name}({}) #0", rt_llty(ret), ps.join(", "));
+    }
     out.push('\n');
     out.push_str(&funcs);
     out.push_str("attributes #0 = { nounwind }\n");
@@ -153,6 +160,9 @@ declare ptr @tarn_args() #0
 declare i64 @tarn_str_to_int(ptr, ptr, i32, i32) #0
 declare double @tarn_str_to_float(ptr, ptr, i32, i32) #0
 declare ptr @tarn_str_chars(ptr) #0
+declare void @tarn_drop_kept() #1
+declare ptr @tarn_str_char_at(ptr, i64) #0
+declare i64 @tarn_str_char_count(ptr) #0
 declare i64 @tarn_str_parse_int(ptr, ptr) #0
 declare i64 @tarn_str_parse_float(ptr, ptr) #0
 declare ptr @tarn_str_substring(ptr, i64, i64, ptr, i32, i32) #0
@@ -256,7 +266,7 @@ fn llty(t: &Type) -> &'static str {
         Type::Int => "i64",
         Type::Float => "double",
         Type::Bool => "i1",
-        Type::Str | Type::List(_) | Type::Map(..) | Type::Struct(_) | Type::Enum(_, true) | Type::Func(..) | Type::Iface(_) => "ptr",
+        Type::Str | Type::Bytes | Type::List(_) | Type::Map(..) | Type::Struct(_) | Type::Enum(_, true) | Type::Func(..) | Type::Iface(_) => "ptr",
         // An enum without data is just the number of its variant.
         Type::Enum(_, false) => "i64",
         Type::Unit => "void",
@@ -269,6 +279,19 @@ fn llty(t: &Type) -> &'static str {
             _ => "ptr",
         },
         Type::Error | Type::Null | Type::Param(_) => unreachable!("{t:?} reached codegen"),
+    }
+}
+
+/// The C type of a runtime function's parameter or result (`stdlib::RT`):
+/// as `llty`, but a `Bool` crosses as an `i64`.
+fn rt_llty(t: &str) -> &'static str {
+    match crate::stdlib::parse_type(t) {
+        Type::Bool => "i64",
+        Type::Unit => "void",
+        t => {
+            assert!(!is_pair(&t), "runtime functions can't return a nullable primitive");
+            llty(&t)
+        }
     }
 }
 
@@ -298,6 +321,7 @@ fn list_elem(t: &Type) -> Type {
 fn mangle(t: &Type) -> String {
     match t {
         Type::Str => "str".into(),
+        Type::Bytes => "bytes".into(),
         Type::List(e) => format!("list.{}", mangle(e)),
         Type::Map(k, v) => format!("map.{}.{}", mangle(k), mangle(v)),
         Type::Struct(id) => format!("s{id}"),
@@ -683,6 +707,7 @@ impl<'a> Codegen<'a> {
                 let rel = self.release_fn(&ty);
                 self.emit(format!("call void {rel}(ptr {p})"));
             }
+            Stmt::KeepAlive(_) => {}
             Stmt::DropReuse(v, tok) => {
                 // Last reference: release the fields and keep the memory as the
                 // token. Otherwise just decrement, and the token is null.
@@ -843,7 +868,7 @@ impl<'a> Codegen<'a> {
     /// What frees a value of type `t` once its count reaches zero.
     fn drop_fn(&mut self, t: &Type) -> String {
         match t {
-            Type::Str => "@tarn_str_free".into(),
+            Type::Str | Type::Bytes => "@tarn_str_free".into(),
             Type::List(e) if !is_ref(e) => "@tarn_list_free".into(),
             Type::Map(k, v) if !is_ref(k) && !is_ref(v) => "@tarn_map_free".into(),
             _ => format!("@tarn.drop.{}", mangle(t)),
@@ -1033,9 +1058,18 @@ impl<'a> Codegen<'a> {
                     // `fields` releases what the struct points to (also used when its
                     // memory is reused); `drop` then frees the struct itself.
                     let _ = writeln!(out, "define internal void @tarn.fields.{m}(ptr %p) #0 {{\n{body}  ret void\n}}\n");
+                    // `fn drop(self)` runs first, on the value brought back to one
+                    // reference; if it kept another one somewhere, that's a bug.
+                    let user_drop = match s.drop {
+                        Some(fid) => format!(
+                            "  store i64 1, ptr %p\n  call void @{}(ptr %p)\n  %rc = load i64, ptr %p\n  %is.kept = icmp ne i64 %rc, 1\n  br i1 %is.kept, label %kept, label %free\nkept:\n  call void @tarn_drop_kept()\n  unreachable\nfree:\n",
+                            self.prog.funcs[fid].symbol
+                        ),
+                        None => String::new(),
+                    };
                     let _ = writeln!(
                         out,
-                        "define internal void @tarn.drop.{m}(ptr %p) #0 {{\n  call void @tarn.fields.{m}(ptr %p)\n  %szp = getelementptr %struct.{sname}, ptr null, i32 1\n  %sz = ptrtoint ptr %szp to i64\n  call void @tarn_free(ptr %p, i64 %sz)\n  ret void\n}}\n"
+                        "define internal void @tarn.drop.{m}(ptr %p) #0 {{\n{user_drop}  call void @tarn.fields.{m}(ptr %p)\n  %szp = getelementptr %struct.{sname}, ptr null, i32 1\n  %sz = ptrtoint ptr %szp to i64\n  call void @tarn_free(ptr %p, i64 %sz)\n  ret void\n}}\n"
                     );
                 }
                 Type::Enum(sid, true) => {
@@ -1174,7 +1208,7 @@ impl<'a> Codegen<'a> {
                 let cc = if op == BinOp::Eq { "eq" } else { "ne" };
                 self.emit(format!("{r} = icmp {cc} i64 {a}, {b}"));
             }
-            Type::Str => match op {
+            Type::Str | Type::Bytes => match op {
                 BinOp::Add => self.emit(format!("{r} = call ptr @tarn_str_concat(ptr {a}, ptr {b})")),
                 BinOp::Eq | BinOp::Ne => {
                     let eq = self.fresh();
@@ -1447,7 +1481,38 @@ impl<'a> Codegen<'a> {
             Builtin::FloatToInt => self.emit(format!("{r} = call i64 @llvm.fptosi.sat.i64.f64(double {})", vals[0])),
             Builtin::StrToInt => self.emit(format!("{r} = call i64 @tarn_str_to_int(ptr {}, {loc})", vals[0])),
             Builtin::StrToFloat => self.emit(format!("{r} = call double @tarn_str_to_float(ptr {}, {loc})", vals[0])),
+            Builtin::Rt(i) => {
+                let (name, params, ret, takes_loc) = crate::stdlib::RT[i as usize];
+                let mut args = Vec::new();
+                for (p, v) in params.iter().zip(&vals) {
+                    if crate::stdlib::parse_type(p) == Type::Bool {
+                        let w = self.fresh();
+                        self.emit(format!("{w} = zext i1 {v} to i64"));
+                        args.push(format!("i64 {w}"));
+                    } else {
+                        args.push(format!("{} {v}", rt_llty(p)));
+                    }
+                }
+                if takes_loc {
+                    args.push(loc.clone());
+                }
+                let call = format!("@tarn_rt_{name}({})", args.join(", "));
+                match crate::stdlib::parse_type(ret) {
+                    Type::Unit => {
+                        self.emit(format!("call void {call}"));
+                        return String::new();
+                    }
+                    Type::Bool => {
+                        let w = self.fresh();
+                        self.emit(format!("{w} = call i64 {call}"));
+                        self.emit(format!("{r} = icmp ne i64 {w}, 0"));
+                    }
+                    _ => self.emit(format!("{r} = call {} {call}", rt_llty(ret))),
+                }
+            }
             Builtin::StrChars => self.emit(format!("{r} = call ptr @tarn_str_chars(ptr {})", vals[0])),
+            Builtin::StrCharAt => self.emit(format!("{r} = call ptr @tarn_str_char_at(ptr {}, i64 {})", vals[0], vals[1])),
+            Builtin::StrCharCount => self.emit(format!("{r} = call i64 @tarn_str_char_count(ptr {})", vals[0])),
             Builtin::StrSubstring => {
                 self.emit(format!("{r} = call ptr @tarn_str_substring(ptr {}, i64 {}, i64 {}, {loc})", vals[0], vals[1], vals[2]))
             }
