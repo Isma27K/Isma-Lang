@@ -342,10 +342,17 @@ These are the best of 3 runs on an AMD Ryzen 5 5500. Reproduce them with `./benc
 - [x] `Map[K, V]` with `{k: v}` literals, `in`, constants (`val pi = ...`), the `math` and `fs` modules, and string and list utilities (`split`, `join`, `trim`, `replace`, `sort`...)
 - [x] First-class functions and lambdas: `xs.map(fn(x) -> x * 2)`, `sort_by`, closures, function types
 - [x] Interfaces: `interface Shape:`, bounds (`fn total[T: Shape]`) and interface values (`List[Shape]`)
-- [ ] Tuples and sets
-- [ ] `match` as an expression, lambdas that capture `var`s, strings by character, `xs[-1]`, static methods, default field values
-- [ ] Generic interfaces, default methods, and `match` on the type inside an interface value
-- [ ] Recoverable errors (`Result` and `?`), calling C directly, a bridge to Python's libraries, a package manager, concurrency
+
+**Main priority: a REST API framework written in Tarn.** These are what the language needs first, in order. The website's *Project → The REST framework* page explains why each one is needed.
+
+- [ ] **1. First response:** recoverable errors (`Result` and `?`), `Bytes`, sockets (`net`), environment variables and signals, strings by character with a builder and percent-encoding
+- [ ] **2. A JSON API:** a `json` module, static methods, default field values, generic interfaces and default methods, `match` on the type inside an interface value, `match` as an expression, closures that capture `var`s and methods as values, tuples
+- [ ] **3. Many connections:** lightweight tasks on an event loop across every core, shared state that is safe across threads, a panic ending only its own request
+- [ ] **4. Typed routes:** compile-time reflection (`struct User(Json):`) and attributes (`@get("/users/{id}")`), with routes checked by the compiler
+- [ ] **5. Production:** calling C directly (TLS, databases, zlib), crypto and encoding, a `log` module, `tarn test`, a package manager, streaming
+- [ ] **The framework itself:** routing, middleware, JSON bodies, typed parameters
+
+Later, after the framework: sets, `xs[-1]`, operators that use the right operand's type, `sort()` for `<=>` types, interface values without a box, a bridge to Python's libraries, a `random` module, Windows support.
 
 <a id="development"></a>
 ## Development
