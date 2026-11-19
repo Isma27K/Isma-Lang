@@ -1,0 +1,9 @@
+closed inner
+released count: 3
+closed outer
+work failed: index 5 out of bounds for list of length 2 (at line 21)
+using log
+closed log
+true
+main still here
+released words: ["x", "y"]

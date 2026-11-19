@@ -1,0 +1,44 @@
+# A panic in a task unwinds it: everything its functions held is released
+# and their `fn drop`s run, innermost first. Other tasks go on.
+
+struct Resource:
+    name: String
+
+    fn drop(self):
+        print(f"closed {self.name}")
+
+struct Guard[T]:
+    label: String
+    value: T
+
+    fn drop(self):
+        print(f"released {self.label}: {self.value}")
+
+fn deep(n: Int, items: List[String]) -> Int:
+    val local = f"level {n}"
+    if n == 0:
+        val r = Resource("inner")
+        return [1, 2][n + 5]
+    return deep(n - 1, items) + local.len()
+
+fn work() -> Int:
+    val r = Resource("outer")
+    val g = Guard("count", 3)
+    val names = ["a", "b"].map(fn(s) -> s.upper())
+    return deep(3, names)
+
+fn main():
+    val t = spawn(work)
+    match t.join():
+        case Ok(n): print(n)
+        case Err(p): print(f"work failed: {p.message} (at line {p.location.split(":")[1]})")
+
+    # A Resource given to a task is moved there; it closes when the task ends.
+    val file = Resource("log")
+    val user = spawn(fn() -> print(f"using {file.name}"))
+    user.join()!!
+
+    val inner = spawn(fn() -> [1, 2, 3].map(fn(x) -> 10 / (x - 2)))
+    print(inner.join().is_err())
+    val g = Guard("words", ["x", "y"])
+    print("main still here")

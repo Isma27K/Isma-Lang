@@ -19,13 +19,14 @@ mod lambdas;
 mod list_fns;
 mod maps;
 mod iters;
+mod tasks;
 mod tuples;
 use consts::*;
 use generics::*;
 use ifaces::*;
 use lambdas::*;
 
-const BUILTINS: &[&str] = &["print", "input", "args", "panic", "assert", "sqrt", "exit", "hash"];
+const BUILTINS: &[&str] = &["print", "input", "args", "panic", "assert", "sqrt", "exit", "hash", "spawn"];
 /// The most elements a tuple can have (the prelude's `Tuple2` to `Tuple6`).
 const MAX_TUPLE: usize = 6;
 const RESERVED_TYPES: &[&str] = &["Int", "Float", "Bool", "String", "Bytes", "List", "Map", "Unit"];
@@ -281,6 +282,9 @@ pub struct Checker {
     methods: HashMap<(StructId, String), FuncId>,
     /// Static methods (no `self`): `App.new()`.
     statics: HashMap<(StructId, String), FuncId>,
+    /// Type parameters of the function being called that may stand for
+    /// "nothing" (see `unit_params`).
+    unit_ok: Vec<ParamId>,
     /// While declaring an interface's default method: its hidden `Self`.
     declaring_default: Option<ParamId>,
     /// Default methods of interfaces (their declarations).
@@ -427,6 +431,7 @@ pub fn analyze(files: &[SourceFile]) -> Analysis {
         defaults: HashMap::new(),
         tuples: vec![None; MAX_TUPLE + 1],
         declaring_default: None,
+        unit_ok: Vec::new(),
         default_decls: HashSet::new(),
         declared_ifaces: HashMap::new(),
         extra_default_ifaces: Vec::new(),
@@ -1606,8 +1611,6 @@ impl Checker {
         let short = short_name(&tname).to_string();
         let problem = if self.structs[sid].variants.is_some() {
             Some(("only structs can have `fn drop`".to_string(), format!("move what `{short}` owns into a struct with `fn drop`, and put that in the enum")))
-        } else if !self.struct_params[sid].is_empty() {
-            Some(("a generic struct can't have `fn drop` yet".to_string(), "move what needs cleaning up into a struct without type parameters".to_string()))
         } else if !m.params.is_empty() || self.funcs[fid].ret != Type::Unit || !m.type_params.is_empty() {
             Some(("`fn drop` takes only `self` and returns nothing".to_string(), "write it as `fn drop(self):`".to_string()))
         } else {
@@ -1615,7 +1618,14 @@ impl Checker {
         };
         match problem {
             Some((msg, help)) => self.err(Diagnostic::error(msg, m.sig_span).with_help(help)),
-            None => self.structs[sid].drop = Some(fid),
+            None => {
+                self.structs[sid].drop = Some(fid);
+                // A generic struct's instances made so far get theirs.
+                let instances: Vec<StructId> = (0..self.structs.len()).filter(|&i| i != sid && self.struct_origin[i] == sid).collect();
+                for i in instances {
+                    self.instance_drop(i);
+                }
+            }
         }
     }
 
@@ -1979,6 +1989,10 @@ impl Checker {
             let elems: Vec<Type> = t.args.iter().map(|a| self.resolve_type(a)).collect();
             return self.tuple_type(elems, t.span);
         }
+        // The standard library's handle on a task, channel or mutex.
+        if name == "__Handle" && t.module.is_none() && self.ns_kinds[self.ns] == FileKind::Std {
+            return Type::Handle;
+        }
         if let Some(m) = &t.module {
             return self.resolve_module_type(m, t);
         }
@@ -2158,10 +2172,10 @@ impl Checker {
             body,
             exported: sig.symbol == "tarn_main",
             // (`drop` runs when a value is freed, not where it's called from.)
-            track_caller: self.ns_kinds[self.ns] == FileKind::Std && !owner.is_some_and(|s| self.structs[s].drop == Some(fid)),
+            track_caller: self.ns_kinds[self.ns] == FileKind::Std && !self.is_drop_fn(owner, fid),
             generic,
             closure: false,
-            is_drop: owner.is_some_and(|s| self.structs[s].drop == Some(fid)),
+            is_drop: self.is_drop_fn(owner, fid),
         }
     }
 
@@ -3898,10 +3912,13 @@ impl Checker {
             Some(v) => {
                 if ret == Type::Unit {
                     let t = self.expr(v, None);
-                    self.err(
-                        Diagnostic::error("this function does not return a value", v.span)
-                            .with_help("declare a return type, e.g. `fn name() -> Int:`"),
-                    );
+                    // (`return f()` where `f` returns nothing is fine: generic code does it.)
+                    if t.ty != Type::Unit && !t.ty.is_error() {
+                        self.err(
+                            Diagnostic::error("this function does not return a value", v.span)
+                                .with_help("declare a return type, e.g. `fn name() -> Int:`"),
+                        );
+                    }
                     TStmt::Return(Some(t))
                 } else {
                     let t = self.expr(v, Some(&ret));
@@ -5151,6 +5168,9 @@ impl Checker {
                 {
                     return self.result_variant(rid, name, callee.span, args, explicit, expected, span);
                 }
+                if self.ns_kinds[self.ns] == FileKind::Std && crate::stdlib::SYNC_INTRINSICS.contains(&name.as_str()) {
+                    return self.sync_intrinsic(name, explicit, args, span);
+                }
                 if explicit.is_some() && (BUILTINS.contains(&name.as_str()) || self.ns_kinds[self.ns] == FileKind::Std && crate::stdlib::is_intrinsic(name)) {
                     let _ = self.infer_args(&format!("`{name}`"), &[], &[], &Type::Unit, args, explicit, None, span);
                     return Self::error_expr(span);
@@ -5284,6 +5304,11 @@ impl Checker {
             } else {
                 format!("it has private fields ({}), so only the `{module}` module can create one", and_list(&private))
             };
+            // A type that has a static `new` is built with it: `Mutex(value)` is `Mutex.new(value)`.
+            if let Some(&new) = self.statics.get(&(sid, "new".to_string())) {
+                let ident = Ident { name: "new".into(), span: name_span };
+                return self.static_call(sid, new, explicit, &ident, args, None, expected, span);
+            }
             let mut d = Diagnostic::error(format!("`{full}` cannot be constructed directly"), name_span).with_primary("not constructible here").with_note(note);
             if !ctor_fns.is_empty() {
                 d = d.with_help(format!("use {}", ctor_fns.join(", ")));
@@ -5497,6 +5522,9 @@ impl Checker {
     fn builtin_call(&mut self, name: &str, args: &[Arg], span: Span) -> TExpr {
         if name == "hash" {
             return self.hash_call(args, span);
+        }
+        if name == "spawn" {
+            return self.spawn_call(args, span);
         }
         let what = format!("`{name}`");
         let (n, param, ret, b) = match name {
@@ -6045,5 +6073,6 @@ fn expr_breaks(e: &TExpr) -> bool {
         TExprKind::Match(x, arms) => {
             expr_breaks(x) || arms.iter().any(|a| a.guard.as_ref().is_some_and(expr_breaks) || contains_break(&a.body) || a.value.as_ref().is_some_and(expr_breaks))
         }
+        TExprKind::Sync(_, _, args) => any(args),
     }
 }

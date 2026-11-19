@@ -1,0 +1,13 @@
+# expect-max-allocs: 10
+# Ints (and other plain values) go through a channel and a Mutex without
+# allocating: only the handles, the task and its closure do.
+fn main():
+    val ch: Channel[Int] = Channel.buffered(64)
+    val total = Mutex(0)
+    val sum = spawn(fn() -> ch.fold(0, fn(a, n) -> a + n))
+    for i in 0..10000:
+        ch.send(i)
+        total.update(fn(t) -> t + 1)
+    ch.close()
+    print(sum.join()!!)
+    print(total.get())

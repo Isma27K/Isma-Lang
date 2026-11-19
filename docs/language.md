@@ -25,6 +25,12 @@ Tarn reads like Python, checks like Kotlin and compiles to native code. This gui
 - [Recoverable errors](#recoverable-errors)
 - [Memory](#memory)
 - [Cleaning up: `fn drop`](#cleaning-up-fn-drop)
+- [Tasks](#tasks)
+  - [What a task gets](#what-a-task-gets)
+  - [Channels](#channels)
+  - [Mutex and Atomic](#mutex-and-atomic)
+  - [Panics in tasks](#panics-in-tasks)
+  - [How it runs](#how-it-runs)
 - [Modules: `import`](#modules-import)
   - [Your own files](#your-own-files)
   - [The standard library](#the-standard-library)
@@ -197,6 +203,7 @@ fn main():
 
 - **Parameter types come from where a lambda is used.** `apply` takes an `fn(Int) -> Int`, so `x` is an `Int`. Where nothing says, write them: `val f = fn(x: Int) -> x * 2`.
 - **One line, or a block.** A one-line lambda returns its expression. A longer one gets a block, with its return type if it returns something (`fn(x: Int) -> Int:`), and must end its line, as after `val f =`. Inside parentheses, use one-line lambdas, or define the function first.
+- **A one-line lambda can be an assignment,** and then returns nothing: `fn(m) -> m[key] = value`, `fn(p) -> p.visits += 1`.
 - **`val`s are copied, `var`s are shared.** A lambda keeps the `val`s, parameters and loop variables it uses as they are when it's created (each iteration of a loop captures its own). A `var` it captures is shared with the code around it: each sees what the other writes, even after the function that declared it returned (the variable lives in a small cell then). A `var` that a lambda assigns can't be smart-cast. Lists, maps and structs are shared as always.
 - **Methods are values too:** `users.add` remembers `users`; `User.describe` takes the `User` first; `App.new` is a static method. A generic method can't be a value yet.
 - **Named functions are values too**, including generic ones (`max[Int]`, or picked by the type expected: `val pick: fn(Int, Int) -> Int = max`) and module functions (`xs.map(math.sqrt)`).
@@ -1072,10 +1079,97 @@ struct TempFile:
 
 - **A variable keeps such a value until the end of its block** (or a `return`, `break` or `continue` that leaves it), like C++ and Rust, not just until its last use as with plain memory. Assigning a new value to a `var` drops the old one at once.
 - `self` is borrowed inside `drop`. A `drop` that keeps a reference to `self` panics.
-- Only non-generic structs can have one, it can't be called (write a `close()` for that), and the type can't be part of a reference cycle (the compiler checks).
-- `drop`s don't run when the program panics or calls `exit`.
+- Structs can have one, generic ones too (`struct Guard[T]:`), but enums can't. It can't be called (write a `close()` for that), and the type can't be part of a reference cycle (the compiler checks).
+- `drop`s run when a [task](#tasks) panics and unwinds, but not when the program panics or calls `exit`.
 
 The `net` module's sockets close themselves this way.
+
+## Tasks
+
+`spawn` runs a function alongside the code that started it, as a **task**. Tasks are light (a few microseconds to start, a stack that only takes memory as it grows), so a program can run thousands of them, and they run on every core. There's no `async`/`await`: a task that waits (for a socket, a channel, a lock, `time.sleep_ms`, another task) steps aside so others run, and code reads the same as code that never waits.
+
+```python
+fn fib(n: Int) -> Int:
+    if n < 2:
+        return n
+    return fib(n - 1) + fib(n - 2)
+
+fn main():
+    val tasks = [25, 27, 30].map(fn(n) -> spawn(fn() -> fib(n)))
+    for t in tasks:
+        print(t.join()!!)            # 75025, 196418, 832040
+```
+
+- `spawn(f)` takes a function without parameters and gives a `Task[T]`, where `T` is what `f` returns (`Unit` when it returns nothing).
+- `t.join()` waits for the task and gives a `Result[T, Panic]`: `Ok` with what it returned, or `Err` with the [panic](#panics-in-tasks) that stopped it. A task's result is given once: a second `join()` panics. `t.is_done()` asks without waiting.
+- The program ends when `main` and every task it started have finished, joined or not. `exit(code)` still ends it at once.
+
+### What a task gets
+
+**Tasks share no variables.** What a task's function uses is given to the task: *moved* if nothing else uses it any more, or *copied* (deeply, keeping shared parts shared) if the code that started it still does. Either way, the two tasks never see each other's changes, so there's nothing to race on:
+
+```python
+val xs = [1, 2, 3]
+val t = spawn(fn() -> xs.len())   # a copy: `xs` is used below
+xs.push(4)                        # doesn't affect the task's copy
+```
+
+So a function given to `spawn` can't use a `var` from around it (the compiler says so). To share state between tasks, use a [`Mutex`](#mutex-and-atomic) or an `Atomic`, or send values through a [channel](#channels); those are the only values tasks share. A value with a [`fn drop`](#cleaning-up-fn-drop) (a socket, say) can be moved to a task, but not copied: give it away on its last use.
+
+### Channels
+
+A `Channel[T]` carries values from some tasks to others, in order:
+
+```python
+val jobs: Channel[Int] = Channel.buffered(100)
+val worker = spawn(fn() -> jobs.map(fn(n) -> n * n).fold(0, fn(a, n) -> a + n))
+for n in 1..=10:
+    jobs.send(n)
+jobs.close()
+print(worker.join()!!)                # 385
+```
+
+- `Channel[T]()` is unbuffered: each `send` waits until a `receive` takes the value. `Channel.buffered(n)` holds up to `n` values before `send` waits.
+- `receive()` waits for the next value and gives `T?`: `null` once the channel is closed and empty. A channel is an [iterator](#iterators), so `for job in jobs:` and `map`, `filter`, `fold`... take values until it's closed.
+- `close()` says no more values are coming; `send` on a closed channel panics. Also `is_closed()` and `len()` (values waiting).
+- A value sent is moved, or copied if the sender still uses it, like what a task gets.
+
+### Mutex and Atomic
+
+A `Mutex[T]` holds a value that tasks change one at a time. A task holds the Mutex while a function runs on its value:
+
+```python
+val hits: Mutex[Map[String, Int]] = Mutex({})
+hits.lock(fn(m) -> m["home"] = m.get("home", 0) + 1)
+print(hits.lock(fn(m) -> m.len()))    # 1
+```
+
+- `lock(f)` runs `f` on the value while holding it, and gives what `f` returns (moved or copied out, so no task keeps a hold on the value after `lock`). Other tasks that want it wait their turn, first come first served.
+- `update(f)` replaces the value with what `f` makes of it: `counter.update(fn(n) -> n + 1)`. `get()` gives a copy, `set(v)` replaces it.
+- Locking a Mutex again inside its own `lock` would wait forever, so it panics instead. The function given to `lock` or `update` can't use a `var` from around it.
+
+An `Atomic` is an `Int` that tasks read and change at once, without a lock: `get()`, `set(v)`, `add(n)` (gives the new value), `swap(v)` (gives the old one) and `compare_and_set(expected, v)`.
+
+### Panics in tasks
+
+A panic stops only its own task. The task **unwinds**: every function on its stack releases what it holds and runs its values' `fn drop`s, innermost first, and any Mutex it held is let go. `join()` then gives `Err(Panic)`, with the `message` and the `location` (`app.tr:12:9`):
+
+```python
+val t = spawn(fn() -> [1, 2, 3][9])
+match t.join():
+    case Ok(v): print(v)
+    case Err(p): print(f"failed: {p}")   # failed: index 9 out of bounds for list of length 3 (at app.tr:1:23)
+```
+
+The panic's message is also printed (`panic in task 2 at app.tr:1:23: ...`). A panic in `main` still ends the program, with exit code 101, as does a panic inside a `fn drop`.
+
+### How it runs
+
+- One worker thread per core (`TARN_THREADS=n` to choose), each with a queue of tasks; idle workers take tasks from busy ones. `main` stays on the thread it started on. Waiting on sockets and timers goes through the operating system's event queue (epoll on Linux, kqueue on macOS).
+- A task runs until it waits. Scheduling is cooperative: a task that computes for a long time without waiting keeps its core (the others go on). `fs` calls wait on their thread.
+- Each task has 1 MiB of stack (`TARN_TASK_STACK=bytes` for more). Recursing deeper stops the program with `stack overflow in task N`.
+- If every task is waiting and nothing can wake any of them, the program stops with `deadlock: every task is waiting...` (exit code 101).
+- Starting and joining a task takes about 3 µs; a value through a channel about 100 ns; a `Mutex.update` nobody else wants about 25 ns. A program that never calls `spawn` runs exactly as before: no threads, and none of this costs anything.
 
 ## Modules: `import`
 
@@ -1168,6 +1262,7 @@ Available modules:
 | `panic(msg: String)` | Stop the program with a message |
 | `exit(code: Int)` | Exit the process |
 | `hash(a, b, ...) -> Int` | A hash of the values, mixed into one `Int` (for [`fn hash`](#maps)). Works on numbers, `Bool`, `String`, enums, nullable values, and types with `fn hash(self) -> Int` |
+| `spawn(f: fn() -> T) -> Task[T]` | Start a [task](#tasks) running `f` |
 
 ## Panics
 
@@ -1182,15 +1277,20 @@ Panics cover:
 - out-of-bounds indexing, `pop()` on an empty list, `insert`/`remove_at` out of range;
 - `m[k]` with a key that isn't in the map, and adding or removing keys while looping over the map;
 - a failed `assert`, a failed parse (`"abc".to_int()`), and `panic(...)`;
-- `x!!` when `x` is null.
+- `x!!` when `x` is null;
+- `join()` twice on a task, `send` on a closed channel, locking a `Mutex` inside its own `lock`.
+
+A panic in a [task](#panics-in-tasks) stops only that task.
 
 ## Known limitations
 
 - **No packages to install.** Modules come from your own folders and the standard library; there is no package manager or search path.
 - **No global variables.** Top-level `val`s are [constants](#constants) (numbers, `Bool`s and `String`s); everything that changes lives in functions.
 - **Byte-based strings.** `String.len()` and `substring()` count bytes, and there's no `s[i]` indexing; use `for c in s`, `char_count()` or `chars()`.
-- **One thing at a time.** A `net` call waits until it's done and there's no concurrency yet, so a server handles one connection at a time. No TLS yet.
-- **`fn drop` only on structs,** not generic ones, and not on types that can be part of a reference cycle.
+- **No TLS yet.**
+- **Cooperative tasks.** A task that computes without waiting keeps its core until it waits or ends; `fs` calls hold their thread while they wait.
+- **A value that reaches its own `Mutex` or `Channel` isn't freed.** The cycle collector doesn't look through them (`struct Node:` whose `Mutex[List[Node]]` holds the node itself).
+- **`fn drop` only on structs,** not enums, and not on types that can be part of a reference cycle. A value with a `fn drop` can be moved to another task but not copied (it panics if the task that sends it still uses it).
 - **A `Result` is allocated,** like every enum whose variants carry data.
 - **`Bytes` can't be map keys.**
 - **No negative indexing.** `xs[-1]` panics.

@@ -60,7 +60,7 @@ fn main():
     print("stopping cleanly")
 ```
 
-While a caught signal waits to be received, calls that wait (`time.sleep_ms`, a socket's `accept`, `read` and `connect`) return at once, so a program blocked in one notices the signal right away.
+When a caught signal arrives, calls that wait (`time.sleep_ms`, a socket's `accept`, `read` and `connect`) return at once, in every [task](language.md#tasks) waiting in one, and so do new ones while the signal waits to be received. So a program blocked in one notices the signal right away.
 
 | | |
 |---|---|

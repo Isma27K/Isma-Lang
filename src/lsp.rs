@@ -346,6 +346,10 @@ impl Server {
                     ImportedSymbol::Struct(sid) if b == receiver => Some(*sid),
                     _ => None,
                 })
+            }).or_else(|| {
+                // The prelude's types are in every file: `Channel.`, `Result.`
+                let prelude = doc.ide.modules.iter().find(|m| m.name == crate::stdlib::PRELUDE)?.ns;
+                doc.ide.structs.iter().position(|s| s.ns == prelude && !s.instance && s.name.rsplit('.').next() == Some(receiver))
             }),
             Some((module, name)) => doc.ide.imported_module(module).and_then(|ns| {
                 doc.ide.structs.iter().position(|s| s.ns == ns && !s.instance && s.name.rsplit('.').next() == Some(name))
@@ -1367,5 +1371,26 @@ mod tests {
         let p = m.position(end_of_str);
         assert_eq!(p.character, 8 + 1 + 1 + 2); // `val s = "` + ü + 😀 (2 UTF-16 units)
         assert_eq!(m.offset(p), end_of_str);
+    }
+
+    const TASK_SRC: &str = "fn main():\n    val jobs: Channel[Int] = Channel.buffered(4)\n    val t = spawn(fn() -> jobs.receive())\n    val m = Mutex(0)\n    jobs.\n    t.\n    m.\n    Channel.\n    sp\n";
+
+    #[test]
+    fn tasks_complete_and_hover() {
+        let (s, uri) = server_with(TASK_SRC);
+        let labels = |needle: &str, delta: usize| -> Vec<String> { complete(&s, &uri, at(TASK_SRC, needle, delta)).into_iter().map(|i| i.label).collect() };
+        let has = |got: &[String], want: &[&str]| want.iter().all(|w| got.iter().any(|g| g == w));
+        let chan = labels("    jobs.\n", 9);
+        assert!(has(&chan, &["send", "receive", "close", "len", "map", "fold"]) && !chan.iter().any(|l| l == "_h" || l == "buffered"), "{chan:?}");
+        let task = labels("    t.\n", 6);
+        assert!(has(&task, &["join", "is_done"]), "{task:?}");
+        let mutex = labels("    m.\n", 6);
+        assert!(has(&mutex, &["lock", "update", "get", "set"]), "{mutex:?}");
+        let statics = labels("    Channel.\n", 12);
+        assert!(has(&statics, &["new", "buffered"]), "{statics:?}");
+        assert!(has(&labels("    sp\n", 6), &["spawn"]));
+        let h = s.hover(lt::HoverParams { text_document_position_params: tdp(&uri, at(TASK_SRC, "spawn(", 0)), work_done_progress_params: Default::default() });
+        let lt::HoverContents::Markup(m) = h.unwrap().contents else { panic!() };
+        assert!(m.value.contains("fn spawn[T](f: fn() -> T) -> Task[T]"), "{}", m.value);
     }
 }

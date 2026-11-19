@@ -1,0 +1,56 @@
+# Shared state: a Mutex holds a value tasks change one at a time; an Atomic
+# is an Int they can all change at once.
+
+struct User:
+    id: Int
+    name: String
+    var visits: Int
+
+fn main():
+    val users: Mutex[Map[Int, User]] = Mutex({})
+    val add_user = fn(i: Int):
+        val u = User(i, f"user{i}", 0)
+        users.lock(fn(m) -> m[u.id] = u)
+    val adders = [1, 2, 3, 4].map(fn(i) -> spawn(fn() -> add_user(i)))
+    for a in adders:
+        a.join()!!
+    users.lock(fn(m) -> m[2].visits += 5)
+    print(users.lock(fn(m) -> m.len()))
+    print(users.lock(fn(m) -> m[2].name))
+
+    # `get()` is a copy: changing it leaves the Mutex's value alone.
+    val copy = users.get()
+    copy[2].visits += 100
+    print(users.lock(fn(m) -> m[2].visits))
+    print(copy[2].visits)
+
+    # `update` replaces the value with what the function makes of it.
+    val total = Mutex(0)
+    val bump = fn():
+        for _ in 0..500:
+            total.update(fn(n) -> n + 1)
+    val bumpers = [0, 1, 2, 3].map(fn(_i) -> spawn(bump))
+    for b in bumpers:
+        b.join()!!
+    print(total.get())
+    total.set(7)
+    print(total.get())
+
+    val counter = Atomic(0)
+    val count = fn():
+        for _ in 0..1000:
+            counter.add(1)
+    val counters = [0, 1, 2, 3, 4, 5, 6, 7].map(fn(_i) -> spawn(count))
+    for c in counters:
+        c.join()!!
+    print(counter.get())
+    print(counter.swap(5))
+    print(counter.compare_and_set(5, 6))
+    print(counter.compare_and_set(5, 7))
+    print(counter.add(-6))
+
+    # A panic while holding a Mutex lets it go.
+    val names = Mutex(["a", "b"])
+    val bad = spawn(fn() -> names.lock(fn(xs) -> xs[10]))
+    print(bad.join().is_err())
+    print(names.lock(fn(xs) -> xs.len()))

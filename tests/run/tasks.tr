@@ -1,0 +1,52 @@
+# Tasks: `spawn` runs a function alongside the code that started it, on
+# another core when one is free; `join()` waits for its result. What a task
+# uses is moved to it, or copied if this code still uses it.
+
+struct Point:
+    x: Int
+    y: Int
+
+fn fib(n: Int) -> Int:
+    if n < 2:
+        return n
+    return fib(n - 1) + fib(n - 2)
+
+fn main():
+    val jobs = [20, 25, 27].map(fn(n) -> spawn(fn() -> fib(n)))
+    for t in jobs:
+        print(t.join()!!)
+
+    # A task that returns nothing gives `Unit`.
+    val hello = spawn(fn() -> print("hello from a task"))
+    print(hello.join())
+
+    # `xs` is still used here, so the task gets a copy: its changes stay there.
+    val xs = [1, 2, 3]
+    val grow = fn() -> List[Int]:
+        xs.push(99)
+        return xs
+    val t = spawn(grow)
+    print(t.join()!!)
+    xs.push(4)
+    print(xs)
+
+    # Structs, maps and optional values travel too.
+    val p = Point(3, 4)
+    val ages = {"ann": 31, "bob": 27}
+    val maybe: String? = null
+    val combo = spawn(fn() -> f"{p.x + p.y} {ages["bob"]} {maybe ?: "none"}")
+    print(combo.join()!!)
+
+    # A panic stops only its own task: `join()` gives it as an error.
+    val bad = spawn(fn() -> [1, 2][5])
+    match bad.join():
+        case Ok(v): print(v)
+        case Err(p): print(f"stopped: {p.message}")
+    print(bad.is_done())
+
+    # Tasks inside tasks.
+    val outer = spawn(fn() -> spawn(fn() -> 21 * 2).join()!!)
+    print(outer.join()!!)
+
+    # The program waits for tasks nobody joined.
+    spawn(fn() -> print("unjoined task ran"))

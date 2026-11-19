@@ -295,6 +295,34 @@ pub enum Builtin {
     Unwrap,
 }
 
+/// What the standard library's `Task`, `Channel` and `Mutex` do with the
+/// values they carry between tasks: each moves a value to another task, or
+/// copies it when this one still uses it (see `tarn.xfer.*` in codegen).
+/// The types are listed with each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncOp {
+    /// `[R](f: fn() -> R) -> handle`: start a task running `f`.
+    Spawn,
+    /// `[T](task) -> T`: the finished task's result.
+    TaskTake,
+    /// `[T](capacity) -> handle`
+    ChanNew,
+    /// `[T](channel, value)`
+    ChanSend,
+    /// `[T](channel) -> T?`: null once it's closed and empty.
+    ChanReceive,
+    /// `[T](value) -> handle`
+    MutexNew,
+    /// `[T, R](mutex, f: fn(T) -> R) -> R`: `f` runs on the value while it's held.
+    MutexLock,
+    /// `[T](mutex, f: fn(T) -> T)`: the value becomes what `f` makes of it.
+    MutexUpdate,
+    /// `[T](mutex) -> T`: a copy of the value.
+    MutexGet,
+    /// `[T](mutex, value)`
+    MutexSet,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MathFn {
     Sin,
@@ -440,6 +468,9 @@ pub enum TExprKind {
     /// `match` as a value: exhaustive like the statement; the value is the
     /// `value` of the case that runs.
     Match(Box<TExpr>, Vec<TArm>),
+    /// An operation of tasks, channels or mutexes (standard library only),
+    /// on values of the given types.
+    Sync(SyncOp, Vec<Type>, Vec<TExpr>),
 }
 
 impl TExpr {

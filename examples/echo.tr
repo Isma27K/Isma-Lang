@@ -1,5 +1,6 @@
-# A TCP echo server: whatever a client sends comes straight back.
-# It stops cleanly on Ctrl-C.
+# A TCP echo server: whatever a client sends comes straight back. Each
+# client gets a task of its own, so they're all served at once. It stops
+# cleanly on Ctrl-C.
 #
 #     tarn examples/echo.tr       # then, in another terminal:
 #     nc localhost 7000           # type a line, and get it back
@@ -17,6 +18,15 @@ fn serve(conn: net.Conn) -> Result[Int, net.Error]:
         conn.write(data)?
         total += data.len()
 
+# One client, from connecting to hanging up.
+fn client(conn: net.Conn):
+    val who = conn.peer_address()
+    match serve(conn):
+        case Ok(n):
+            print(f"{who}: echoed {n} bytes")
+        case Err(e):
+            print(f"{who}: {e}")
+
 fn main():
     signal.catch(Signal.Interrupt)
     signal.catch(Signal.Terminate)
@@ -25,12 +35,7 @@ fn main():
     while signal.received() == null:
         match server.accept():
             case Ok(conn):
-                val who = conn.peer_address()
-                match serve(conn):
-                    case Ok(n):
-                        print(f"{who}: echoed {n} bytes")
-                    case Err(e):
-                        print(f"{who}: {e}")
+                spawn(fn() -> client(conn))
             case Err(e):
                 if e.kind != net.ErrorKind.Interrupted:
                     print(f"accept failed: {e}")

@@ -1,0 +1,6 @@
+# expect-error: a function run while a `Mutex` is held can't share `last`, a `var`
+fn main():
+    var last = 0
+    val m = Mutex(5)
+    m.lock(fn(v) -> last = v)
+    print(last)

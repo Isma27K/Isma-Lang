@@ -125,6 +125,21 @@ pub const RT: &[(&str, &[&str], &str, bool)] = &[
     ("net_last_error", &[], "Int", false),
     ("net_error_kind", &["Int"], "Int", false),
     ("net_error_message", &["Int"], "String", false),
+    // tasks, channels, atomics (their handles: see `Type::Handle`)
+    ("task_wait", &["Handle"], "Bool", false),
+    ("task_is_done", &["Handle"], "Bool", false),
+    ("task_panic_message", &["Handle"], "String", false),
+    ("task_panic_location", &["Handle"], "String", false),
+    ("chan_close", &["Handle"], "Unit", false),
+    ("chan_is_closed", &["Handle"], "Bool", false),
+    ("chan_len", &["Handle"], "Int", false),
+    ("atomic_new", &["Int"], "Handle", false),
+    ("atomic_get", &["Handle"], "Int", false),
+    ("atomic_set", &["Handle", "Int"], "Unit", false),
+    ("atomic_add", &["Handle", "Int"], "Int", false),
+    ("atomic_swap", &["Handle", "Int"], "Int", false),
+    ("atomic_compare_and_set", &["Handle", "Int", "Int"], "Bool", false),
+    ("cpu_count", &[], "Int", false),
     // url
     ("url_encode", &["String", "String"], "String", false),
     ("url_decode", &["String", "Bool"], "String?", false),
@@ -142,7 +157,7 @@ pub fn rt_index(name: &str) -> Option<usize> {
 
 /// A standard-library module may call `name` (`__fs_read`, `__url_encode`...).
 pub fn is_intrinsic(name: &str) -> bool {
-    name == "__repr" || INTRINSICS.iter().any(|(n, _, _)| *n == name) || name.strip_prefix("__").is_some_and(|n| rt_index(n).is_some())
+    name == "__repr" || SYNC_INTRINSICS.contains(&name) || INTRINSICS.iter().any(|(n, _, _)| *n == name) || name.strip_prefix("__").is_some_and(|n| rt_index(n).is_some())
 }
 
 /// The type written `s` in the tables above.
@@ -161,9 +176,15 @@ pub fn parse_type(s: &str) -> crate::types::Type {
         "String" => Type::Str,
         "Bytes" => Type::Bytes,
         "Unit" => Type::Unit,
+        "Handle" => Type::Handle,
         _ => panic!("unknown type `{s}` in a runtime function table"),
     }
 }
+
+/// Intrinsics of tasks, channels and mutexes that carry values of any type
+/// (`__chan_send(h, value)`, `__chan_receive[T](h)`): see `SyncOp`.
+pub const SYNC_INTRINSICS: &[&str] =
+    &["__task_take", "__chan_new", "__chan_send", "__chan_receive", "__mutex_new", "__mutex_lock", "__mutex_update", "__mutex_get", "__mutex_set"];
 
 /// Display path for a module in panic messages.
 pub fn display_path(name: &str) -> String {

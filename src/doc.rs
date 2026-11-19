@@ -64,7 +64,17 @@ pub fn reference() -> Value {
                     "kind": if s.iface { "interface" } else if s.variants.is_some() { "enum" } else { "struct" },
                     "doc": s.doc,
                     "variants": variants,
-                    "members": info.members(&ty).iter().map(member).collect::<Vec<_>>(),
+                    // Static functions first (`Channel.buffered(n)`), as `kind: "static"`.
+                    "members": info
+                        .static_members(sid)
+                        .iter()
+                        .map(|m| {
+                            let mut v = member(m);
+                            v["kind"] = json!("static");
+                            v
+                        })
+                        .chain(info.members(&ty).iter().map(member))
+                        .collect::<Vec<_>>(),
                 })
             })
             .collect();

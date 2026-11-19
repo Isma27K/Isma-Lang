@@ -64,6 +64,7 @@ impl<'a> Lower<'a> {
             generic: f.generic,
             closure: f.closure,
             is_drop: f.is_drop,
+            cleanups: Vec::new(),
         }
     }
 
@@ -147,6 +148,16 @@ impl<'a> Lower<'a> {
         let vars: Vec<VarId> = self.scopes[depth..].iter().rev().flat_map(|f| f.iter().rev().copied()).collect();
         for v in vars {
             self.push(Stmt::KeepAlive(v));
+        }
+    }
+
+    /// A value with a `fn drop` captured by a lambda (or sent to another
+    /// task) belongs to it from here on: its block stops keeping it alive.
+    fn give_away(&mut self, e: &TExpr) {
+        if let TExprKind::Local(id) = e.kind {
+            for frame in &mut self.scopes {
+                frame.retain(|v| *v != id);
+            }
         }
     }
 
@@ -1107,6 +1118,9 @@ impl<'a> Lower<'a> {
                 Rvalue::Use(Operand::Var(res))
             }
             TExprKind::Closure { func, sid, captures } => {
+                for c in captures {
+                    self.give_away(c);
+                }
                 let caps = self.operands(captures);
                 Rvalue::Closure(*func, *sid, caps)
             }
@@ -1127,6 +1141,14 @@ impl<'a> Lower<'a> {
             TExprKind::Block(stmts, value) => {
                 self.stmts(stmts);
                 self.rvalue(value)
+            }
+            TExprKind::Sync(op, types, args) => {
+                // (What goes into a channel or Mutex isn't this block's to keep any more.)
+                if matches!(op, tast::SyncOp::ChanSend | tast::SyncOp::MutexNew | tast::SyncOp::MutexSet) {
+                    self.give_away(args.last().expect("a value"));
+                }
+                let a = self.operands(args);
+                Rvalue::Sync(*op, types.clone(), a, e.span)
             }
             TExprKind::Match(scrutinee, arms) => {
                 if e.ty == Type::Unit {

@@ -1,8 +1,13 @@
 // Tarn runtime v0.3
 // Linked into every Tarn program. Kept deliberately small.
 
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
 #include <errno.h>
 #include <math.h>
+#include <pthread.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,12 +39,10 @@ extern void tarn_main(void);
 // ---------------------------------------------------------------- panics
 
 // Every panic carries the source file (the user's file or a standard
-// library module such as <std>/time.tr), line and column.
-static void tarn_die(const char *file, int line, int col, const char *msg) {
-    fflush(stdout);
-    fprintf(stderr, "panic at %s:%d:%d: %s\n", file, line, col, msg);
-    exit(101);
-}
+// library module such as <std>/time.tr), line and column. In `main` it ends
+// the program; in another task, just that task (see "panics in tasks").
+static void panic_task(const char *file, int line, int col, const char *msg, int64_t len);
+static void tarn_die(const char *file, int line, int col, const char *msg) { panic_task(file, line, col, msg, (int64_t)strlen(msg)); }
 
 // A `fn drop(self)` stored a reference to the value it was dropping, which
 // is about to be freed anyway.
@@ -49,11 +52,7 @@ void tarn_drop_kept(void) {
     exit(101);
 }
 
-void tarn_panic_msg(TarnStr *msg, const char *file, int line, int col) {
-    fflush(stdout);
-    fprintf(stderr, "panic at %s:%d:%d: %.*s\n", file, line, col, (int)msg->len, msg->data);
-    exit(101);
-}
+void tarn_panic_msg(TarnStr *msg, const char *file, int line, int col) { panic_task(file, line, col, msg->data, msg->len); }
 
 void tarn_panic_overflow(const char *file, int line, int col) { tarn_die(file, line, col, "integer overflow"); }
 void tarn_panic_divzero(const char *file, int line, int col) { tarn_die(file, line, col, "division by zero"); }
@@ -76,15 +75,43 @@ void tarn_exit(int64_t code) {
 // of 1 MiB chunks; larger ones use malloc. The compiler always knows an
 // object's size, so `tarn_free` is told it instead of storing it.
 // With -DTARN_SANITIZE every object is a plain malloc (so ASan can see it).
+//
+// Tasks run on several threads, so the free lists (and the counters) are
+// per thread. A block freed on another thread than the one that allocated
+// it just joins that thread's lists: blocks have no home thread.
 
 #define ARENA_CHUNK (1 << 20)
 #define SMALL_MAX 256
-static char *arena_ptr = NULL;
-static char *arena_end = NULL;
-static void *free_lists[SMALL_MAX / 16 + 1];
 
-static int64_t st_allocs, st_frees, st_live, st_live_bytes, st_peak_bytes;
-static int dropping;
+typedef struct ThreadState {
+    char *arena_ptr, *arena_end;
+    void *free_lists[SMALL_MAX / 16 + 1];
+    int64_t allocs, frees, live, live_bytes, peak_bytes, collections, cycle_frees;
+    struct ThreadState *next; // every thread's state, for the totals at exit
+} ThreadState;
+
+static ThreadState *all_thread_states;
+static pthread_mutex_t thread_states_lock = PTHREAD_MUTEX_INITIALIZER;
+static __thread ThreadState *tl_thread;
+
+static ThreadState *new_thread_state(void) {
+    ThreadState *t = calloc(1, sizeof *t);
+    if (!t) {
+        fputs("fatal: out of memory\n", stderr);
+        exit(134);
+    }
+    pthread_mutex_lock(&thread_states_lock);
+    t->next = all_thread_states;
+    all_thread_states = t;
+    pthread_mutex_unlock(&thread_states_lock);
+    return t;
+}
+
+static inline ThreadState *thread_state(void) {
+    ThreadState *t = tl_thread;
+    if (__builtin_expect(!t, 0)) t = tl_thread = new_thread_state();
+    return t;
+}
 
 static void *oom(void) {
     fputs("fatal: out of memory\n", stderr);
@@ -95,25 +122,26 @@ static int64_t round16(int64_t size) { return (size + 15) & ~(int64_t)15; }
 
 void *tarn_alloc(int64_t size) {
     size = round16(size);
-    st_allocs++;
-    st_live++;
-    st_live_bytes += size;
-    if (st_live_bytes > st_peak_bytes) st_peak_bytes = st_live_bytes;
+    ThreadState *t = thread_state();
+    t->allocs++;
+    t->live++;
+    t->live_bytes += size;
+    if (t->live_bytes > t->peak_bytes) t->peak_bytes = t->live_bytes;
 #ifndef TARN_SANITIZE
     if (size <= SMALL_MAX) {
-        void **list = &free_lists[size >> 4];
+        void **list = &t->free_lists[size >> 4];
         if (*list) {
             void *p = *list;
             *list = *(void **)p;
             return p;
         }
-        if (arena_end - arena_ptr < size) {
-            arena_ptr = malloc(ARENA_CHUNK);
-            if (!arena_ptr) oom();
-            arena_end = arena_ptr + ARENA_CHUNK;
+        if (t->arena_end - t->arena_ptr < size) {
+            t->arena_ptr = malloc(ARENA_CHUNK);
+            if (!t->arena_ptr) oom();
+            t->arena_end = t->arena_ptr + ARENA_CHUNK;
         }
-        void *p = arena_ptr;
-        arena_ptr += size;
+        void *p = t->arena_ptr;
+        t->arena_ptr += size;
         return p;
     }
 #endif
@@ -123,12 +151,13 @@ void *tarn_alloc(int64_t size) {
 
 void tarn_free(void *p, int64_t size) {
     size = round16(size);
-    st_frees++;
-    st_live--;
-    st_live_bytes -= size;
+    ThreadState *t = thread_state();
+    t->frees++;
+    t->live--;
+    t->live_bytes -= size;
 #ifndef TARN_SANITIZE
     if (size <= SMALL_MAX) {
-        void **list = &free_lists[size >> 4];
+        void **list = &t->free_lists[size >> 4];
         *(void **)p = *list;
         *list = p;
         return;
@@ -137,37 +166,95 @@ void tarn_free(void *p, int64_t size) {
     free(p);
 }
 
-void tarn_collect_cycles(void);
-static void collect_if_due(void);
+// ---------------------------------------------------------------- per-task state
+// Freeing (with its queue of pending drops) and the cycle collector's root
+// buffer belong to the task doing them, not to the thread: a `fn drop` may
+// wait (send on a channel, take a lock), and the task may then go on on
+// another thread while this thread runs other tasks.
 
-// Freeing an object releases its children. To keep deep structures (a
-// million-node chain) from overflowing the stack, children that die while
-// another object is being freed are queued and freed by the outermost call.
+typedef struct TarnTypeInfo TarnTypeInfo;
+typedef void (*TarnVisitFn)(void *child, const TarnTypeInfo *ti);
+struct TarnTypeInfo {
+    void (*trace)(void *obj, TarnVisitFn visit); // visit each child of a cyclic type
+    TarnDropFn drop;                             // count hit zero: release children, then tarn_cyclic_free
+    TarnDropFn free_white;                       // member of a garbage cycle: release acyclic children, free memory
+    TarnDropFn free_mem;                         // free just the memory
+};
+
+typedef struct {
+    void *obj;
+    const TarnTypeInfo *ti;
+} Root;
+typedef struct {
+    Root *items;
+    int64_t n, cap;
+} RootStack;
+
 typedef struct {
     void *obj;
     TarnDropFn drop;
 } PendingDrop;
-static PendingDrop *pending;
-static int64_t n_pending, cap_pending;
 
+typedef struct TarnCtx {
+    // Possible roots of garbage cycles: `roots`, or while a Mutex is held,
+    // that Mutex's own buffer (its value is reachable from other tasks).
+    RootStack roots;
+    RootStack *cur_roots;
+    RootStack work, work2, whites;
+    int64_t roots_threshold, traced;
+    int collecting, dropping;
+    // Children that died while another object was being freed.
+    PendingDrop *pending;
+    int64_t n_pending, cap_pending;
+} TarnCtx;
+
+static TarnCtx main_ctx;
+static __thread TarnCtx *tl_ctx;
+
+static inline TarnCtx *ctx(void) {
+    TarnCtx *c = tl_ctx;
+    if (__builtin_expect(!c, 0)) c = tl_ctx = &main_ctx;
+    if (__builtin_expect(!c->cur_roots, 0)) {
+        c->cur_roots = &c->roots;
+        c->roots_threshold = 10000;
+    }
+    return c;
+}
+
+static void ctx_free(TarnCtx *c) {
+    free(c->roots.items);
+    free(c->work.items);
+    free(c->work2.items);
+    free(c->whites.items);
+    free(c->pending);
+    memset(c, 0, sizeof *c);
+}
+
+void tarn_collect_cycles(void);
+static void collect_if_due(TarnCtx *c);
+
+// Freeing an object releases its children. To keep deep structures (a
+// million-node chain) from overflowing the stack, children that die while
+// another object is being freed are queued and freed by the outermost call.
 void tarn_drop_slow(void *obj, TarnDropFn drop) {
-    if (dropping) {
-        if (n_pending == cap_pending) {
-            cap_pending = cap_pending ? cap_pending * 2 : 64;
-            pending = realloc(pending, (size_t)cap_pending * sizeof(PendingDrop));
-            if (!pending) oom();
+    TarnCtx *c = ctx();
+    if (c->dropping) {
+        if (c->n_pending == c->cap_pending) {
+            c->cap_pending = c->cap_pending ? c->cap_pending * 2 : 64;
+            c->pending = realloc(c->pending, (size_t)c->cap_pending * sizeof(PendingDrop));
+            if (!c->pending) oom();
         }
-        pending[n_pending++] = (PendingDrop){obj, drop};
+        c->pending[c->n_pending++] = (PendingDrop){obj, drop};
         return;
     }
-    dropping = 1;
+    c->dropping = 1;
     drop(obj);
-    while (n_pending > 0) {
-        PendingDrop d = pending[--n_pending];
+    while (c->n_pending > 0) {
+        PendingDrop d = c->pending[--c->n_pending];
         d.drop(d.obj);
     }
-    dropping = 0;
-    collect_if_due();
+    c->dropping = 0;
+    collect_if_due(c);
 }
 
 // ---------------------------------------------------------------- cycle collector
@@ -181,16 +268,8 @@ void tarn_drop_slow(void *obj, TarnDropFn drop) {
 // root. When enough roots pile up, the collector subtracts the references
 // that come from inside the candidate subgraph; whatever ends up at zero is
 // unreachable garbage and is freed. Traversals use explicit stacks, so deep
-// structures can't overflow the C stack.
-
-typedef struct TarnTypeInfo TarnTypeInfo;
-typedef void (*TarnVisitFn)(void *child, const TarnTypeInfo *ti);
-struct TarnTypeInfo {
-    void (*trace)(void *obj, TarnVisitFn visit); // visit each child of a cyclic type
-    TarnDropFn drop;                             // count hit zero: release children, then tarn_cyclic_free
-    TarnDropFn free_white;                       // member of a garbage cycle: release acyclic children, free memory
-    TarnDropFn free_mem;                         // free just the memory
-};
+// structures can't overflow the C stack. Each task collects its own roots
+// (tasks share no objects), and a Mutex collects the roots found while it's held.
 
 #define RC_UNIT 8
 #define COLOR_MASK 3
@@ -199,20 +278,6 @@ struct TarnTypeInfo {
 #define GRAY 2   // being trial-deleted
 #define WHITE 3  // garbage
 #define BUFFERED 4
-
-typedef struct {
-    void *obj;
-    const TarnTypeInfo *ti;
-} Root;
-typedef struct {
-    Root *items;
-    int64_t n, cap;
-} RootStack;
-
-static RootStack roots, work, work2, whites;
-static int64_t roots_threshold = 10000;
-static int collecting;
-static int64_t st_collections, st_cycle_frees, traced;
 
 static inline int64_t *rc_word(void *o) { return (int64_t *)o; }
 static inline int color_of(void *o) { return (int)(*rc_word(o) & COLOR_MASK); }
@@ -230,7 +295,7 @@ static void stack_push(RootStack *st, void *obj, const TarnTypeInfo *ti) {
 
 // Trace callbacks (they can't take a context argument, so they use `visit_to`).
 // A child may be null (a nullable field or list element), which is skipped.
-static RootStack *visit_to;
+static __thread RootStack *visit_to;
 static void visit_push(void *t, const TarnTypeInfo *ti) {
     if (t) stack_push(visit_to, t, ti);
 }
@@ -248,115 +313,133 @@ static void visit_scan_black(void *t, const TarnTypeInfo *ti) {
     }
 }
 
-static void mark_gray(Root r) {
-    visit_to = &work;
-    stack_push(&work, r.obj, r.ti);
-    while (work.n > 0) {
-        Root x = work.items[--work.n];
+static void mark_gray(TarnCtx *c, Root r) {
+    stack_push(&c->work, r.obj, r.ti);
+    while (c->work.n > 0) {
+        Root x = c->work.items[--c->work.n];
         if (color_of(x.obj) != GRAY) {
             set_color(x.obj, GRAY);
-            traced++;
+            c->traced++;
+            visit_to = &c->work;
             x.ti->trace(x.obj, visit_mark_gray);
         }
     }
 }
 
-static void scan_black(Root r) {
+static void scan_black(TarnCtx *c, Root r) {
     set_color(r.obj, BLACK);
-    stack_push(&work2, r.obj, r.ti);
-    while (work2.n > 0) {
-        Root x = work2.items[--work2.n];
-        visit_to = &work2;
+    stack_push(&c->work2, r.obj, r.ti);
+    while (c->work2.n > 0) {
+        Root x = c->work2.items[--c->work2.n];
+        visit_to = &c->work2;
         x.ti->trace(x.obj, visit_scan_black);
     }
 }
 
-static void scan(Root r) {
-    stack_push(&work, r.obj, r.ti);
-    while (work.n > 0) {
-        Root x = work.items[--work.n];
+static void scan(TarnCtx *c, Root r) {
+    stack_push(&c->work, r.obj, r.ti);
+    while (c->work.n > 0) {
+        Root x = c->work.items[--c->work.n];
         if (color_of(x.obj) != GRAY) continue;
         if (count_of(x.obj) > 0) {
-            scan_black(x); // referenced from outside the subgraph: alive
+            scan_black(c, x); // referenced from outside the subgraph: alive
         } else {
             set_color(x.obj, WHITE);
-            visit_to = &work;
+            visit_to = &c->work;
             x.ti->trace(x.obj, visit_push);
         }
     }
 }
 
-static void collect_white(Root r) {
-    stack_push(&work, r.obj, r.ti);
-    while (work.n > 0) {
-        Root x = work.items[--work.n];
+static void collect_white(TarnCtx *c, Root r) {
+    stack_push(&c->work, r.obj, r.ti);
+    while (c->work.n > 0) {
+        Root x = c->work.items[--c->work.n];
         if (color_of(x.obj) != WHITE || (*rc_word(x.obj) & BUFFERED)) continue;
         set_color(x.obj, BLACK);
-        stack_push(&whites, x.obj, x.ti);
-        visit_to = &work;
+        stack_push(&c->whites, x.obj, x.ti);
+        visit_to = &c->work;
         x.ti->trace(x.obj, visit_push);
     }
 }
 
-void tarn_collect_cycles(void) {
-    if (collecting || dropping) return;
-    collecting = 1;
-    st_collections++;
+// Trial-delete the roots in `roots` (the task's own, or a Mutex's).
+static void collect_roots(TarnCtx *c, RootStack *roots) {
+    if (c->collecting || c->dropping) return;
+    c->collecting = 1;
+    ThreadState *t = thread_state();
+    t->collections++;
     // Mark: trial-delete the subgraph under every root that is still a candidate.
     int64_t n = 0;
-    for (int64_t i = 0; i < roots.n; i++) {
-        Root r = roots.items[i];
+    for (int64_t i = 0; i < roots->n; i++) {
+        Root r = roots->items[i];
         if (color_of(r.obj) == PURPLE) {
-            mark_gray(r);
-            roots.items[n++] = r;
+            mark_gray(c, r);
+            roots->items[n++] = r;
         } else {
             *rc_word(r.obj) &= ~(int64_t)BUFFERED;
             if (color_of(r.obj) == BLACK && count_of(r.obj) == 0) r.ti->free_mem(r.obj); // died while buffered
         }
     }
     // Scan: anything still referenced from outside is alive, and so is all it reaches.
-    for (int64_t i = 0; i < n; i++) scan(roots.items[i]);
+    for (int64_t i = 0; i < n; i++) scan(c, roots->items[i]);
     // Collect: the rest is garbage.
-    whites.n = 0;
+    c->whites.n = 0;
     for (int64_t i = 0; i < n; i++) {
-        *rc_word(roots.items[i].obj) &= ~(int64_t)BUFFERED;
-        collect_white(roots.items[i]);
+        *rc_word(roots->items[i].obj) &= ~(int64_t)BUFFERED;
+        collect_white(c, roots->items[i]);
     }
-    roots.n = 0;
+    roots->n = 0;
     // Free only after the whole traversal, so no freed object is ever traced.
-    for (int64_t i = 0; i < whites.n; i++) {
-        st_cycle_frees++;
-        whites.items[i].ti->free_white(whites.items[i].obj);
+    // (While freeing, `dropping` queues what dies meanwhile and keeps
+    // another collection from starting.)
+    c->collecting = 0;
+    c->dropping = 1;
+    int64_t freed = c->whites.n;
+    for (int64_t i = 0; i < c->whites.n; i++) {
+        t->cycle_frees++;
+        c->whites.items[i].ti->free_white(c->whites.items[i].obj);
     }
+    c->whites.n = 0;
+    while (c->n_pending > 0) {
+        PendingDrop d = c->pending[--c->n_pending];
+        d.drop(d.obj);
+    }
+    c->dropping = 0;
     // If it traced a lot of live data for little garbage, wait longer next time.
-    if (whites.n * 4 < traced && roots_threshold < ((int64_t)1 << 30)) roots_threshold *= 2;
-    traced = 0;
-    collecting = 0;
+    if (freed * 4 < c->traced && c->roots_threshold < ((int64_t)1 << 30)) c->roots_threshold *= 2;
+    c->traced = 0;
+}
+
+void tarn_collect_cycles(void) {
+    TarnCtx *c = ctx();
+    collect_roots(c, c->cur_roots);
 }
 
 // Drop buffer entries that can no longer be garbage-cycle roots (used again
 // since, or already dead) without tracing anything. Returns how many remain.
-static int64_t compact_roots(void) {
+static int64_t compact_roots(RootStack *roots) {
     int64_t n = 0;
-    for (int64_t i = 0; i < roots.n; i++) {
-        Root r = roots.items[i];
+    for (int64_t i = 0; i < roots->n; i++) {
+        Root r = roots->items[i];
         if (color_of(r.obj) == PURPLE) {
-            roots.items[n++] = r;
+            roots->items[n++] = r;
         } else {
             *rc_word(r.obj) &= ~(int64_t)BUFFERED;
             if (count_of(r.obj) == 0) r.ti->free_mem(r.obj);
         }
     }
-    roots.n = n;
+    roots->n = n;
     return n;
 }
 
 // Once enough candidate roots pile up, first discard the stale ones cheaply;
 // trace only if many real candidates remain. (Never in the middle of freeing
 // something: `tarn_drop_slow` calls this again when it's done.)
-static void collect_if_due(void) {
-    if (roots.n < roots_threshold || dropping || collecting) return;
-    if (compact_roots() >= roots_threshold / 2) tarn_collect_cycles();
+static void collect_if_due(TarnCtx *c) {
+    RootStack *roots = c->cur_roots;
+    if (roots->n < c->roots_threshold || c->dropping || c->collecting) return;
+    if (compact_roots(roots) >= c->roots_threshold / 2) collect_roots(c, roots);
 }
 
 void tarn_release_cyclic(void *p, const TarnTypeInfo *ti) {
@@ -370,8 +453,9 @@ void tarn_release_cyclic(void *p, const TarnTypeInfo *ti) {
         rc = (rc & ~(int64_t)COLOR_MASK) | PURPLE;
         if (!(rc & BUFFERED)) {
             *rc_word(p) = rc | BUFFERED;
-            stack_push(&roots, p, ti);
-            collect_if_due();
+            TarnCtx *c = ctx();
+            stack_push(c->cur_roots, p, ti);
+            collect_if_due(c);
             return;
         }
     }
@@ -384,6 +468,1410 @@ void tarn_cyclic_free(void *p, const TarnTypeInfo *ti) {
     if (*rc_word(p) & BUFFERED) return;
     ti->free_mem(p);
 }
+
+// ---------------------------------------------------------------- tasks
+// Lightweight tasks. Each task runs on a stack of its own, and the scheduler
+// only switches between tasks where one waits: for I/O, a timer, a channel,
+// a lock, or another task. So waiting code reads like ordinary blocking code,
+// with no async/await. Tasks run on a pool of threads, one per core (or
+// $TARN_THREADS); a thread with nothing to do steals tasks from the others,
+// or waits for the operating system's readiness events (epoll on Linux,
+// kqueue on macOS) and the timers, on behalf of every thread.
+//
+// Nothing of this exists until the first `spawn`: until then a program is a
+// single thread running `main` on its own stack, exactly as before.
+//
+// Tasks share no objects (values given to another task are moved or copied:
+// see `tarn.xfer.*` in the generated code), so reference counts stay plain
+// integers. The only objects several tasks can reach are the handles below
+// (Task, Channel, Mutex, Atomic), whose counts are atomic.
+
+#include <sys/mman.h>
+#include <unistd.h>
+#include <poll.h>
+#include <signal.h>
+#include <unwind.h>
+#ifdef __linux__
+#include <sys/epoll.h>
+#include <sys/eventfd.h>
+#else
+#include <sys/event.h>
+#endif
+#if defined(TARN_SANITIZE)
+#include <sanitizer/asan_interface.h>
+#endif
+
+typedef struct Task Task;
+static TarnStr *str_dup(TarnStr *s);
+void tarn_str_free(void *p);
+
+// The kinds of handle objects (word 1 of each, after the count).
+enum { HANDLE_TASK = 1, HANDLE_CHANNEL, HANDLE_MUTEX, HANDLE_ATOMIC };
+
+struct Task {
+    _Atomic int64_t rc; // the count of `Task` handles (plus one while it runs)
+    int64_t kind;
+    int64_t id;
+    void *sp;             // saved stack pointer, while switched out
+    char *stack;          // the mapping: a guard page, then the stack
+    size_t stack_size;
+    TarnCtx *ctxp;        // its freeing and cycle-collection state (`ctx` below, or main's)
+    TarnCtx ctx;
+    // What it runs: `run(closure, result)` calls the function value.
+    void *closure;
+    void (*run)(void *closure, void *out);
+    void (*release_closure)(void *);
+    void (*release_result)(void *); // for a result that holds a reference
+    // Run by the scheduler right after the task has switched away (unlock
+    // what the task waits on, register it with the poller...).
+    void (*after)(void *);
+    void *after_arg;
+    Task *next; // in a run queue, or one wait list
+    int pinned; // only worker 0 runs it (main: it runs on the process's own stack)
+    // A wait that a timer, the poller or a signal ends: even = waiting
+    // (wait number * 2), odd = ended. Whoever ends it first wakes the task.
+    _Atomic int64_t wait_state;
+    int64_t wait_count;
+    // Result (guarded by `lock`).
+    pthread_mutex_t lock;
+    int done, panicked, taken;
+    Task *joiners;
+    TarnStr *panic_message, *panic_location;
+    int64_t result[2];
+    // Why the last failed `net` / `fs` call failed.
+    int64_t net_error;
+    char fs_error[512];
+    struct _Unwind_Exception unwind;
+#if defined(TARN_SANITIZE)
+    void *asan_fake;
+#endif
+};
+
+static Task main_task = {.rc = 1, .kind = HANDLE_TASK, .pinned = 1};
+static __thread Task *tl_task;
+static int sched_on; // set by the first spawn
+
+// The current task. Never inlined: a task can stop on one thread and go on
+// on another, so a thread-local read must not be reused across a switch.
+static __attribute__((noinline)) Task *cur_task(void) {
+    Task *t = tl_task;
+    __asm__ volatile("" ::: "memory");
+    return t ? t : &main_task;
+}
+
+// ---------------- switching stacks
+// `ctx_switch(&save, to)` saves the callee-saved registers on the current
+// stack, stores the stack pointer in `save`, and resumes the stack `to`
+// (which was saved the same way, or prepared by `init_stack`).
+
+#if defined(__x86_64__)
+__attribute__((naked, noinline)) static void ctx_switch(void **save, void *to) {
+    __asm__ volatile(
+        "pushq %rbp\n\t"
+        "pushq %rbx\n\t"
+        "pushq %r12\n\t"
+        "pushq %r13\n\t"
+        "pushq %r14\n\t"
+        "pushq %r15\n\t"
+        "subq $8, %rsp\n\t"
+        "stmxcsr (%rsp)\n\t"
+        "fnstcw 4(%rsp)\n\t"
+        "movq %rsp, (%rdi)\n\t"
+        "movq %rsi, %rsp\n\t"
+        "ldmxcsr (%rsp)\n\t"
+        "fldcw 4(%rsp)\n\t"
+        "addq $8, %rsp\n\t"
+        "popq %r15\n\t"
+        "popq %r14\n\t"
+        "popq %r13\n\t"
+        "popq %r12\n\t"
+        "popq %rbx\n\t"
+        "popq %rbp\n\t"
+        "retq\n\t");
+}
+
+// A fresh stack whose first switch "returns" into `entry`.
+static void *init_stack(char *top, void (*entry)(void)) {
+    uint64_t *sp = (uint64_t *)((uintptr_t)top & ~(uintptr_t)15);
+    *--sp = 0;                   // `entry`'s return address: nothing
+    *--sp = (uint64_t)entry;     // where the switch's `ret` goes
+    for (int i = 0; i < 6; i++) *--sp = 0; // rbp rbx r12 r13 r14 r15
+    *--sp = 0x037F00001F80ull;   // mxcsr (low half) and the x87 control word (bytes 4-5)
+    return sp;
+}
+#elif defined(__aarch64__)
+__attribute__((naked, noinline)) static void ctx_switch(void **save, void *to) {
+    __asm__ volatile(
+        "sub sp, sp, #176\n\t"
+        "stp x19, x20, [sp, #0]\n\t"
+        "stp x21, x22, [sp, #16]\n\t"
+        "stp x23, x24, [sp, #32]\n\t"
+        "stp x25, x26, [sp, #48]\n\t"
+        "stp x27, x28, [sp, #64]\n\t"
+        "stp x29, x30, [sp, #80]\n\t"
+        "stp d8, d9, [sp, #96]\n\t"
+        "stp d10, d11, [sp, #112]\n\t"
+        "stp d12, d13, [sp, #128]\n\t"
+        "stp d14, d15, [sp, #144]\n\t"
+        "mov x9, sp\n\t"
+        "str x9, [x0]\n\t"
+        "mov sp, x1\n\t"
+        "ldp x19, x20, [sp, #0]\n\t"
+        "ldp x21, x22, [sp, #16]\n\t"
+        "ldp x23, x24, [sp, #32]\n\t"
+        "ldp x25, x26, [sp, #48]\n\t"
+        "ldp x27, x28, [sp, #64]\n\t"
+        "ldp x29, x30, [sp, #80]\n\t"
+        "ldp d8, d9, [sp, #96]\n\t"
+        "ldp d10, d11, [sp, #112]\n\t"
+        "ldp d12, d13, [sp, #128]\n\t"
+        "ldp d14, d15, [sp, #144]\n\t"
+        "add sp, sp, #176\n\t"
+        "ret\n\t");
+}
+
+static void *init_stack(char *top, void (*entry)(void)) {
+    uint64_t *sp = (uint64_t *)((uintptr_t)top & ~(uintptr_t)15);
+    sp -= 22; // 176 bytes
+    memset(sp, 0, 176);
+    sp[11] = (uint64_t)entry; // x30: where the switch's `ret` goes
+    return sp;
+}
+#else
+#error "tasks need x86-64 or arm64"
+#endif
+
+// ---------------- stacks
+// Each task gets 1 MiB (or $TARN_TASK_STACK bytes) of address space with a
+// guard page below it; memory is only used as the stack grows into it.
+// Finished tasks' stacks are kept for the next ones.
+
+static size_t task_stack_size;
+static pthread_mutex_t stacks_lock = PTHREAD_MUTEX_INITIALIZER;
+static char *free_stacks[64];
+static int n_free_stacks;
+
+static char *stack_alloc(void) {
+    pthread_mutex_lock(&stacks_lock);
+    char *s = n_free_stacks > 0 ? free_stacks[--n_free_stacks] : NULL;
+    pthread_mutex_unlock(&stacks_lock);
+    if (s) return s;
+    size_t page = (size_t)sysconf(_SC_PAGESIZE);
+    int flags = MAP_PRIVATE | MAP_ANONYMOUS;
+#ifdef MAP_NORESERVE
+    flags |= MAP_NORESERVE;
+#endif
+    s = mmap(NULL, task_stack_size, PROT_READ | PROT_WRITE, flags, -1, 0);
+    if (s == MAP_FAILED) oom();
+    mprotect(s, page, PROT_NONE);
+    return s;
+}
+
+static void stack_free(char *s) {
+    pthread_mutex_lock(&stacks_lock);
+    if (n_free_stacks < 64) {
+        free_stacks[n_free_stacks++] = s;
+        s = NULL;
+    }
+    pthread_mutex_unlock(&stacks_lock);
+    if (s) munmap(s, task_stack_size);
+}
+
+// ---------------- workers and run queues
+
+typedef struct Worker {
+    int id;
+    void *sched_sp;          // the scheduler loop's stack, while a task runs
+    Task *current;
+    pthread_mutex_t lock;    // guards the queues
+    Task *head, *tail;       // runnable tasks (others may steal them)
+    Task *pinned_head, *pinned_tail; // (worker 0) runnable tasks only it may run
+    pthread_cond_t wake;
+    int sleeping;            // (guarded by idle_lock)
+#if defined(TARN_SANITIZE)
+    void *stack_bottom;
+    size_t stack_size;
+#endif
+} Worker;
+
+static Worker *workers;
+static int n_workers;
+static __thread Worker *tl_worker;
+
+static __attribute__((noinline)) Worker *cur_worker(void) {
+    Worker *w = tl_worker;
+    __asm__ volatile("" ::: "memory");
+    return w;
+}
+
+static Task *gq_head, *gq_tail; // runnable tasks from outside the workers (the poller, timers)
+static pthread_mutex_t gq_lock = PTHREAD_MUTEX_INITIALIZER;
+static _Atomic int64_t n_queued;        // runnable tasks in any queue
+static pthread_mutex_t idle_lock = PTHREAD_MUTEX_INITIALIZER;
+static int n_sleeping;                  // workers asleep (guarded by idle_lock)
+static _Atomic int poller_waiting;      // a worker is blocked in the poller
+static _Atomic int64_t live_tasks;      // spawned and not finished
+static _Atomic int64_t next_task_id;
+
+static void wake_poller(void);
+
+// Wake a sleeping worker, preferably `prefer`, or the poller.
+static void kick(Worker *prefer) {
+    pthread_mutex_lock(&idle_lock);
+    Worker *w = NULL;
+    if (prefer && prefer->sleeping) w = prefer;
+    for (int i = 0; !w && !prefer && i < n_workers; i++)
+        if (workers[i].sleeping) w = &workers[i];
+    if (w) {
+        w->sleeping = 0;
+        n_sleeping--;
+        pthread_cond_signal(&w->wake);
+    }
+    pthread_mutex_unlock(&idle_lock);
+    if (!w) wake_poller();
+}
+
+static void push(Task **head, Task **tail, Task *t) {
+    t->next = NULL;
+    if (*tail) (*tail)->next = t;
+    else *head = t;
+    *tail = t;
+}
+
+static Task *pop(Task **head, Task **tail) {
+    Task *t = *head;
+    if (t) {
+        *head = t->next;
+        if (!*head) *tail = NULL;
+        t->next = NULL;
+    }
+    return t;
+}
+
+// Make a waiting task runnable. Only call this once the task has switched
+// away (its `after` ran): see `park`.
+static void ready(Task *t) {
+    atomic_fetch_add(&n_queued, 1);
+    if (t->pinned) {
+        Worker *w0 = &workers[0];
+        pthread_mutex_lock(&w0->lock);
+        push(&w0->pinned_head, &w0->pinned_tail, t);
+        pthread_mutex_unlock(&w0->lock);
+        kick(w0);
+        return;
+    }
+    Worker *w = cur_worker();
+    if (w) {
+        pthread_mutex_lock(&w->lock);
+        push(&w->head, &w->tail, t);
+        pthread_mutex_unlock(&w->lock);
+    } else {
+        pthread_mutex_lock(&gq_lock);
+        push(&gq_head, &gq_tail, t);
+        pthread_mutex_unlock(&gq_lock);
+    }
+    kick(NULL);
+}
+
+static Task *take_from(Worker *w, int pinned_too) {
+    if (!w->head && !(pinned_too && w->pinned_head)) return NULL;
+    pthread_mutex_lock(&w->lock);
+    Task *t = pinned_too ? pop(&w->pinned_head, &w->pinned_tail) : NULL;
+    if (!t) t = pop(&w->head, &w->tail);
+    pthread_mutex_unlock(&w->lock);
+    return t;
+}
+
+static void fire_due_timers(void);
+
+static Task *find_task(Worker *w) {
+    fire_due_timers();
+    Task *t = take_from(w, w->id == 0);
+    if (!t && gq_head) {
+        pthread_mutex_lock(&gq_lock);
+        t = pop(&gq_head, &gq_tail);
+        pthread_mutex_unlock(&gq_lock);
+    }
+    // Steal from the others.
+    for (int i = 1; !t && i < n_workers; i++) t = take_from(&workers[(w->id + i) % n_workers], 0);
+    if (t) atomic_fetch_sub(&n_queued, 1);
+    return t;
+}
+
+// ---------------- running and parking
+
+#if defined(TARN_SANITIZE)
+static void asan_switch_to(void **fake, void *bottom, size_t size) { __sanitizer_start_switch_fiber(fake, bottom, size); }
+static void asan_arrived(void *fake) { __sanitizer_finish_switch_fiber(fake, NULL, NULL); }
+#endif
+
+static void run_task(Worker *w, Task *t) {
+    w->current = t;
+    tl_task = t;
+    tl_ctx = t->ctxp;
+#if defined(TARN_SANITIZE)
+    void *fake = NULL;
+    if (t->stack) asan_switch_to(&fake, t->stack, task_stack_size);
+    else asan_switch_to(&fake, NULL, 0);
+#endif
+    ctx_switch(&w->sched_sp, t->sp);
+#if defined(TARN_SANITIZE)
+    asan_arrived(fake);
+#endif
+    tl_task = NULL;
+    tl_ctx = NULL;
+    w->current = NULL;
+    void (*after)(void *) = t->after;
+    void *arg = t->after_arg;
+    t->after = NULL;
+    // (From here on another worker may already be running `t`.)
+    if (after) after(arg);
+}
+
+// Switch away from the current task; the scheduler runs `after(arg)` once
+// it's off this stack. A task is woken by `ready`: to make sure nobody can
+// before it has switched away, whatever lets others find it (unlocking the
+// list it waits in, registering with the poller) happens in `after`.
+static void park(void (*after)(void *), void *arg) {
+    Task *t = cur_task();
+    Worker *w = cur_worker();
+    t->after = after;
+    t->after_arg = arg;
+#if defined(TARN_SANITIZE)
+    asan_switch_to(&t->asan_fake, w->stack_bottom, w->stack_size);
+#endif
+    ctx_switch(&t->sp, w->sched_sp);
+#if defined(TARN_SANITIZE)
+    asan_arrived(t->asan_fake);
+#endif
+}
+
+static void unlock_mutex(void *m) { pthread_mutex_unlock((pthread_mutex_t *)m); }
+
+// ---------------- the poller and timers
+
+static int poll_fd = -1, wake_rd = -1, wake_wr = -1;
+static pthread_mutex_t poll_lock = PTHREAD_MUTEX_INITIALIZER;
+static _Atomic int64_t n_io_waits; // tasks registered with the poller
+
+typedef struct {
+    int64_t deadline;
+    Task *task;
+    int64_t wait; // the task's wait number it belongs to
+} Timer;
+static Timer *timers;
+static int64_t n_timers, cap_timers;
+static pthread_mutex_t timers_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static int64_t now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec;
+}
+
+// End the task's wait number `wait` (-1: whichever it's in), if it's still in it.
+static void end_wait(Task *t, int64_t wait) {
+    int64_t s = atomic_load(&t->wait_state);
+    if (s & 1) return;
+    if (wait >= 0 && s != wait * 2) return;
+    if (atomic_compare_exchange_strong(&t->wait_state, &s, s + 1)) ready(t);
+}
+
+static void timer_add(int64_t deadline, Task *t, int64_t wait) {
+    pthread_mutex_lock(&timers_lock);
+    if (n_timers == cap_timers) {
+        cap_timers = cap_timers ? cap_timers * 2 : 64;
+        timers = realloc(timers, (size_t)cap_timers * sizeof(Timer));
+        if (!timers) oom();
+    }
+    // A binary min-heap on the deadline.
+    int64_t i = n_timers++;
+    while (i > 0 && timers[(i - 1) / 2].deadline > deadline) {
+        timers[i] = timers[(i - 1) / 2];
+        i = (i - 1) / 2;
+    }
+    timers[i] = (Timer){deadline, t, wait};
+    pthread_mutex_unlock(&timers_lock);
+}
+
+static Timer timer_pop_locked(void) {
+    Timer top = timers[0], last = timers[--n_timers];
+    int64_t i = 0;
+    for (;;) {
+        int64_t c = 2 * i + 1;
+        if (c >= n_timers) break;
+        if (c + 1 < n_timers && timers[c + 1].deadline < timers[c].deadline) c++;
+        if (timers[c].deadline >= last.deadline) break;
+        timers[i] = timers[c];
+        i = c;
+    }
+    if (n_timers > 0) timers[i] = last;
+    return top;
+}
+
+static void fire_due_timers(void) {
+    if (n_timers == 0) return;
+    int64_t now = now_ns();
+    for (;;) {
+        pthread_mutex_lock(&timers_lock);
+        if (n_timers == 0 || timers[0].deadline > now) {
+            pthread_mutex_unlock(&timers_lock);
+            return;
+        }
+        Timer t = timer_pop_locked();
+        pthread_mutex_unlock(&timers_lock);
+        end_wait(t.task, t.wait);
+    }
+}
+
+// Milliseconds until the next timer (-1: none).
+static int next_timer_ms(void) {
+    pthread_mutex_lock(&timers_lock);
+    int64_t d = n_timers ? timers[0].deadline : -1;
+    pthread_mutex_unlock(&timers_lock);
+    if (d < 0) return -1;
+    int64_t ms = (d - now_ns() + 999999) / 1000000;
+    return ms < 0 ? 0 : ms > 1000000 ? 1000000 : (int)ms;
+}
+
+static void wake_fd_write(void) {
+#ifdef __linux__
+    uint64_t one = 1;
+    ssize_t r = write(wake_wr, &one, sizeof one);
+#else
+    char one = 1;
+    ssize_t r = write(wake_wr, &one, 1);
+#endif
+    (void)r;
+}
+
+static void wake_poller(void) {
+    if (atomic_load(&poller_waiting)) wake_fd_write();
+}
+
+static int signal_any_pending(void);
+static void wake_all_waiters(void);
+
+// Register `fd` so the task (which has switched away) is woken when it's
+// readable (`writable`: writable).
+static void poller_add(int fd, int writable, Task *t) {
+#ifdef __linux__
+    struct epoll_event ev;
+    memset(&ev, 0, sizeof ev);
+    ev.events = (writable ? EPOLLOUT : EPOLLIN) | EPOLLONESHOT | EPOLLRDHUP;
+    ev.data.ptr = t;
+    if (epoll_ctl(poll_fd, EPOLL_CTL_ADD, fd, &ev) != 0 && errno == EEXIST) epoll_ctl(poll_fd, EPOLL_CTL_MOD, fd, &ev);
+#else
+    struct kevent ev;
+    EV_SET(&ev, fd, writable ? EVFILT_WRITE : EVFILT_READ, EV_ADD | EV_ONESHOT, 0, 0, t);
+    kevent(poll_fd, &ev, 1, NULL, 0, NULL);
+#endif
+}
+
+static void poller_remove(int fd, int writable) {
+#ifdef __linux__
+    (void)writable;
+    epoll_ctl(poll_fd, EPOLL_CTL_DEL, fd, NULL);
+#else
+    struct kevent ev;
+    EV_SET(&ev, fd, writable ? EVFILT_WRITE : EVFILT_READ, EV_DELETE, 0, 0, NULL);
+    kevent(poll_fd, &ev, 1, NULL, 0, NULL);
+#endif
+}
+
+static void deadlock(void);
+
+// Wait for readiness events (and timers), up to `ms` milliseconds (-1: no limit).
+static void poll_events(int ms) {
+#ifdef __linux__
+    struct epoll_event evs[64];
+    int n = epoll_wait(poll_fd, evs, 64, ms);
+    for (int i = 0; i < n; i++) {
+        if (evs[i].data.ptr == NULL) {
+            uint64_t buf;
+            while (read(wake_rd, &buf, sizeof buf) > 0) {}
+            if (signal_any_pending()) wake_all_waiters();
+            continue;
+        }
+        end_wait((Task *)evs[i].data.ptr, -1);
+    }
+#else
+    struct kevent evs[64];
+    struct timespec ts = {ms / 1000, (long)(ms % 1000) * 1000000}, *tp = ms < 0 ? NULL : &ts;
+    int n = kevent(poll_fd, NULL, 0, evs, 64, tp);
+    for (int i = 0; i < n; i++) {
+        if (evs[i].udata == NULL) {
+            char buf[64];
+            while (read(wake_rd, buf, sizeof buf) > 0) {}
+            if (signal_any_pending()) wake_all_waiters();
+            continue;
+        }
+        end_wait((Task *)evs[i].udata, -1);
+    }
+#endif
+    fire_due_timers();
+}
+
+static int idle_checks; // (guarded by poll_lock)
+
+static void idle(Worker *w) {
+    // One idle worker polls for everyone; the others sleep until there's work.
+    if (pthread_mutex_trylock(&poll_lock) == 0) {
+        atomic_store(&poller_waiting, 1);
+        int ms = atomic_load(&n_queued) > 0 ? 0 : next_timer_ms();
+        if (ms < 0 && atomic_load(&n_io_waits) == 0) {
+            // Nothing can wake anyone unless a busy worker does: look again
+            // in a moment, and if everyone was idle both times, give up.
+            pthread_mutex_lock(&idle_lock);
+            int all_idle = n_sleeping == n_workers - 1 && atomic_load(&n_queued) == 0;
+            pthread_mutex_unlock(&idle_lock);
+            idle_checks = all_idle ? idle_checks + 1 : 0;
+            if (idle_checks >= 3 && n_timers == 0) deadlock();
+            ms = 100;
+        } else {
+            idle_checks = 0;
+        }
+        poll_events(ms);
+        atomic_store(&poller_waiting, 0);
+        pthread_mutex_unlock(&poll_lock);
+        return;
+    }
+    pthread_mutex_lock(&idle_lock);
+    if (atomic_load(&n_queued) == 0) {
+        w->sleeping = 1;
+        n_sleeping++;
+        while (w->sleeping) pthread_cond_wait(&w->wake, &idle_lock);
+    }
+    pthread_mutex_unlock(&idle_lock);
+}
+
+__attribute__((noreturn)) static void worker_loop(Worker *w) {
+    for (;;) {
+        Task *t = find_task(w);
+        if (t) run_task(w, t);
+        else idle(w);
+    }
+}
+
+// ---------------- stack overflow
+// A task that recurses deeper than its stack hits the guard page below it.
+// Say so, rather than a bare "Segmentation fault", and stop the program (a
+// task can't unwind without stack to do it on). The handler runs on a small
+// stack of each thread's own.
+
+static size_t page_size;
+
+static void write_str(const char *m) {
+    ssize_t r = write(2, m, strlen(m));
+    (void)r;
+}
+
+static void on_stack_fault(int sig, siginfo_t *si, void *uc) {
+    (void)uc;
+    Task *t = tl_task;
+    char *a = si->si_addr;
+    // (A frame bigger than a page can step over the guard: allow some room.)
+    if (t && t->stack && a >= t->stack - 16 * page_size && a < t->stack + page_size) {
+        if (ftrylockfile(stdout) == 0) {
+            fflush(stdout);
+            funlockfile(stdout);
+        }
+        char id[24];
+        int n = 0;
+        uint64_t v = (uint64_t)t->id;
+        char rev[24];
+        do rev[n++] = (char)('0' + v % 10), v /= 10; while (v);
+        for (int i = 0; i < n; i++) id[i] = rev[n - 1 - i];
+        id[n] = 0;
+        write_str("stack overflow in task ");
+        write_str(id);
+        write_str(": its calls went deeper than its stack allows (1 MiB; set TARN_TASK_STACK=<bytes> for more)\n");
+        _exit(101);
+    }
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+static void fault_stack(void) {
+#if !defined(TARN_SANITIZE)
+    stack_t ss;
+    ss.ss_size = 64 * 1024;
+    ss.ss_sp = malloc(ss.ss_size);
+    ss.ss_flags = 0;
+    if (ss.ss_sp) sigaltstack(&ss, NULL);
+#endif
+}
+
+static void catch_stack_faults(void) {
+#if !defined(TARN_SANITIZE) // (ASan reports stack overflows itself.)
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = on_stack_fault;
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGSEGV, &sa, NULL);
+    sigaction(SIGBUS, &sa, NULL);
+#endif
+}
+
+static void *worker_thread(void *arg) {
+    Worker *w = arg;
+    tl_worker = w;
+    fault_stack();
+#if defined(TARN_SANITIZE)
+    pthread_attr_t a;
+    pthread_getattr_np(pthread_self(), &a);
+    pthread_attr_getstack(&a, &w->stack_bottom, &w->stack_size);
+    pthread_attr_destroy(&a);
+#endif
+    worker_loop(w);
+}
+
+// Worker 0's loop starts the first time `main` waits.
+static void worker0_entry(void) {
+#if defined(TARN_SANITIZE)
+    asan_arrived(main_task.asan_fake);
+#endif
+    tl_task = NULL;
+    tl_ctx = NULL;
+    void (*after)(void *) = main_task.after;
+    main_task.after = NULL;
+    if (after) after(main_task.after_arg);
+    worker_loop(&workers[0]);
+}
+
+static int64_t env_int(const char *name, int64_t fallback) {
+    const char *v = getenv(name);
+    if (!v || !*v) return fallback;
+    char *end;
+    long long n = strtoll(v, &end, 10);
+    return *end || n <= 0 ? fallback : (int64_t)n;
+}
+
+
+// The first `spawn`: start the worker threads. This thread becomes worker 0;
+// `main` keeps running on it (and only on it), and the scheduler loop of
+// worker 0 gets a stack of its own for when `main` waits.
+static void sched_start(void) {
+    n_workers = (int)env_int("TARN_THREADS", sysconf(_SC_NPROCESSORS_ONLN));
+    if (n_workers < 1) n_workers = 1;
+    if (n_workers > 256) n_workers = 256;
+    task_stack_size = (size_t)env_int("TARN_TASK_STACK", 1 << 20);
+    size_t page = (size_t)sysconf(_SC_PAGESIZE);
+    page_size = page;
+    task_stack_size = (task_stack_size + 2 * page - 1) / page * page;
+    fault_stack();
+    catch_stack_faults();
+    workers = calloc((size_t)n_workers, sizeof(Worker));
+    if (!workers) oom();
+#ifdef __linux__
+    poll_fd = epoll_create1(EPOLL_CLOEXEC);
+    int efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    wake_rd = wake_wr = efd;
+    struct epoll_event ev;
+    memset(&ev, 0, sizeof ev);
+    ev.events = EPOLLIN;
+    ev.data.ptr = NULL;
+    epoll_ctl(poll_fd, EPOLL_CTL_ADD, efd, &ev);
+#else
+    poll_fd = kqueue();
+    int p[2];
+    if (pipe(p) != 0) oom();
+    fcntl(p[0], F_SETFL, O_NONBLOCK);
+    fcntl(p[1], F_SETFL, O_NONBLOCK);
+    fcntl(p[0], F_SETFD, FD_CLOEXEC);
+    fcntl(p[1], F_SETFD, FD_CLOEXEC);
+    wake_rd = p[0];
+    wake_wr = p[1];
+    struct kevent ev;
+    EV_SET(&ev, wake_rd, EVFILT_READ, EV_ADD, 0, 0, NULL);
+    kevent(poll_fd, &ev, 1, NULL, 0, NULL);
+#endif
+    for (int i = 0; i < n_workers; i++) {
+        workers[i].id = i;
+        pthread_mutex_init(&workers[i].lock, NULL);
+        pthread_cond_init(&workers[i].wake, NULL);
+    }
+    // Worker 0's scheduler loop runs on a stack of its own.
+    char *s = stack_alloc();
+    workers[0].sched_sp = init_stack(s + task_stack_size, worker0_entry);
+#if defined(TARN_SANITIZE)
+    workers[0].stack_bottom = s;
+    workers[0].stack_size = task_stack_size;
+#endif
+    tl_worker = &workers[0];
+    tl_task = &main_task;
+    main_task.ctxp = &main_ctx;
+    tl_ctx = &main_ctx;
+    sched_on = 1;
+    for (int i = 1; i < n_workers; i++) {
+        pthread_t th;
+        pthread_attr_t a;
+        pthread_attr_init(&a);
+        pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
+        if (pthread_create(&th, &a, worker_thread, &workers[i]) != 0) oom();
+        pthread_attr_destroy(&a);
+    }
+}
+
+// ---------------- waiting for time and I/O
+
+typedef struct {
+    Task *task;
+    int64_t wait, deadline;
+    int fd, writable;
+} WaitArg;
+
+static void begin_wait(void *p) {
+    WaitArg *a = p;
+    Task *t = a->task;
+    atomic_store(&t->wait_state, a->wait * 2);
+    if (a->deadline > 0) timer_add(a->deadline, t, a->wait);
+    if (a->fd >= 0) {
+        atomic_fetch_add(&n_io_waits, 1);
+        poller_add(a->fd, a->writable, t);
+    }
+    // (A sleep or I/O wait with neither a deadline nor a poller to end it can't happen.)
+    if (atomic_load(&poller_waiting)) wake_poller(); // so it picks up the new deadline
+}
+
+// Wait until `deadline` (monotonic ns, 0: none), until `fd` is readable or
+// writable (-1: no fd), or until a caught signal arrives. Wakes can be early:
+// callers check again.
+static int any_signal_caught(void);
+static void wait_until(int64_t deadline, int fd, int writable) {
+    Task *t = cur_task();
+    // While signals are caught, wake up regularly to check for them.
+    if (any_signal_caught()) {
+        int64_t soon = now_ns() + 100000000;
+        if (!deadline || deadline > soon) deadline = soon;
+    }
+    WaitArg a = {t, ++t->wait_count, deadline, fd, writable};
+    park(begin_wait, &a);
+    if (fd >= 0) {
+        poller_remove(fd, writable);
+        atomic_fetch_sub(&n_io_waits, 1);
+    }
+}
+
+// A caught signal ends every timed wait, so sleeps and I/O waits (which
+// wake up regularly while signals are caught) check for it.
+static void wake_all_waiters(void) {
+    pthread_mutex_lock(&timers_lock);
+    for (int64_t i = 0; i < n_timers; i++) end_wait(timers[i].task, timers[i].wait);
+    pthread_mutex_unlock(&timers_lock);
+}
+
+// ---------------- task lifetime
+
+static pthread_mutex_t live_lock = PTHREAD_MUTEX_INITIALIZER;
+static int main_waits_for_all; // (guarded by live_lock)
+
+static void task_finished(void *p);
+static _Unwind_Reason_Code unwind_stop(int version, _Unwind_Action actions, _Unwind_Exception_Class cls, struct _Unwind_Exception *ex, struct _Unwind_Context *uc, void *param);
+
+static void release_task_closure(Task **tp) {
+    Task *t = *tp;
+    if (t->closure) {
+        void *c = t->closure;
+        t->closure = NULL;
+        t->release_closure(c);
+    }
+}
+
+// Runs the task's function. (A frame of its own, below `task_entry`, so its
+// cleanup runs when a panic unwinds the task, before the unwinder stops.)
+static __attribute__((noinline)) void task_body(Task *t) {
+    __attribute__((cleanup(release_task_closure))) Task *guard = t;
+    t->run(t->closure, t->result);
+}
+
+// The last things a task does on its own stack: free what its cycles held.
+static void task_wrap_up(Task *t) {
+    TarnCtx *c = t->ctxp;
+    if (c->roots.n) collect_roots(c, &c->roots);
+}
+
+static void task_entry(void) {
+    Task *t = cur_task();
+#if defined(TARN_SANITIZE)
+    asan_arrived(NULL);
+#endif
+    task_body(t);
+    task_wrap_up(t);
+    park(task_finished, t);
+    __builtin_unreachable();
+}
+
+// On the scheduler's stack, once the task is done: wake whoever joins it,
+// recycle the stack, and drop the scheduler's reference.
+static void handle_release(void *p);
+static void task_finished(void *p) {
+    Task *t = p;
+    ctx_free(&t->ctx);
+    stack_free(t->stack);
+    t->stack = NULL;
+    pthread_mutex_lock(&t->lock);
+    t->done = 1;
+    Task *j = t->joiners;
+    t->joiners = NULL;
+    pthread_mutex_unlock(&t->lock);
+    while (j) {
+        Task *next = j->next;
+        ready(j);
+        j = next;
+    }
+    handle_release(t);
+    // The last task: `main` may be waiting for it at the end of the program.
+    pthread_mutex_lock(&live_lock);
+    int wake_main = atomic_fetch_sub(&live_tasks, 1) == 1 && main_waits_for_all;
+    if (wake_main) main_waits_for_all = 0;
+    pthread_mutex_unlock(&live_lock);
+    if (wake_main) ready(&main_task);
+}
+
+void *tarn_task_spawn(void *closure, void (*run)(void *, void *), void (*release_closure)(void *), void (*release_result)(void *)) {
+    if (!sched_on) sched_start();
+    Task *t = tarn_alloc(sizeof(Task));
+    memset(t, 0, sizeof *t);
+    atomic_store(&t->rc, 2); // the handle returned, and the scheduler's while it runs
+    t->kind = HANDLE_TASK;
+    t->id = atomic_fetch_add(&next_task_id, 1) + 1;
+    t->ctxp = &t->ctx;
+    t->ctx.cur_roots = &t->ctx.roots;
+    t->ctx.roots_threshold = 10000;
+    t->closure = closure;
+    t->run = run;
+    t->release_closure = release_closure;
+    t->release_result = release_result;
+    t->wait_state = 1;
+    pthread_mutex_init(&t->lock, NULL);
+    t->stack = stack_alloc();
+    t->sp = init_stack(t->stack + task_stack_size, task_entry);
+    atomic_fetch_add(&live_tasks, 1);
+    ready(t);
+    return t;
+}
+
+// `task.join()`: wait for it to finish. 1 if it returned, 0 if it panicked.
+int64_t tarn_rt_task_wait(void *h) {
+    Task *t = h, *me = cur_task();
+    pthread_mutex_lock(&t->lock);
+    while (!t->done) {
+        me->next = t->joiners;
+        t->joiners = me;
+        park(unlock_mutex, &t->lock);
+        pthread_mutex_lock(&t->lock);
+    }
+    int ok = !t->panicked;
+    pthread_mutex_unlock(&t->lock);
+    return ok;
+}
+
+int64_t tarn_rt_task_is_done(void *h) {
+    Task *t = h;
+    pthread_mutex_lock(&t->lock);
+    int d = t->done;
+    pthread_mutex_unlock(&t->lock);
+    return d;
+}
+
+static void tarn_die(const char *file, int line, int col, const char *msg);
+
+// The finished task's result, into `out` (once).
+void tarn_task_take(void *h, void *out, const char *file, int line, int col) {
+    Task *t = h;
+    pthread_mutex_lock(&t->lock);
+    int taken = t->taken;
+    t->taken = 1;
+    if (!taken) memcpy(out, t->result, sizeof t->result);
+    pthread_mutex_unlock(&t->lock);
+    if (taken) tarn_die(file, line, col, "join() already gave this task's result away");
+}
+
+static TarnStr *str_from(const char *data, int64_t len);
+TarnStr *tarn_rt_task_panic_message(void *h) {
+    Task *t = h;
+    TarnStr *m = t->panic_message;
+    return m ? str_from(m->data, m->len) : str_from("", 0);
+}
+TarnStr *tarn_rt_task_panic_location(void *h) {
+    Task *t = h;
+    TarnStr *m = t->panic_location;
+    return m ? str_from(m->data, m->len) : str_from("", 0);
+}
+
+// The end of the program: `main` returned. Wait for every task first.
+static void wait_for_tasks(void) {
+    if (!sched_on) return;
+    pthread_mutex_lock(&live_lock);
+    while (atomic_load(&live_tasks) > 0) {
+        main_waits_for_all = 1;
+        park(unlock_mutex, &live_lock);
+        pthread_mutex_lock(&live_lock);
+    }
+    pthread_mutex_unlock(&live_lock);
+}
+
+static void deadlock(void) {
+    fflush(stdout);
+    fprintf(stderr, "deadlock: every task is waiting (for a channel, a lock or another task), and nothing can wake any of them\n");
+    _exit(101);
+}
+
+// ---------------- panics in tasks
+// A panic in a task other than `main` stops just that task: the stack is
+// unwound (every reference the task held is released, so `fn drop`s run and
+// sockets close) up to `task_entry`, then the task is done, and `join()`
+// gives the panic as an error. A panic in `main`, or while a value is being
+// freed, still ends the program.
+
+static void panic_exit(void) {
+    fflush(stdout);
+    exit(101);
+}
+
+static void free_unwind(_Unwind_Reason_Code r, struct _Unwind_Exception *e) { (void)r; (void)e; }
+
+static _Unwind_Reason_Code unwind_stop(int version, _Unwind_Action actions, _Unwind_Exception_Class cls, struct _Unwind_Exception *ex, struct _Unwind_Context *uc, void *param) {
+    (void)version;
+    (void)cls;
+    (void)ex;
+    Task *t = param;
+    if ((actions & _UA_END_OF_STACK) || _Unwind_GetRegionStart(uc) == (uintptr_t)&task_entry) {
+        // Everything above `task_entry` is unwound: the task is done.
+        t->panicked = 1;
+        task_wrap_up(t);
+        park(task_finished, t);
+        __builtin_unreachable();
+    }
+    return _URC_NO_REASON;
+}
+
+static void panic_task(const char *file, int line, int col, const char *msg, int64_t msg_len) {
+    Task *t = cur_task();
+    TarnCtx *c = ctx();
+    fflush(stdout);
+    if (t == &main_task || !sched_on || c->dropping || c->collecting) {
+        if (c->dropping || c->collecting) fprintf(stderr, "panic at %s:%d:%d: %.*s\n(while freeing a value: the program can't go on)\n", file, line, col, (int)msg_len, msg);
+        else fprintf(stderr, "panic at %s:%d:%d: %.*s\n", file, line, col, (int)msg_len, msg);
+        panic_exit();
+    }
+    fprintf(stderr, "panic in task %lld at %s:%d:%d: %.*s\n", (long long)t->id, file, line, col, (int)msg_len, msg);
+    char loc[600];
+    snprintf(loc, sizeof loc, "%s:%d:%d", file, line, col);
+    t->panic_message = str_from(msg, msg_len);
+    t->panic_location = str_from(loc, (int64_t)strlen(loc));
+    memset(&t->unwind, 0, sizeof t->unwind);
+    t->unwind.exception_class = 0x5441524E50414E43ull; // "TARNPANC"
+    t->unwind.exception_cleanup = free_unwind;
+    _Unwind_ForcedUnwind(&t->unwind, unwind_stop, t);
+    // (Only if there was no unwind information at all.)
+    fprintf(stderr, "panic: could not unwind the task\n");
+    panic_exit();
+}
+
+// ---------------- handles
+
+static void channel_free(void *p);
+static void mutex_free(void *p);
+
+static void handle_release(void *p) {
+    _Atomic int64_t *rc = p;
+    if (atomic_fetch_sub_explicit(rc, 1, memory_order_acq_rel) != 1) return;
+    int64_t kind = ((int64_t *)p)[1];
+    if (kind == HANDLE_TASK) {
+        Task *t = p;
+        if (t->done && !t->panicked && !t->taken && t->release_result) t->release_result(t->result);
+        if (t->panic_message) tarn_str_free(t->panic_message);
+        if (t->panic_location) tarn_str_free(t->panic_location);
+        pthread_mutex_destroy(&t->lock);
+        tarn_free(t, sizeof(Task));
+    } else if (kind == HANDLE_CHANNEL) {
+        channel_free(p);
+    } else if (kind == HANDLE_MUTEX) {
+        mutex_free(p);
+    } else {
+        tarn_free(p, 24);
+    }
+}
+
+// The last reference to a handle went away (called by the generated code).
+void tarn_handle_free(void *p) {
+    atomic_store((_Atomic int64_t *)p, 1);
+    handle_release(p);
+}
+
+// ---------------- channels
+// A queue of values from one task to another. `send` waits while it's full;
+// an unbuffered channel (capacity 0) waits until its value is received.
+// `receive` waits while it's empty, and gives nothing once it's closed and empty.
+
+typedef struct {
+    _Atomic int64_t rc;
+    int64_t kind;
+    pthread_mutex_t lock;
+    int64_t cap, slot;         // capacity (0: unbuffered), bytes per value
+    void (*release)(void *);   // releases a value in its slot (null: nothing to release)
+    char *buf;
+    int64_t head, len, bufcap; // a ring of `bufcap` slots
+    int64_t sent, taken;       // values ever sent / received
+    int closed;
+    Task *senders, *senders_tail;     // waiting for room
+    Task *receivers, *receivers_tail; // waiting for a value
+    Task *handoffs;                   // (unbuffered) waiting for their value to be taken
+} Channel;
+
+void *tarn_chan_new(int64_t cap, int64_t slot, void (*release)(void *), const char *file, int line, int col) {
+    if (cap < 0) tarn_die(file, line, col, "a channel's capacity can't be negative");
+    Channel *c = tarn_alloc(sizeof(Channel));
+    memset(c, 0, sizeof *c);
+    atomic_store(&c->rc, 1);
+    c->kind = HANDLE_CHANNEL;
+    pthread_mutex_init(&c->lock, NULL);
+    c->cap = cap;
+    c->slot = slot;
+    c->release = release;
+    c->bufcap = cap > 0 ? cap : 1;
+    c->buf = malloc((size_t)(c->bufcap * slot));
+    if (!c->buf) oom();
+    return c;
+}
+
+static void channel_free(void *p) {
+    Channel *c = p;
+    for (int64_t i = 0; i < c->len && c->release; i++) c->release(c->buf + ((c->head + i) % c->bufcap) * c->slot);
+    free(c->buf);
+    pthread_mutex_destroy(&c->lock);
+    tarn_free(c, sizeof(Channel));
+}
+
+static void wake_list(Task **head, Task **tail) {
+    Task *t = *head;
+    *head = NULL;
+    if (tail) *tail = NULL;
+    while (t) {
+        Task *next = t->next;
+        ready(t);
+        t = next;
+    }
+}
+
+static void wake_one(Task **head, Task **tail) {
+    Task *t = pop(head, tail);
+    if (t) ready(t);
+}
+
+// Only one task (no scheduler): it would wait for itself.
+static void lone_wait(const char *what, const char *file, int line, int col) {
+    char m[200];
+    snprintf(m, sizeof m, "%s, and no other task exists to do it: the program would wait forever", what);
+    tarn_die(file, line, col, m);
+}
+
+// `value` (a slot of `c->slot` bytes, already the channel's to keep) goes in.
+void tarn_chan_send(void *h, void *value, const char *file, int line, int col) {
+    Channel *c = h;
+    Task *me = cur_task();
+    pthread_mutex_lock(&c->lock);
+    while (!c->closed && c->len == c->bufcap) {
+        if (!sched_on) {
+            pthread_mutex_unlock(&c->lock);
+            lone_wait("this channel is full: `send` waits for a `receive`", file, line, col);
+        }
+        push(&c->senders, &c->senders_tail, me);
+        park(unlock_mutex, &c->lock);
+        pthread_mutex_lock(&c->lock);
+    }
+    if (c->closed) {
+        pthread_mutex_unlock(&c->lock);
+        if (c->release) c->release(value);
+        tarn_die(file, line, col, "send() on a closed channel");
+    }
+    memcpy(c->buf + ((c->head + c->len) % c->bufcap) * c->slot, value, (size_t)c->slot);
+    c->len++;
+    int64_t seq = c->sent++;
+    wake_one(&c->receivers, &c->receivers_tail);
+    // Unbuffered: wait until a receiver has taken it.
+    while (c->cap == 0 && c->taken <= seq && !c->closed) {
+        if (!sched_on) {
+            pthread_mutex_unlock(&c->lock);
+            lone_wait("this channel is unbuffered: `send` waits until a `receive` takes the value", file, line, col);
+        }
+        me->next = c->handoffs;
+        c->handoffs = me;
+        park(unlock_mutex, &c->lock);
+        pthread_mutex_lock(&c->lock);
+    }
+    pthread_mutex_unlock(&c->lock);
+}
+
+// The next value into `out`: 1, or 0 once the channel is closed and empty.
+int64_t tarn_chan_receive(void *h, void *out, const char *file, int line, int col) {
+    Channel *c = h;
+    Task *me = cur_task();
+    pthread_mutex_lock(&c->lock);
+    while (c->len == 0) {
+        if (c->closed) {
+            pthread_mutex_unlock(&c->lock);
+            return 0;
+        }
+        if (!sched_on) {
+            pthread_mutex_unlock(&c->lock);
+            lone_wait("this channel is empty: `receive` waits for a `send`", file, line, col);
+        }
+        push(&c->receivers, &c->receivers_tail, me);
+        park(unlock_mutex, &c->lock);
+        pthread_mutex_lock(&c->lock);
+    }
+    memcpy(out, c->buf + c->head * c->slot, (size_t)c->slot);
+    c->head = (c->head + 1) % c->bufcap;
+    c->len--;
+    c->taken++;
+    wake_one(&c->senders, &c->senders_tail);
+    wake_list(&c->handoffs, NULL);
+    pthread_mutex_unlock(&c->lock);
+    return 1;
+}
+
+void tarn_rt_chan_close(void *h) {
+    Channel *c = h;
+    pthread_mutex_lock(&c->lock);
+    c->closed = 1;
+    wake_list(&c->senders, &c->senders_tail);
+    wake_list(&c->receivers, &c->receivers_tail);
+    wake_list(&c->handoffs, NULL);
+    pthread_mutex_unlock(&c->lock);
+}
+
+int64_t tarn_rt_chan_is_closed(void *h) {
+    Channel *c = h;
+    pthread_mutex_lock(&c->lock);
+    int64_t r = c->closed;
+    pthread_mutex_unlock(&c->lock);
+    return r;
+}
+
+int64_t tarn_rt_chan_len(void *h) {
+    Channel *c = h;
+    pthread_mutex_lock(&c->lock);
+    int64_t r = c->len;
+    pthread_mutex_unlock(&c->lock);
+    return r;
+}
+
+// ---------------- mutexes
+// A value that several tasks reach, changed by one at a time. A task holds
+// it for the length of one call (`lock(fn(v) -> ...)`): what goes in is
+// moved or copied in, what comes out is moved or copied out, so nothing in
+// it is ever reachable from a task that doesn't hold it. Waiting for it
+// parks the task, not the thread.
+
+typedef struct {
+    _Atomic int64_t rc;
+    int64_t kind;
+    pthread_mutex_t lock; // guards the fields below
+    int held;
+    Task *owner;
+    Task *waiters, *waiters_tail;
+    int64_t slot;
+    void (*release)(void *);
+    int64_t value[2];
+    RootStack roots; // possible cycle roots found while it was held
+} Mutex;
+
+void *tarn_mutex_new(void *value, int64_t slot, void (*release)(void *)) {
+    Mutex *m = tarn_alloc(sizeof(Mutex));
+    memset(m, 0, sizeof *m);
+    atomic_store(&m->rc, 1);
+    m->kind = HANDLE_MUTEX;
+    pthread_mutex_init(&m->lock, NULL);
+    m->slot = slot;
+    m->release = release;
+    memcpy(m->value, value, (size_t)slot);
+    return m;
+}
+
+static void mutex_free(void *p) {
+    Mutex *m = p;
+    if (m->release) m->release(m->value);
+    // (Nothing else can reach its roots now: whatever they hold is garbage or gone.)
+    if (m->roots.n) collect_roots(ctx(), &m->roots);
+    free(m->roots.items);
+    pthread_mutex_destroy(&m->lock);
+    tarn_free(m, sizeof(Mutex));
+}
+
+static void mutex_acquire(Mutex *m, const char *file, int line, int col) {
+    Task *me = cur_task();
+    pthread_mutex_lock(&m->lock);
+    if (!m->held) {
+        m->held = 1;
+        m->owner = me;
+        pthread_mutex_unlock(&m->lock);
+        return;
+    }
+    if (m->owner == me) {
+        pthread_mutex_unlock(&m->lock);
+        tarn_die(file, line, col, "this task already holds this Mutex: locking it again inside its own `lock` would wait forever");
+    }
+    push(&m->waiters, &m->waiters_tail, me);
+    park(unlock_mutex, &m->lock);
+    // (`mutex_release` handed it over: we hold it now.)
+}
+
+static void mutex_release(Mutex *m) {
+    pthread_mutex_lock(&m->lock);
+    Task *next = pop(&m->waiters, &m->waiters_tail);
+    m->owner = next;
+    m->held = next != NULL;
+    pthread_mutex_unlock(&m->lock);
+    if (next) ready(next);
+}
+
+typedef struct {
+    Mutex *m;
+    TarnCtx *c;
+    RootStack *saved_roots;
+    void *closure;
+    void (*release_closure)(void *);
+} Held;
+
+static void mutex_leave(Held *h) {
+    // Cycles that died while it was held, and the function's own captures,
+    // are freed while it's still held (its value may be among them).
+    if (h->closure) h->release_closure(h->closure);
+    if (h->m->roots.n) collect_roots(h->c, &h->m->roots);
+    h->c->cur_roots = h->saved_roots;
+    mutex_release(h->m);
+}
+
+// Hold the Mutex while `run(closure, value, out)` runs (the generated code
+// calls the function value and moves or copies its result into `out`).
+// The Mutex is let go even if the function panics.
+void tarn_mutex_run(void *h, void *closure, void (*release_closure)(void *), void (*run)(void *, void *, void *), void *out, const char *file, int line, int col) {
+    Mutex *m = h;
+    mutex_acquire(m, file, line, col);
+    TarnCtx *c = ctx();
+    __attribute__((cleanup(mutex_leave))) Held held = {m, c, c->cur_roots, closure, release_closure};
+    c->cur_roots = &m->roots;
+    run(closure, m->value, out);
+}
+
+// ---------------- atomics
+
+typedef struct {
+    _Atomic int64_t rc;
+    int64_t kind;
+    _Atomic int64_t value;
+} AtomicInt;
+
+void *tarn_rt_atomic_new(int64_t v) {
+    AtomicInt *a = tarn_alloc(sizeof(AtomicInt));
+    atomic_store(&a->rc, 1);
+    a->kind = HANDLE_ATOMIC;
+    atomic_store(&a->value, v);
+    return a;
+}
+int64_t tarn_rt_atomic_get(void *h) { return atomic_load(&((AtomicInt *)h)->value); }
+void tarn_rt_atomic_set(void *h, int64_t v) { atomic_store(&((AtomicInt *)h)->value, v); }
+int64_t tarn_rt_atomic_add(void *h, int64_t n) { return atomic_fetch_add(&((AtomicInt *)h)->value, n) + n; }
+int64_t tarn_rt_atomic_swap(void *h, int64_t v) { return atomic_exchange(&((AtomicInt *)h)->value, v); }
+int64_t tarn_rt_atomic_compare_and_set(void *h, int64_t expected, int64_t v) {
+    return atomic_compare_exchange_strong(&((AtomicInt *)h)->value, &expected, v);
+}
+
+int64_t tarn_rt_cpu_count(void) { return sched_on ? n_workers : env_int("TARN_THREADS", sysconf(_SC_NPROCESSORS_ONLN)); }
+
+// ---------------- moving and copying values between tasks
+// The generated `tarn.xfer.*` functions walk a value about to go to another
+// task: an object nobody else references is moved as it is (its children
+// walked in turn), anything still referenced here is copied. Copies made in
+// one walk are remembered, so shared parts and cycles stay shared and cyclic.
+
+typedef struct {
+    void **keys, **vals;
+    int64_t n, cap;
+} XferMemo;
+
+// Is this object ours alone, to move? (`cyclic`: its count is in bits 3..,
+// and a buffered one is still in this task's root buffer: copy it instead.)
+int64_t tarn_xfer_unique(void *p, int64_t cyclic) {
+    int64_t rc = *(int64_t *)p;
+    if (rc >= RC_IMMORTAL) return 1;
+    return cyclic ? (rc >> 3) == 1 && !(rc & BUFFERED) : rc == 1;
+}
+
+static uint64_t mix_ptr(void *p) {
+    uint64_t x = (uint64_t)(uintptr_t)p;
+    x ^= x >> 33;
+    x *= 0xff51afd7ed558ccdull;
+    x ^= x >> 33;
+    return x;
+}
+
+void *tarn_xfer_seen(void **memo, void *p) {
+    XferMemo *m = *memo;
+    if (!m || !m->n) return NULL;
+    for (uint64_t i = mix_ptr(p) & (uint64_t)(m->cap - 1);; i = (i + 1) & (uint64_t)(m->cap - 1)) {
+        if (m->keys[i] == p) return m->vals[i];
+        if (!m->keys[i]) return NULL;
+    }
+}
+
+void tarn_xfer_remember(void **memo, void *p, void *copy) {
+    XferMemo *m = *memo;
+    if (!m) {
+        m = *memo = calloc(1, sizeof(XferMemo));
+        if (!m) oom();
+    }
+    if ((m->n + 1) * 2 > m->cap) {
+        XferMemo old = *m;
+        m->cap = old.cap ? old.cap * 2 : 16;
+        m->keys = calloc((size_t)m->cap, sizeof(void *));
+        m->vals = calloc((size_t)m->cap, sizeof(void *));
+        if (!m->keys || !m->vals) oom();
+        m->n = 0;
+        for (int64_t i = 0; i < old.cap; i++)
+            if (old.keys[i]) tarn_xfer_remember(memo, old.keys[i], old.vals[i]);
+        free(old.keys);
+        free(old.vals);
+    }
+    uint64_t i = mix_ptr(p) & (uint64_t)(m->cap - 1);
+    while (m->keys[i]) i = (i + 1) & (uint64_t)(m->cap - 1);
+    m->keys[i] = p;
+    m->vals[i] = copy;
+    m->n++;
+}
+
+void tarn_xfer_done(void **memo) {
+    XferMemo *m = *memo;
+    if (!m) return;
+    free(m->keys);
+    free(m->vals);
+    free(m);
+    *memo = NULL;
+}
+
+// Where the value being moved or copied comes from (for the panic below).
+static __thread const char *xfer_file;
+static __thread int xfer_line, xfer_col;
+
+void tarn_xfer_at(const char *file, int line, int col) {
+    xfer_file = file;
+    xfer_line = line;
+    xfer_col = col;
+}
+
+// A value with a `fn drop` (a socket, say) can be moved to another task, but
+// not copied: two copies would both clean up the same thing.
+void tarn_xfer_cant_copy(const char *type_name) {
+    char m[300];
+    snprintf(m, sizeof m, "a `%s` can't be copied to another task (it has a `fn drop`), and this task still uses it: give it away on its last use", type_name);
+    tarn_die(xfer_file ? xfer_file : "<task>", xfer_line, xfer_col, m);
+}
+
+TarnStr *tarn_str_clone(TarnStr *s) { return str_dup(s); }
 
 // ---------------------------------------------------------------- strings
 
@@ -728,12 +2216,20 @@ int64_t tarn_time_monotonic_ns(void) {
 }
 
 static int signal_any_pending(void);
+static atomic_uint signal_count;
 
-// Sleeps the whole time, unless a caught signal arrives (see the signal module).
+// Sleeps the whole time, unless a caught signal arrives (see the signal
+// module). In a task, only the task sleeps: its thread runs other tasks.
 void tarn_time_sleep_ns(int64_t ns) {
+    unsigned seen = atomic_load(&signal_count);
+    if (signal_any_pending()) return;
+    if (sched_on) {
+        int64_t deadline = now_ns() + (ns > 0 ? ns : 0);
+        while (now_ns() < deadline && atomic_load(&signal_count) == seen && !signal_any_pending()) wait_until(deadline, -1, 0);
+        return;
+    }
     fflush(stdout);
     struct timespec req = {(time_t)(ns / 1000000000), (long)(ns % 1000000000)}, rem;
-    if (signal_any_pending()) return;
     while (nanosleep(&req, &rem) != 0 && errno == EINTR) {
         if (signal_any_pending()) return;
         req = rem;
@@ -752,9 +2248,12 @@ void tarn_print_float(double d) {
 
 void tarn_print_bool(int64_t b) { puts(b ? "true" : "false"); }
 
+// (One line at a time: tasks on other threads print too.)
 void tarn_print_str(TarnStr *s) {
+    flockfile(stdout);
     fwrite(s->data, 1, (size_t)s->len, stdout);
-    putchar('\n');
+    putc_unlocked('\n', stdout);
+    funlockfile(stdout);
 }
 
 // ---------------------------------------------------------------- lists
@@ -1516,6 +3015,28 @@ TarnMap *tarn_map_new(const TarnMapType *t, int64_t n) {
     return m;
 }
 
+// A copy of the map's entries and index (for moving a value to another
+// task while this one still uses it): the generated code then takes a
+// reference to (and copies) each key and value. `stride`: bytes per entry.
+TarnMap *tarn_map_clone(TarnMap *m, int64_t stride) {
+    TarnMap *c = tarn_alloc((int64_t)sizeof(TarnMap));
+    *c = *m;
+    c->rc = 1;
+    c->hint_ix = -1;
+    c->hint_missing = 0;
+    if (m->cap) {
+        c->entries = malloc((size_t)(m->cap * stride));
+        if (!c->entries) oom();
+        memcpy(c->entries, m->entries, (size_t)(m->used * stride));
+    }
+    if (m->index) {
+        c->index = malloc((size_t)(m->mask + 1) * sizeof(int64_t));
+        if (!c->index) oom();
+        memcpy(c->index, m->index, (size_t)(m->mask + 1) * sizeof(int64_t));
+    }
+    return c;
+}
+
 // Frees the map (its keys and values were already released).
 void tarn_map_free(void *p) {
     TarnMap *m = p;
@@ -1652,10 +3173,10 @@ void tarn_panic_key(TarnStr *shown, int64_t quoted, const char *file, int line, 
 
 // ---------------------------------------------------------------- files (for the fs module)
 
-static char fs_error[512];
 
 static void fs_fail(const char *what, TarnStr *path) {
-    snprintf(fs_error, sizeof fs_error, "%s %.*s: %s", what, path->len > 300 ? 300 : (int)path->len, path->data, strerror(errno));
+    Task *t = cur_task();
+    snprintf(t->fs_error, sizeof t->fs_error, "%s %.*s: %s", what, path->len > 300 ? 300 : (int)path->len, path->data, strerror(errno));
 }
 
 // A NUL-terminated copy of a Tarn string (paths can't contain NUL).
@@ -1804,7 +3325,10 @@ int64_t tarn_fs_rename(TarnStr *from, TarnStr *to) {
     return ok;
 }
 
-TarnStr *tarn_fs_last_error(void) { return str_from(fs_error, (int64_t)strlen(fs_error)); }
+TarnStr *tarn_fs_last_error(void) {
+    Task *t = cur_task();
+    return str_from(t->fs_error, (int64_t)strlen(t->fs_error));
+}
 
 TarnStr *tarn_fs_cwd(void) {
     char buf[4096];
@@ -1909,9 +3433,24 @@ static int signal_any_pending(void) {
     return 0;
 }
 
+// How many caught signals have arrived: a socket wait that sees it change
+// was interrupted, even if another task has taken the signal since.
+static atomic_uint signal_count;
+
 static void on_signal(int s) {
+    int saved = errno;
+    atomic_fetch_add(&signal_count, 1);
     for (int i = 0; i < N_SIGNALS; i++)
         if (signal_numbers[i] == s) signal_pending[i] = signal_pending[i] + 1;
+    // Tasks waiting for time or I/O look for it as soon as the poller wakes up.
+    if (sched_on) wake_fd_write();
+    errno = saved;
+}
+
+static int any_signal_caught(void) {
+    for (int i = 0; i < N_SIGNALS; i++)
+        if (signal_caught[i]) return 1;
+    return 0;
 }
 
 static int sigisemptyset_portable(const sigset_t *set) {
@@ -1962,6 +3501,14 @@ int64_t tarn_rt_signal_wait(void) {
     sigset_t caught, old;
     signal_mask(&caught);
     if (sigisemptyset_portable(&caught)) return -1;
+    if (sched_on) {
+        // A task waits without holding up its thread (woken by the poller).
+        for (;;) {
+            int64_t got = tarn_rt_signal_next();
+            if (got >= 0) return got;
+            wait_until(now_ns() + 1000000000, -1, 0);
+        }
+    }
     sigprocmask(SIG_BLOCK, &caught, &old);
     int64_t got = -1;
     while (got < 0) {
@@ -1992,7 +3539,65 @@ void tarn_rt_signal_send(int64_t which) { raise(signal_numbers[which]); }
 #include <sys/socket.h>
 
 #define NET_EAI_BASE 100000
-static int64_t net_error;
+// (Per task: the task that failed reads it later.)
+#define net_error (cur_task()->net_error)
+
+// Sockets never block their thread: when one isn't ready, the task waits
+// for it (see `net_wait`). Each one's timeout (`set_timeout`), by fd.
+static int64_t *fd_timeouts;
+static int64_t n_fd_timeouts;
+static pthread_mutex_t fd_timeouts_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void set_fd_timeout(int fd, int64_t ns) {
+    pthread_mutex_lock(&fd_timeouts_lock);
+    if (fd >= n_fd_timeouts) {
+        int64_t n = n_fd_timeouts ? n_fd_timeouts : 64;
+        while (n <= fd) n *= 2;
+        fd_timeouts = realloc(fd_timeouts, (size_t)n * sizeof(int64_t));
+        if (!fd_timeouts) oom();
+        memset(fd_timeouts + n_fd_timeouts, 0, (size_t)(n - n_fd_timeouts) * sizeof(int64_t));
+        n_fd_timeouts = n;
+    }
+    fd_timeouts[fd] = ns;
+    pthread_mutex_unlock(&fd_timeouts_lock);
+}
+
+static int64_t fd_deadline(int fd) {
+    pthread_mutex_lock(&fd_timeouts_lock);
+    int64_t ns = fd < n_fd_timeouts ? fd_timeouts[fd] : 0;
+    pthread_mutex_unlock(&fd_timeouts_lock);
+    return ns > 0 ? now_ns() + ns : 0;
+}
+
+static void set_nonblocking(int fd) { fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK); }
+
+static int net_interrupted(void);
+
+// `fd` wasn't ready: wait until it may be (1), until `deadline` (0, with
+// net_error EAGAIN: timed out), or for a caught signal (-1, EINTR).
+static int net_wait(int fd, int writable, int64_t deadline) {
+    unsigned seen = atomic_load(&signal_count);
+    if (net_interrupted()) return -1;
+    if (deadline && now_ns() >= deadline) {
+        net_error = EAGAIN;
+        return 0;
+    }
+    if (sched_on) {
+        wait_until(deadline, fd, writable);
+        if (atomic_load(&signal_count) != seen) {
+            net_error = EINTR;
+            return -1;
+        }
+        return net_interrupted() ? -1 : 1;
+    }
+    struct pollfd p = {fd, (short)(writable ? POLLOUT : POLLIN), 0};
+    int ms = deadline ? (int)((deadline - now_ns() + 999999) / 1000000) : -1;
+    if (poll(&p, 1, ms) == 0) {
+        net_error = EAGAIN;
+        return 0;
+    }
+    return net_interrupted() ? -1 : 1;
+}
 
 int64_t tarn_rt_net_last_error(void) { return net_error; }
 
@@ -2001,6 +3606,8 @@ static int net_socket(int family) {
     int fd = socket(family, SOCK_STREAM, 0);
     if (fd < 0) return -1;
     fcntl(fd, F_SETFD, FD_CLOEXEC);
+    set_nonblocking(fd);
+    set_fd_timeout(fd, 0);
 #ifdef SO_NOSIGPIPE
     int one = 1;
     setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
@@ -2066,15 +3673,22 @@ static int net_interrupted(void) {
 
 int64_t tarn_rt_net_accept(int64_t lfd) {
     if (net_interrupted()) return -1;
+    int64_t deadline = fd_deadline((int)lfd);
     int fd;
-    do {
+    for (;;) {
         fd = accept((int)lfd, NULL, NULL);
-    } while (fd < 0 && errno == EINTR && !signal_any_pending());
-    if (fd < 0) {
+        if (fd >= 0) break;
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            if (net_wait((int)lfd, 0, deadline) <= 0) return -1;
+            continue;
+        }
+        if (errno == EINTR && !signal_any_pending()) continue;
         net_error = errno;
         return -1;
     }
     fcntl(fd, F_SETFD, FD_CLOEXEC);
+    set_nonblocking(fd);
+    set_fd_timeout(fd, 0);
 #ifdef SO_NOSIGPIPE
     int one = 1;
     setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
@@ -2093,10 +3707,16 @@ int64_t tarn_rt_net_connect(TarnStr *host, int64_t port) {
             net_error = errno;
             continue;
         }
-        int rc;
-        do {
-            rc = connect(fd, a->ai_addr, a->ai_addrlen);
-        } while (rc < 0 && errno == EINTR && !signal_any_pending());
+        int rc = connect(fd, a->ai_addr, a->ai_addrlen);
+        if (rc < 0 && (errno == EINPROGRESS || errno == EINTR)) {
+            // Wait until it's connected (or failed), then ask how it went.
+            int w = net_wait(fd, 1, 0);
+            int err = 0;
+            socklen_t len = sizeof err;
+            if (w > 0 && getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len) == 0 && err == 0) rc = 0;
+            else if (w > 0) errno = err ? err : errno;
+            else errno = (int)net_error;
+        }
         if (rc == 0) break;
         net_error = errno;
         close(fd);
@@ -2115,12 +3735,18 @@ TarnStr *tarn_rt_net_read(int64_t fd, int64_t max) {
     if (net_interrupted()) return NULL;
     if (max <= 0) max = 1;
     TarnStr *b = str_alloc(max);
+    int64_t deadline = fd_deadline((int)fd);
     ssize_t n;
-    do {
+    for (;;) {
         n = recv((int)fd, b->data, (size_t)max, 0);
-    } while (n < 0 && errno == EINTR && !signal_any_pending());
-    if (n < 0) {
-        net_error = errno;
+        if (n >= 0) break;
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            if (net_wait((int)fd, 0, deadline) > 0) continue;
+        } else if (errno == EINTR && !signal_any_pending()) {
+            continue;
+        } else {
+            net_error = errno;
+        }
         tarn_str_free(b);
         return NULL;
     }
@@ -2135,10 +3761,14 @@ int64_t tarn_rt_net_write(int64_t fd, TarnStr *data) {
 #else
     int flags = 0;
 #endif
-    int64_t off = 0;
+    int64_t off = 0, deadline = fd_deadline((int)fd);
     while (off < data->len) {
         ssize_t n = send((int)fd, data->data + off, (size_t)(data->len - off), flags);
         if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                if (net_wait((int)fd, 1, deadline) > 0) continue;
+                return -1;
+            }
             if (errno == EINTR && !signal_any_pending()) continue;
             net_error = errno;
             return -1;
@@ -2150,12 +3780,11 @@ int64_t tarn_rt_net_write(int64_t fd, TarnStr *data) {
 
 // Reads and writes give up after `ns` nanoseconds (0: never).
 int64_t tarn_rt_net_set_timeout(int64_t fd, int64_t ns) {
-    struct timeval tv = {(time_t)(ns / 1000000000), (suseconds_t)(ns % 1000000000 / 1000)};
-    if (ns > 0 && tv.tv_sec == 0 && tv.tv_usec == 0) tv.tv_usec = 1;
-    if (setsockopt((int)fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv) != 0 || setsockopt((int)fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv) != 0) {
-        net_error = errno;
+    if (fd < 0 || fcntl((int)fd, F_GETFD) < 0) {
+        net_error = EBADF;
         return -1;
     }
+    set_fd_timeout((int)fd, ns > 0 ? ns : 0);
     return 0;
 }
 
@@ -2221,21 +3850,38 @@ static int env_flag(const char *name) {
 static void arc_report(void) {
     int check = env_flag("TARN_ARC_CHECK");
     if (check) tarn_collect_cycles(); // garbage cycles still waiting for a collection
+    // The totals of every thread (a block freed on another thread than the
+    // one that allocated it counts there, so only the sums mean anything).
+    int64_t allocs = 0, frees = 0, live = 0, live_bytes = 0, peak = 0, collections = 0, cycle_frees = 0;
+    pthread_mutex_lock(&thread_states_lock);
+    for (ThreadState *t = all_thread_states; t; t = t->next) {
+        allocs += t->allocs;
+        frees += t->frees;
+        live += t->live;
+        live_bytes += t->live_bytes;
+        peak += t->peak_bytes;
+        collections += t->collections;
+        cycle_frees += t->cycle_frees;
+    }
+    pthread_mutex_unlock(&thread_states_lock);
     if (env_flag("TARN_ARC_STATS")) {
         fprintf(stderr, "tarn arc: %lld allocations, %lld frees, %lld live, peak %lld bytes, %lld cycle collections freed %lld\n",
-                (long long)st_allocs, (long long)st_frees, (long long)st_live, (long long)st_peak_bytes,
-                (long long)st_collections, (long long)st_cycle_frees);
+                (long long)allocs, (long long)frees, (long long)live, (long long)peak, (long long)collections, (long long)cycle_frees);
     }
-    if (check && st_live != 0) {
-        fprintf(stderr, "tarn: %lld objects leaked (%lld bytes)\n", (long long)st_live, (long long)st_live_bytes);
+    if (check && live != 0) {
+        fprintf(stderr, "tarn: %lld objects leaked (%lld bytes)\n", (long long)live, (long long)live_bytes);
     }
 }
 
 int main(int argc, char **argv) {
     saved_argc = argc;
     saved_argv = argv;
+    main_task.ctxp = &main_ctx;
+    tl_ctx = &main_ctx;
     init_ascii_chars();
     tarn_main();
+    // The program ends when `main` and every task it started are done.
+    wait_for_tasks();
     fflush(stdout);
     arc_report();
     return 0;

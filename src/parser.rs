@@ -861,6 +861,24 @@ impl Parser {
         };
         if !block {
             let body = self.expr()?;
+            // `fn(m) -> m[k] = v`: an assignment (the lambda returns nothing).
+            let op = match self.peek() {
+                Tok::Assign => Some(None),
+                Tok::PlusEq => Some(Some(BinOp::Add)),
+                Tok::MinusEq => Some(Some(BinOp::Sub)),
+                Tok::StarEq => Some(Some(BinOp::Mul)),
+                Tok::SlashEq => Some(Some(BinOp::Div)),
+                Tok::PercentEq => Some(Some(BinOp::Mod)),
+                _ => None,
+            };
+            if let Some(op) = op {
+                self.bump();
+                let value = self.expr()?;
+                let span = start.merge(value.span);
+                let stmt = Stmt { kind: StmtKind::Assign { target: body, op, value }, span };
+                let lam = Lambda { params, ret: None, body: LambdaBody::Block(vec![stmt]), head };
+                return Ok(Expr { kind: ExprKind::Lambda(Box::new(lam)), span });
+            }
             let span = start.merge(body.span);
             let lam = Lambda { params, ret: None, body: LambdaBody::Expr(Box::new(body)), head };
             return Ok(Expr { kind: ExprKind::Lambda(Box::new(lam)), span });

@@ -241,6 +241,7 @@ fn calls_in_expr(e: &TExpr, out: &mut Vec<(FuncId, Span)>) {
             calls_in(stmts, out);
             calls_in_expr(e, out);
         }
+        TExprKind::Sync(_, _, args) => args.iter().for_each(|a| calls_in_expr(a, out)),
         TExprKind::Match(x, arms) => {
             calls_in_expr(x, out);
             for a in arms {
@@ -318,6 +319,10 @@ impl Checker {
 
     /// Warn about type parameters of `sid` that none of its fields uses.
     pub(super) fn unused_type_params(&mut self, sid: StructId) {
+        // (The standard library's `Task[T]`, `Channel[T]`... hold a handle, not a `T`.)
+        if self.ns_kinds[self.struct_ns[sid]] == FileKind::Std {
+            return;
+        }
         let s = &self.structs[sid];
         let tys: Vec<Type> = s.fields.iter().chain(s.variants().iter().flat_map(|v| &v.fields)).map(|f| f.ty.clone()).collect();
         for p in self.struct_params[sid].clone() {
@@ -556,6 +561,29 @@ impl Checker {
         self.ide.structs[id].variants = vsyms;
         self.field_spans[id] = self.field_spans[origin].clone();
         self.fields_ready[id] = true;
+        self.instance_drop(id);
+    }
+
+    /// Instance `id` of a generic struct with a `fn drop` gets its own copy
+    /// of it, compiled even though nothing calls it (freeing does).
+    pub(super) fn instance_drop(&mut self, id: StructId) {
+        let origin = self.struct_origin[id];
+        let Some(decl) = self.structs[origin].drop else { return };
+        if origin == id || self.structs[id].drop.is_some() {
+            return;
+        }
+        let fid = self.member_instance(decl, id);
+        self.structs[id].drop = Some(fid);
+        if self.is_concrete_instance(fid) && self.queued.insert(fid) {
+            self.queue.push(fid);
+        }
+    }
+
+    /// Is `fid` (a method of `owner`, or a copy of one) a `fn drop`?
+    pub(super) fn is_drop_fn(&self, owner: Option<StructId>, fid: FuncId) -> bool {
+        let Some(s) = owner else { return false };
+        let decl = self.funcs[fid].instance.as_ref().map(|(d, _)| *d).unwrap_or(fid);
+        self.structs[self.struct_origin[s]].drop == Some(decl)
     }
 
     /// Generic function `decl` with a type for each of its type parameters
@@ -739,6 +767,8 @@ impl Checker {
             (Type::Param(p), a) => {
                 let Some(i) = tparams.iter().position(|q| q == p) else { return };
                 match &bound[i] {
+                    // A function returning nothing, passed where `fn(T) -> R` is wanted (`Mutex.lock`).
+                    None if *a == Type::Unit && self.unit_ok.contains(p) => bound[i] = Some(Type::Unit),
                     None if matches!(a, Type::Null | Type::Unit) => {}
                     None => bound[i] = Some(a.clone()),
                     Some(_) if weak => {}
@@ -992,9 +1022,19 @@ impl Checker {
         let tparams = self.funcs[fid].tparams.clone();
         let ret = self.funcs[fid].ret.clone();
         let fallback = |ret: &Type| Self::mk(TExprKind::Int(0), if *ret == Type::Unit { Type::Unit } else { Type::Error }, span);
-        let Some((targs, bound)) = self.infer_args(what, &tparams, &params, &ret, args, explicit, expected, span) else {
+        let unit_ok = self.unit_params(fid);
+        let saved = std::mem::replace(&mut self.unit_ok, unit_ok);
+        let inferred = self.infer_args(what, &tparams, &params, &ret, args, explicit, expected, span);
+        self.unit_ok = saved;
+        let Some((targs, bound)) = inferred else {
             return fallback(&ret);
         };
+        // A function run while a Mutex is held can't share a `var` with the task holding it.
+        if self.runs_while_locked(fid) {
+            for a in &targs {
+                self.no_shared_vars(a, "a function run while a `Mutex` is held");
+            }
+        }
         let callee = if tparams.is_empty() {
             fid
         } else {

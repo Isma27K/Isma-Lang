@@ -1,0 +1,46 @@
+# Channels carry values from some tasks to others, in order.
+
+struct Job:
+    id: Int
+    words: List[String]
+
+fn main():
+    # A buffered channel; a `for` loop (or any iterator method) runs until it's closed.
+    val jobs: Channel[Int] = Channel.buffered(100)
+    val sum = spawn(fn() -> jobs.map(fn(n) -> n * n).fold(0, fn(a, n) -> a + n))
+    for n in 1..=10:
+        jobs.send(n)
+    jobs.close()
+    print(sum.join()!!)
+    print(jobs.receive())
+    print(jobs.is_closed())
+
+    # Unbuffered: each `send` waits for a `receive`.
+    val words = Channel[String]()
+    val produce = fn(i: Int):
+        for k in 0..3:
+            words.send(f"p{i}-{k}")
+    val producers = [1, 2, 3].map(fn(i) -> spawn(fn() -> produce(i)))
+    val got: List[String] = []
+    for _ in 0..9:
+        got.push(words.receive()!!)
+    got.sort()
+    print(got)
+    for p in producers:
+        p.join()!!
+
+    # Structs go through whole; a pipeline of two stages.
+    val raw: Channel[Job] = Channel.buffered(4)
+    val counted: Channel[String] = Channel.buffered(4)
+    val worker = fn():
+        for job in raw:
+            counted.send(f"job {job.id}: {job.words.len()} words")
+        counted.close()
+    val w = spawn(worker)
+    raw.send(Job(1, ["a", "b"]))
+    raw.send(Job(2, "the quick brown fox".split(" ")))
+    raw.close()
+    for line in counted:
+        print(line)
+    w.join()!!
+    print(raw.len())

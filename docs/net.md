@@ -26,7 +26,9 @@ fn main():
 - **Calls wait** until they can finish. `set_timeout(time.seconds(5))` limits the wait (then the error's kind is `TimedOut`), and a [caught signal](system.md#signal) ends it (`Interrupted`).
 - Writing never raises `SIGPIPE`: writing to a closed connection is an `Err` with kind `Reset`.
 
-One connection is handled at a time: Tarn has no concurrency yet. [`examples/echo.tr`](../examples/echo.tr) is a whole echo server that stops cleanly on `Ctrl-C`.
+- **A call that waits lets other [tasks](language.md#tasks) run,** so a server serves many connections at once by giving each one a task: `spawn(fn() -> handle(conn))`. A socket can be moved to a task but not copied, so give it away on its last use.
+
+[`examples/echo.tr`](../examples/echo.tr) is a whole echo server: a task per client, and it stops cleanly on `Ctrl-C` (which interrupts every task waiting on a socket).
 
 ## Functions
 

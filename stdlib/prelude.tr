@@ -351,3 +351,137 @@ struct Enumerated[T, I: Iterator[T]](Iterator[(Int, T)]):
         val x = self._source.next() ?: return null
         self._at += 1
         return (self._at - 1, x)
+
+# A task started with `spawn(fn() -> ...)`, running alongside the code that
+# started it. `join()` waits for what it returns.
+#
+#     val t = spawn(fn() -> fetch(url))
+#     match t.join():
+#         case Ok(page): print(page.len())
+#         case Err(p): print(f"the task failed: {p}")
+struct Task[T]:
+    _h: __Handle
+
+    # Wait until the task is done: what it returned, or the panic that stopped it.
+    # (Its result is given once: a second `join()` panics.)
+    fn join(self) -> Result[T, Panic]:
+        if __task_wait(self._h):
+            return Ok(__task_take[T](self._h))
+        return Err(Panic(__task_panic_message(self._h), __task_panic_location(self._h)))
+
+    # Has it finished (returned or panicked)? Doesn't wait.
+    fn is_done(self) -> Bool:
+        return __task_is_done(self._h)
+
+# Why a task stopped: the panic's message, and where it happened (`app.tr:12:9`).
+struct Panic:
+    message: String
+    location: String
+
+    # `index 9 out of bounds for list of length 3 (at app.tr:12:9)`
+    fn to_string(self) -> String:
+        return f"{self.message} (at {self.location})"
+
+# Values sent from some tasks to others, in order. `send` waits while the
+# channel is full (an unbuffered one: until the value is received), and
+# `receive` waits while it's empty. Once it's closed and empty, `receive`
+# gives `null` and a `for` loop over it ends.
+#
+#     val jobs: Channel[Int] = Channel.buffered(100)
+#     val worker = spawn(fn() -> jobs.map(fn(n) -> n * n).fold(0, fn(a, n) -> a + n))
+#     for n in 1..=10:
+#         jobs.send(n)
+#     jobs.close()
+#     print(worker.join()!!)                # 385
+struct Channel[T](Iterator[T]):
+    _h: __Handle
+
+    # An unbuffered channel: each `send` waits until a `receive` takes its value.
+    fn new() -> Channel[T]:
+        return Channel(__chan_new[T](0))
+
+    # A channel that holds up to `capacity` values before `send` waits.
+    fn buffered(capacity: Int) -> Channel[T]:
+        return Channel(__chan_new[T](capacity))
+
+    # Put a value in (moved to whoever receives it, or copied if this task
+    # still uses it). Panics if the channel is closed.
+    fn send(self, value: T):
+        __chan_send(self._h, value)
+
+    # The next value, or `null` once the channel is closed and empty.
+    fn receive(self) -> T?:
+        return __chan_receive[T](self._h)
+
+    # The same as `receive`: a `for` loop over a channel takes values until it's closed.
+    fn next(self) -> T?:
+        return __chan_receive[T](self._h)
+
+    # No more values will be sent: receivers get what's left, then `null`.
+    fn close(self):
+        __chan_close(self._h)
+
+    fn is_closed(self) -> Bool:
+        return __chan_is_closed(self._h)
+
+    # How many values are waiting to be received.
+    fn len(self) -> Int:
+        return __chan_len(self._h)
+
+# A value that several tasks share, changed by one at a time. A task holds
+# it while a function runs on it: what goes in is moved (or copied) in,
+# what comes out is moved (or copied) out, so no task keeps a hold on it.
+#
+#     val hits: Mutex[Map[String, Int]] = Mutex({})
+#     hits.lock(fn(m) -> m["home"] = m.get("home", 0) + 1)
+#     print(hits.lock(fn(m) -> m.len()))
+struct Mutex[T]:
+    _h: __Handle
+
+    fn new(value: T) -> Mutex[T]:
+        return Mutex(__mutex_new(value))
+
+    # Run `f` on the value while holding it (other tasks wait), and give what `f` returns.
+    fn lock[R](self, f: fn(T) -> R) -> R:
+        return __mutex_lock(self._h, f)
+
+    # Replace the value with what `f` makes of it, while holding it.
+    fn update(self, f: fn(T) -> T):
+        __mutex_update(self._h, f)
+
+    # A copy of the value.
+    fn get(self) -> T:
+        return __mutex_get[T](self._h)
+
+    # Replace the value.
+    fn set(self, value: T):
+        __mutex_set(self._h, value)
+
+# An `Int` that several tasks can read and change at once, without a lock.
+#
+#     val done = Atomic(0)
+#     for i in 0..8:
+#         spawn(fn() -> done.add(1))
+struct Atomic:
+    _h: __Handle
+
+    fn new(value: Int) -> Atomic:
+        return Atomic(__atomic_new(value))
+
+    fn get(self) -> Int:
+        return __atomic_get(self._h)
+
+    fn set(self, value: Int):
+        __atomic_set(self._h, value)
+
+    # Add `n` (which may be negative), and give the new value.
+    fn add(self, n: Int) -> Int:
+        return __atomic_add(self._h, n)
+
+    # Put `value` in, and give the one it replaced.
+    fn swap(self, value: Int) -> Int:
+        return __atomic_swap(self._h, value)
+
+    # If the value is `expected`, replace it with `value`: did it?
+    fn compare_and_set(self, expected: Int, value: Int) -> Bool:
+        return __atomic_compare_and_set(self._h, expected, value)

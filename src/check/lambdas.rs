@@ -849,6 +849,7 @@ impl CellRewrite<'_> {
                 self.expr(x);
                 self.arms(arms);
             }
+            TExprKind::Sync(_, _, args) => self.exprs(args),
         }
     }
 }

@@ -86,6 +86,7 @@ impl Checker {
             Type::Bytes => "`Bytes` can't be map keys yet",
             Type::Func(..) => "functions can't be compared, so they can't be keys",
             Type::Iface(_) => "interface values can't be compared with `==`, so they can't be keys",
+            Type::Handle => "handles can't be keys",
         };
         if report {
             let mut d = Diagnostic::error(format!("`{shown}` can't be a map key"), span).with_primary("not a valid key type").with_note(problem);

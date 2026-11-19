@@ -208,7 +208,9 @@ impl<'a> Codegen<'a> {
             // Constant function values never die: their record does nothing.
             out.push_str("define internal void @tarn.noop(ptr %p) #0 {\n  ret void\n}\n\n");
             out.push_str("define internal void @tarn.noop.trace(ptr %p, ptr %visit) #0 {\n  ret void\n}\n\n");
-            out.push_str("@tarn.ti.fnconst = internal constant { ptr, ptr, ptr, ptr } { ptr @tarn.noop.trace, ptr @tarn.noop, ptr @tarn.noop, ptr @tarn.noop }\n\n");
+            // (A constant goes to another task as it is.)
+            out.push_str("define internal ptr @tarn.xfer.same(ptr %p, ptr %memo) #0 {\n  ret ptr %p\n}\n\n");
+            out.push_str("@tarn.ti.fnconst = internal constant { ptr, ptr, ptr, ptr, ptr } { ptr @tarn.noop.trace, ptr @tarn.noop, ptr @tarn.noop, ptr @tarn.noop, ptr @tarn.xfer.same }\n\n");
         }
         while self.closures_done < self.closure_classes.len() {
             let sid = self.closure_classes[self.closures_done];
@@ -244,7 +246,9 @@ impl<'a> Codegen<'a> {
             out,
             "define internal void @tarn.cl{sid}.mem(ptr %p) #0 {{\n  %szp = getelementptr {lt}, ptr null, i32 1\n  %sz = ptrtoint ptr %szp to i64\n  call void @tarn_free(ptr %p, i64 %sz)\n  ret void\n}}\n"
         );
-        // A box's type info also has the tag of the type of what it holds (for `case Circle`).
+        // Then how to move or copy it to another task (see `tasks.rs`), and
+        // for a box, the tag of the type of what it holds (for `case Circle`).
+        let xfer = self.closure_xfer_fn(sid);
         let tag = match &self.prog.structs[sid].closure {
             Some(Type::Iface(_)) => {
                 let held = self.prog.structs[sid].fields[0].ty.clone();
@@ -252,10 +256,10 @@ impl<'a> Codegen<'a> {
             }
             _ => String::new(),
         };
-        let words = if tag.is_empty() { "ptr, ptr, ptr, ptr" } else { "ptr, ptr, ptr, ptr, ptr" };
+        let words = if tag.is_empty() { "ptr, ptr, ptr, ptr, ptr" } else { "ptr, ptr, ptr, ptr, ptr, ptr" };
         let _ = writeln!(
             out,
-            "@tarn.ti.cl{sid} = internal constant {{ {words} }} {{ ptr @tarn.cl{sid}.trace, ptr @tarn.cl{sid}.drop, ptr @tarn.cl{sid}.white, ptr @tarn.cl{sid}.mem{tag} }}\n"
+            "@tarn.ti.cl{sid} = internal constant {{ {words} }} {{ ptr @tarn.cl{sid}.trace, ptr @tarn.cl{sid}.drop, ptr @tarn.cl{sid}.white, ptr @tarn.cl{sid}.mem, ptr {xfer}{tag} }}\n"
         );
     }
 
@@ -288,7 +292,7 @@ impl<'a> Codegen<'a> {
             let m = mangle(&t);
             let _ = writeln!(
                 out,
-                "define internal ptr @tarn.find.{m}(ptr %b) #0 {{\nentry:\n  br label %loop\nloop:\n  %p = phi ptr [ %b, %entry ], [ %inner, %next ]\n  %tip = getelementptr inbounds i8, ptr %p, i64 8\n  %ti = load ptr, ptr %tip\n  %tagp = getelementptr inbounds i8, ptr %ti, i64 32\n  %tag = load ptr, ptr %tagp\n  %hit = icmp eq ptr %tag, {tag}\n  br i1 %hit, label %found, label %more\nmore:\n  %deeper = icmp eq ptr %tag, {nested}\n  br i1 %deeper, label %next, label %miss\nnext:\n  %vp = getelementptr inbounds i8, ptr %p, i64 24\n  %inner = load ptr, ptr %vp\n  br label %loop\nfound:\n  ret ptr %p\nmiss:\n  ret ptr null\n}}\n"
+                "define internal ptr @tarn.find.{m}(ptr %b) #0 {{\nentry:\n  br label %loop\nloop:\n  %p = phi ptr [ %b, %entry ], [ %inner, %next ]\n  %tip = getelementptr inbounds i8, ptr %p, i64 8\n  %ti = load ptr, ptr %tip\n  %tagp = getelementptr inbounds i8, ptr %ti, i64 40\n  %tag = load ptr, ptr %tagp\n  %hit = icmp eq ptr %tag, {tag}\n  br i1 %hit, label %found, label %more\nmore:\n  %deeper = icmp eq ptr %tag, {nested}\n  br i1 %deeper, label %next, label %miss\nnext:\n  %vp = getelementptr inbounds i8, ptr %p, i64 24\n  %inner = load ptr, ptr %vp\n  br label %loop\nfound:\n  ret ptr %p\nmiss:\n  ret ptr null\n}}\n"
             );
         }
     }

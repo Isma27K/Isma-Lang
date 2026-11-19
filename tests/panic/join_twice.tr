@@ -1,0 +1,5 @@
+# expect-panic: join() already gave this task's result away
+fn main():
+    val t = spawn(fn() -> [1, 2, 3])
+    print(t.join()!!)
+    print(t.join()!!)

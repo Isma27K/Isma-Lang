@@ -7,7 +7,7 @@
 
 use crate::ast::BinOp;
 use crate::span::Span;
-use crate::tast::{Builtin, TStruct};
+use crate::tast::{Builtin, SyncOp, TStruct};
 use crate::types::*;
 use std::fmt::Write as _;
 
@@ -42,6 +42,9 @@ pub struct Func {
     pub closure: bool,
     /// A `fn drop(self)`: its parameter stays borrowed too.
     pub is_drop: bool,
+    /// Per block, per statement: the references (variable, how many) to
+    /// release if the statement panics and the task unwinds (see `arc.rs`).
+    pub cleanups: Vec<Vec<Vec<(VarId, u32)>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -134,6 +137,9 @@ pub enum Rvalue {
     /// Projection: the `.1` inside interface value `.0` (only valid when it
     /// holds one). Box contents never change, so it can stay borrowed.
     Unbox(VarId, Type),
+    /// An operation of tasks, channels or mutexes, on values of the types
+    /// given (see `SyncOp`).
+    Sync(SyncOp, Vec<Type>, Vec<Operand>, Span),
 }
 
 /// What a `New` builds.
@@ -208,7 +214,7 @@ impl Func {
 /// A nullable reference is a possibly-null pointer, so it counts too. An enum
 /// does when some variant carries data.
 pub fn is_ref(t: &Type) -> bool {
-    matches!(t.non_null(), Type::Str | Type::Bytes | Type::List(_) | Type::Map(..) | Type::Struct(_) | Type::Enum(_, true) | Type::Func(..) | Type::Iface(_))
+    matches!(t.non_null(), Type::Str | Type::Bytes | Type::List(_) | Type::Map(..) | Type::Struct(_) | Type::Enum(_, true) | Type::Func(..) | Type::Iface(_) | Type::Handle)
 }
 
 impl Operand {
@@ -233,6 +239,7 @@ impl Rvalue {
             | Rvalue::ListNew(_, args)
             | Rvalue::Closure(_, _, args) => args.iter().collect(),
             Rvalue::CallIndirect(f, args, _) | Rvalue::CallMethod(f, _, args, ..) => std::iter::once(f).chain(args).collect(),
+            Rvalue::Sync(_, _, args, _) => args.iter().collect(),
             Rvalue::Boxed(_, o) => vec![o],
             Rvalue::Field(..) | Rvalue::Index(..) | Rvalue::Tag(_) | Rvalue::VariantField(..) | Rvalue::MapNew(..) | Rvalue::IsType(..) | Rvalue::Unbox(..) => vec![],
             // (the list / object of a projection is a VarId, see `base`)
@@ -360,6 +367,7 @@ fn print_func(out: &mut String, f: &Func, p: &Program, names: &[String]) {
         Rvalue::Boxed(sid, o) => format!("box {} as {}", op(o), p.structs[*sid].closure.as_ref().map(|t| t.display(names, &[])).unwrap_or_default()),
         Rvalue::CallMethod(o, slot, args, ..) => format!("{}.<method {slot}>({})", op(o), ops(args)),
         Rvalue::IsType(o, t) => format!("{} is {}", var(*o), t.display(names, &[])),
+        Rvalue::Sync(op, _, args, _) => format!("@{op:?}({})", ops(args)),
         Rvalue::Unbox(o, t) => format!("{} as {}", var(*o), t.display(names, &[])),
     };
     for (b, block) in f.blocks.iter().enumerate() {

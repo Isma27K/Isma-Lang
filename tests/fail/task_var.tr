@@ -1,0 +1,6 @@
+# expect-error: a task can't share `count`, a `var`, with the code around it
+fn main():
+    var count = 0
+    val t = spawn(fn() -> count + 1)
+    count = 2
+    print(t.join())

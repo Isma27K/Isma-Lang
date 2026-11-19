@@ -1,0 +1,7 @@
+# expect-error: `spawn` takes a function without parameters
+fn double(x: Int) -> Int:
+    return x * 2
+
+fn main():
+    val t = spawn(double)
+    print(t.join())

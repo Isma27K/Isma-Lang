@@ -600,3 +600,43 @@ fn doc_json_lists_the_standard_library() {
     assert!(v["functions"].as_array().unwrap().iter().any(|f| f["name"] == "print"));
     assert!(!tarn(&["doc"]).status.success());
 }
+
+#[test]
+fn deadlocked_tasks_are_reported() {
+    // Every task waits and nothing can wake them: the program says so and
+    // stops, with one worker thread or many.
+    let dir = scratch("deadlock");
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("stuck.tr");
+    std::fs::write(&f, "fn main():\n    val ch = Channel[Int]()\n    val t = spawn(fn() -> ch.receive())\n    print(t.join())\n").unwrap();
+    for threads in ["1", "4"] {
+        let out = tarn_env(&["run", f.to_str().unwrap()], &[("TARN_THREADS", threads)]);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(101), "{stderr}");
+        assert!(stderr.contains("deadlock: every task is waiting"), "{stderr}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn task_stack_overflow_is_reported() {
+    // Recursing past a task's stack says so (instead of a bare segfault), and
+    // TARN_TASK_STACK gives tasks more.
+    let dir = scratch("stack-overflow");
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("deep.tr");
+    std::fs::write(
+        &f,
+        "fn depth(n: Int) -> Int:\n    if n == 0:\n        return 0\n    return 1 + depth(n - 1)\n\nfn main():\n    print(\"before\")\n    print(spawn(fn() -> depth(1000000)).join()!!)\n",
+    )
+    .unwrap();
+    let out = tarn(&["run", f.to_str().unwrap()]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(101), "{stderr}");
+    assert!(stderr.contains("stack overflow in task 1"), "{stderr}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "before\n");
+    let out = tarn_env(&["run", f.to_str().unwrap()], &[("TARN_TASK_STACK", "200000000")]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "before\n1000000\n", "{}", String::from_utf8_lossy(&out.stderr));
+    let _ = std::fs::remove_dir_all(&dir);
+}

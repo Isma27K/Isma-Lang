@@ -7,12 +7,13 @@
 use crate::ast::BinOp;
 use crate::mir::*;
 use crate::span::{SourceMap, Span};
-use crate::tast::Builtin;
+use crate::tast::{Builtin, SyncOp};
 use crate::types::*;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
 mod closures;
+mod tasks;
 mod maps;
 
 pub fn generate(prog: &Program, sources: &SourceMap, target_triple: Option<&str>) -> String {
@@ -53,6 +54,20 @@ pub fn generate(prog: &Program, sources: &SourceMap, target_triple: Option<&str>
         type_tags: Vec::new(),
         box_finders: Vec::new(),
         box_finders_done: 0,
+        xfer_types: Vec::new(),
+        xfer_done: 0,
+        dup_types: Vec::new(),
+        dup_done: 0,
+        slot_types: Vec::new(),
+        slot_done: 0,
+        sync_helpers: Vec::new(),
+        sync_done: 0,
+        cstrs: 0,
+        unwinds: prog.funcs.iter().any(|f| {
+            f.blocks.iter().any(|b| b.stmts.iter().any(|s| matches!(s, Stmt::Assign(_, Rvalue::Sync(SyncOp::Spawn, ..)) | Stmt::Eval(Rvalue::Sync(SyncOp::Spawn, ..)))))
+        }),
+        cleanup: None,
+        lpads: Vec::new(),
     };
     let mut funcs = String::new();
     for f in prog.funcs.iter().filter(|f| !f.generic) {
@@ -62,7 +77,7 @@ pub fn generate(prog: &Program, sources: &SourceMap, target_triple: Option<&str>
     funcs.push_str(&g.map_functions());
     // Closures' functions release their captures, which may need more release functions, and so on.
     loop {
-        let more = g.closure_functions() + &g.rc_functions();
+        let more = g.closure_functions() + &g.sync_functions() + &g.rc_functions();
         if more.is_empty() {
             break;
         }
@@ -124,9 +139,17 @@ pub fn generate(prog: &Program, sources: &SourceMap, target_triple: Option<&str>
     }
     out.push('\n');
     out.push_str(&funcs);
-    out.push_str("attributes #0 = { nounwind }\n");
-    out.push_str("attributes #1 = { cold noreturn nounwind }\n");
+    if g.unwinds {
+        // (A panic in a task unwinds through generated code and the runtime.)
+        out.push_str("declare i32 @__gcc_personality_v0(...)\n");
+        out.push_str("attributes #0 = { uwtable }\n");
+        out.push_str("attributes #1 = { cold noreturn uwtable }\n");
+    } else {
+        out.push_str("attributes #0 = { nounwind }\n");
+        out.push_str("attributes #1 = { cold noreturn nounwind }\n");
+    }
     out.push_str("attributes #2 = { alwaysinline nounwind }\n");
+    out.push_str("attributes #3 = { uwtable }\n");
     // Type-based alias analysis: Tarn has no pointer casts, so memory of
     // different kinds (list headers, elements of each type, each struct
     // field) can never overlap. Telling LLVM lets it keep e.g. a list's
@@ -143,6 +166,23 @@ pub fn generate(prog: &Program, sources: &SourceMap, target_triple: Option<&str>
 }
 
 const RUNTIME_DECLS: &str = "\
+declare ptr @tarn_task_spawn(ptr, ptr, ptr, ptr) #3
+declare void @tarn_task_take(ptr, ptr, ptr, i32, i32) #3
+declare ptr @tarn_chan_new(i64, i64, ptr, ptr, i32, i32) #3
+declare void @tarn_chan_send(ptr, ptr, ptr, i32, i32) #3
+declare i64 @tarn_chan_receive(ptr, ptr, ptr, i32, i32) #3
+declare ptr @tarn_mutex_new(ptr, i64, ptr) #3
+declare void @tarn_mutex_run(ptr, ptr, ptr, ptr, ptr, ptr, i32, i32) #3
+declare void @tarn_handle_free(ptr) #0
+declare void @tarn_xfer_at(ptr, i32, i32) #0
+declare i64 @tarn_xfer_unique(ptr, i64) #0
+declare ptr @tarn_xfer_seen(ptr, ptr) #0
+declare void @tarn_xfer_remember(ptr, ptr, ptr) #0
+declare void @tarn_xfer_done(ptr) #0
+declare void @tarn_xfer_cant_copy(ptr) #3
+declare ptr @tarn_str_clone(ptr) #0
+declare ptr @tarn_map_clone(ptr, i64) #0
+declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)
 declare ptr @tarn_alloc(i64) #0
 declare void @tarn_free(ptr, i64) #0
 declare void @tarn_drop_slow(ptr, ptr) #0
@@ -261,6 +301,29 @@ declare { i64, i1 } @llvm.smul.with.overflow.i64(i64, i64)
 ";
 
 /// A name made of the characters LLVM allows in an unquoted identifier.
+/// `call` as an `invoke` (without its destinations), if the callee may
+/// panic: anything but intrinsics and the runtime's functions that never do.
+fn as_invoke(line: &str) -> Option<String> {
+    let at = line.find("call ")?;
+    let before = &line[..at];
+    if !(before.is_empty() || before.ends_with("= ")) {
+        return None;
+    }
+    let rest = &line[at + 5..];
+    let callee_at = rest.find(['@', '%'])?;
+    let callee = &rest[callee_at..];
+    const NEVER: &[&str] = &[
+        "@llvm.", "@tarn.release.", "@tarn.dup.", "@tarn.drop.", "@tarn.fields.", "@tarn.mem.", "@tarn_alloc(", "@tarn_free(", "@tarn_drop_slow(",
+        "@tarn_release_cyclic(", "@tarn_cyclic_free(", "@tarn_handle_free(", "@tarn_print_", "@tarn_str_free(", "@tarn_list_free(", "@tarn_list_new(",
+        "@tarn_list_push_slot(", "@tarn_xfer_at(", "@tarn_xfer_done(", "@tarn_str_concat(", "@tarn_str_append_owned(", "@tarn_int_to_str(",
+        "@tarn_float_to_str(", "@tarn_bool_to_str(", "@tarn_str_eq(", "@tarn_str_cmp(", "@tarn_map_free(", "@tarn_map_new(",
+    ];
+    if NEVER.iter().any(|n| callee.starts_with(n)) {
+        return None;
+    }
+    Some(format!("{before}invoke {rest}"))
+}
+
 fn llvm_name(name: &str) -> String {
     name.chars()
         .filter(|c| *c != ' ')
@@ -273,7 +336,7 @@ fn llty(t: &Type) -> &'static str {
         Type::Int => "i64",
         Type::Float => "double",
         Type::Bool => "i1",
-        Type::Str | Type::Bytes | Type::List(_) | Type::Map(..) | Type::Struct(_) | Type::Enum(_, true) | Type::Func(..) | Type::Iface(_) => "ptr",
+        Type::Str | Type::Bytes | Type::List(_) | Type::Map(..) | Type::Struct(_) | Type::Enum(_, true) | Type::Func(..) | Type::Iface(_) | Type::Handle => "ptr",
         // An enum without data is just the number of its variant.
         Type::Enum(_, false) => "i64",
         Type::Unit => "void",
@@ -340,6 +403,7 @@ fn mangle(t: &Type) -> String {
         Type::Unit => "unit".into(),
         Type::Func(ps, r) => format!("fn.{}.to.{}.end", ps.iter().map(mangle).collect::<Vec<_>>().join("."), mangle(r)),
         Type::Iface(id) => format!("i{id}"),
+        Type::Handle => "handle".into(),
         _ => unreachable!("no runtime representation: {t:?}"),
     }
 }
@@ -451,6 +515,27 @@ struct Codegen<'a> {
     /// function finding the box that holds one, and how many are emitted.
     box_finders: Vec<Type>,
     box_finders_done: usize,
+    /// Types whose `tarn.xfer` (move or copy to another task), `tarn.dup`
+    /// and `tarn.slot.release` functions are needed (see `tasks.rs`), and
+    /// how many are emitted; and the task and lock callbacks.
+    xfer_types: Vec<Type>,
+    xfer_done: usize,
+    dup_types: Vec<Type>,
+    dup_done: usize,
+    slot_types: Vec<Type>,
+    slot_done: usize,
+    sync_helpers: Vec<(String, String)>,
+    sync_done: usize,
+    cstrs: usize,
+    /// The program starts tasks, so a panic can unwind a task's stack: calls
+    /// that may panic become `invoke`s whose landing pad releases what the
+    /// function holds there (`Func::cleanups`). Without tasks a panic ends
+    /// the program, so there's nothing to release.
+    unwinds: bool,
+    /// The landing pad for the statement being generated, if it holds anything.
+    cleanup: Option<String>,
+    /// This function's landing pads: what each releases, and its label.
+    lpads: Vec<(Vec<(VarId, u32)>, String)>,
 }
 
 impl<'a> Codegen<'a> {
@@ -475,9 +560,48 @@ impl<'a> Codegen<'a> {
             self.cur_label = l;
             self.terminated = false;
         }
+        // A call that may panic, where this function holds references: an
+        // `invoke` that releases them if the task unwinds.
+        if let Some(lp) = self.cleanup.clone()
+            && let Some(inv) = as_invoke(s.as_ref())
+        {
+            let ok = self.new_label("ok");
+            let _ = writeln!(self.body, "  {inv} to label %{ok} unwind label %{lp}\n{ok}:");
+            self.cur_label = ok;
+            return;
+        }
         self.body.push_str("  ");
         self.body.push_str(s.as_ref());
         self.body.push('\n');
+    }
+
+    /// The landing pad releasing `held` (made once per function).
+    fn lpad_label(&mut self, held: &[(VarId, u32)]) -> String {
+        if let Some((_, l)) = self.lpads.iter().find(|(h, _)| h == held) {
+            return l.clone();
+        }
+        let l = format!("lpad{}", self.lpads.len());
+        self.lpads.push((held.to_vec(), l.clone()));
+        l
+    }
+
+    /// The landing pads of the function just generated.
+    fn landing_pads(&mut self) -> String {
+        let mut out = String::new();
+        for (k, (held, label)) in std::mem::take(&mut self.lpads).into_iter().enumerate() {
+            let _ = writeln!(out, "{label}:\n  %lp{k} = landingpad {{ ptr, i32 }} cleanup");
+            // (Latest variables first, as when a block ends.)
+            for (j, (v, n)) in held.iter().rev().enumerate() {
+                let ty = self.f.vars[*v].ty.clone();
+                let rel = self.release_fn(&ty);
+                let _ = writeln!(out, "  %lp{k}.{j} = load ptr, ptr %v{v}");
+                for _ in 0..*n {
+                    let _ = writeln!(out, "  call void {rel}(ptr %lp{k}.{j})");
+                }
+            }
+            let _ = writeln!(out, "  resume {{ ptr, i32 }} %lp{k}");
+        }
+        out
     }
 
     fn emit_term(&mut self, s: impl AsRef<str>) {
@@ -633,16 +757,22 @@ impl<'a> Codegen<'a> {
         if f.track_caller {
             params.push("ptr %caller.file, i32 %caller.line, i32 %caller.col".to_string());
         }
+        self.lpads.clear();
         for (b, block) in f.blocks.iter().enumerate() {
             self.start_block(&format!("bb{b}"));
-            for s in &block.stmts {
+            for (i, s) in block.stmts.iter().enumerate() {
+                let held = if self.unwinds { f.cleanups.get(b).and_then(|c| c.get(i)).filter(|c| !c.is_empty()).cloned() } else { None };
+                self.cleanup = held.map(|h| self.lpad_label(&h));
                 self.stmt(s);
+                self.cleanup = None;
             }
             self.term(&block.term);
         }
+        let personality = if self.lpads.is_empty() { "" } else { " personality ptr @__gcc_personality_v0" };
+        let pads = self.landing_pads();
         let linkage = if f.exported { "" } else { "internal " };
         format!(
-            "; {}\ndefine {linkage}{} @{}({}) #0 {{\nentry:\n{}{}}}\n\n",
+            "; {}\ndefine {linkage}{} @{}({}) #0{personality} {{\nentry:\n{}{}{pads}}}\n\n",
             f.name,
             llty(&f.ret),
             f.symbol,
@@ -764,6 +894,15 @@ impl<'a> Codegen<'a> {
         } else {
             None
         };
+        // A handle (task, channel, mutex...) can be reached from several tasks.
+        if *ty.non_null() == Type::Handle {
+            let old = self.fresh();
+            self.emit(format!("{old} = atomicrmw add ptr {p}, i64 1 monotonic"));
+            if let Some(skip) = skip {
+                self.start_block(&skip);
+            }
+            return;
+        }
         let md = self.tbaa("rc");
         let c = self.fresh();
         self.emit(format!("{c} = load i64, ptr {p}{md}"));
@@ -1038,6 +1177,13 @@ impl<'a> Codegen<'a> {
                     out,
                     "define internal void @tarn.release.{}(ptr %p) #2 {{\n  %z = icmp eq ptr %p, null\n  br i1 %z, label %done, label %rel\nrel:\n  call void {rel}(ptr %p)\n  br label %done\ndone:\n  ret void\n}}\n",
                     mangle(&t)
+                );
+                continue;
+            }
+            if t == Type::Handle {
+                let _ = writeln!(
+                    out,
+                    "define internal void @tarn.release.handle(ptr %p) #2 {{\n  %old = atomicrmw sub ptr %p, i64 1 acq_rel\n  %z = icmp eq i64 %old, 1\n  br i1 %z, label %free, label %done\nfree:\n  call void @tarn_handle_free(ptr %p)\n  br label %done\ndone:\n  ret void\n}}\n"
                 );
                 continue;
             }
@@ -1421,6 +1567,7 @@ impl<'a> Codegen<'a> {
                 self.emit(format!("{r} = load {}, ptr {vp}", llty(t)));
                 r
             }
+            Rvalue::Sync(op, types, args, span) => self.sync(*op, types, args, *span),
             Rvalue::Tag(v) => {
                 let val = self.operand(&Operand::Var(*v));
                 if matches!(self.f.vars[*v].ty, Type::Enum(_, false)) {

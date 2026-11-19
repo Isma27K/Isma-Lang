@@ -1,0 +1,5 @@
+# expect-panic: send() on a closed channel
+fn main():
+    val ch: Channel[Int] = Channel.buffered(2)
+    ch.close()
+    ch.send(1)

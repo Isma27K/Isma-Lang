@@ -7,6 +7,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub const RUNTIME_C: &str = include_str!("../runtime/runtime.c");
 
+/// How the runtime is compiled: with unwind tables and cleanups (a panic in
+/// a task unwinds through it), for threads.
+const RUNTIME_FLAGS: &[&str] = &["-pthread", "-fexceptions", "-funwind-tables"];
+
 pub struct BuildOptions {
     pub debug: bool,
     /// Developer mode: AddressSanitizer + UBSan, and every object a plain
@@ -154,7 +158,7 @@ fn atomic_build(dest: &Path, build: impl FnOnce(&Path) -> Result<(), String>) ->
 /// The runtime compiled once to an object file and reused by every build.
 fn cached_runtime_object(clang: &Path, opts: &BuildOptions) -> Option<PathBuf> {
     let mut h = Fnv::new();
-    h.write(RUNTIME_C.as_bytes()).write(clang.as_os_str().as_encoded_bytes()).write(&opts.key());
+    h.write(RUNTIME_C.as_bytes()).write(clang.as_os_str().as_encoded_bytes()).write(&opts.key()).write(RUNTIME_FLAGS.join(" ").as_bytes());
     let obj = cache_dir()?.join(format!("runtime-{}.o", h.hex()));
     if obj.is_file() {
         return Some(obj);
@@ -166,6 +170,7 @@ fn cached_runtime_object(clang: &Path, opts: &BuildOptions) -> Option<PathBuf> {
             .arg(opts.opt_level())
             .args(opts.sanitizer_flags())
             .args(["-w", "-c", "-x", "c"])
+            .args(RUNTIME_FLAGS)
             .arg(&src)
             .arg("-o")
             .arg(tmp)
@@ -198,10 +203,13 @@ pub fn build_executable(clang: &Path, ir: &str, output: &Path, opts: &BuildOptio
         if opts.debug {
             cmd.arg("-g");
         }
-        if opts.sanitize && runtime.extension().is_some_and(|e| e == "c") {
-            cmd.arg("-DTARN_SANITIZE");
+        if runtime.extension().is_some_and(|e| e == "c") {
+            cmd.args(RUNTIME_FLAGS);
+            if opts.sanitize {
+                cmd.arg("-DTARN_SANITIZE");
+            }
         }
-        cmd.args(["-Wno-override-module", "-w", "-o"]).arg(output).arg(&ll).arg(&runtime).arg("-lm");
+        cmd.args(["-Wno-override-module", "-w", "-o"]).arg(output).arg(&ll).arg(&runtime).args(["-lm", "-pthread"]);
         let out = cmd.output().map_err(|e| format!("failed to run {}: {e}", clang.display()))?;
         if !out.status.success() {
             return Err(format!(

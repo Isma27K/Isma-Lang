@@ -47,7 +47,73 @@ pub fn run(prog: &mut Program) {
         insert_rc(f, &sigs, &own);
         reuse(f, &sizes, &cyclic);
         peephole(f);
+        f.cleanups = cleanup_sets(f, &sigs, &own.borrowed);
     }
+}
+
+// ---------------------------------------------------------------- unwinding
+
+/// When a panic unwinds a task, every function on its stack releases the
+/// references it holds. Before each statement: how many references each
+/// variable holds (a forward walk over the counts that `Dup`, `Drop` and
+/// ownership transfers change, taking the smallest where paths meet), minus
+/// what the statement itself gives away (a callee that took ownership
+/// releases it as it unwinds).
+fn cleanup_sets(f: &Func, sigs: &[Vec<bool>], borrowed: &[bool]) -> Vec<Vec<Vec<(VarId, u32)>>> {
+    let (nv, nb) = (f.vars.len(), f.blocks.len());
+    let mut entry: Vec<Option<Vec<u32>>> = vec![None; nb];
+    let mut start = vec![0u32; nv];
+    for (i, &p) in f.params.iter().enumerate() {
+        if f.param_owned.get(i).copied().unwrap_or(false) && rc(f, p) {
+            start[p] = 1;
+        }
+    }
+    entry[0] = Some(start);
+    let mut sets: Vec<Vec<Vec<(VarId, u32)>>> = vec![Vec::new(); nb];
+    for _round in 0..64 {
+        let mut changed = false;
+        for b in 0..nb {
+            let Some(mut cur) = entry[b].clone() else { continue };
+            let mut here = Vec::with_capacity(f.blocks[b].stmts.len());
+            for s in &f.blocks[b].stmts {
+                let r = stmt_roles(f, s, sigs, Some(borrowed));
+                let mut held = cur.clone();
+                for &c in &r.consumed {
+                    held[c] = held[c].saturating_sub(1);
+                }
+                here.push(held.iter().enumerate().filter(|(_, n)| **n > 0).map(|(v, n)| (v, *n)).collect());
+                match s {
+                    Stmt::Dup(v) => cur[*v] += 1,
+                    Stmt::Drop(v) | Stmt::DropReuse(v, _) => cur[*v] = cur[*v].saturating_sub(1),
+                    _ => {
+                        for &c in &r.consumed {
+                            cur[c] = cur[c].saturating_sub(1);
+                        }
+                        if let Some(d) = r.def
+                            && !r.projection
+                        {
+                            cur[d] = 1;
+                        }
+                    }
+                }
+            }
+            sets[b] = here;
+            for s in f.blocks[b].term.successors() {
+                let next = match &entry[s] {
+                    None => cur.clone(),
+                    Some(e) => e.iter().zip(&cur).map(|(a, b)| (*a).min(*b)).collect(),
+                };
+                if entry[s].as_ref() != Some(&next) {
+                    entry[s] = Some(next);
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    sets
 }
 
 // ---------------------------------------------------------------- sets
@@ -196,6 +262,19 @@ fn rvalue_roles(f: &Func, rv: &Rvalue, sigs: &[Vec<bool>], r: &mut Roles) {
             }
         }
         Rvalue::Boxed(_, o) => add(o, true, r),
+        // What goes to another task (or into a channel or Mutex) is given away;
+        // the handle is only read.
+        Rvalue::Sync(op, _, args, _) => {
+            use crate::tast::SyncOp as S;
+            for (i, a) in args.iter().enumerate() {
+                let given = match op {
+                    S::Spawn | S::MutexNew => true,
+                    S::ChanSend | S::MutexLock | S::MutexUpdate | S::MutexSet => i == 1,
+                    _ => false,
+                };
+                add(a, given, r);
+            }
+        }
         Rvalue::Field(o, ..) | Rvalue::VariantField(o, ..) | Rvalue::Tag(o) | Rvalue::IsType(o, _) | Rvalue::Unbox(o, _) => add(&Operand::Var(*o), false, r),
         Rvalue::Index(l, i, _) => {
             add(&Operand::Var(*l), false, r);

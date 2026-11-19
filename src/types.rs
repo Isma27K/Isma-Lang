@@ -33,6 +33,10 @@ pub enum Type {
     Func(Vec<Type>, Box<Type>),
     /// The type of a bare `null` literal before it meets an expected type.
     Null,
+    /// `__Handle`: an object several tasks can reach (a task, channel,
+    /// mutex or atomic in the runtime), with an atomic reference count.
+    /// Only the standard library names it, inside `Task`, `Channel`...
+    Handle,
     /// A type parameter inside generic code (`T` in `fn max[T](a: T, b: T)`).
     /// Generic code is checked once with its parameters as they are, then
     /// copied for every set of types it's used with: the back end never sees one.
@@ -139,6 +143,7 @@ impl Type {
             }
             Type::Param(p) => param_names.get(*p).cloned().unwrap_or_else(|| "T".into()),
             Type::Null => "null".into(),
+            Type::Handle => "__Handle".into(),
             Type::Error => "{unknown}".into(),
         }
     }

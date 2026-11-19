@@ -1,8 +1,0 @@
-# expect-error: a generic struct can't have `fn drop` yet
-struct Box[T]:
-    v: T
-    fn drop(self):
-        pass
-
-fn main():
-    print(Box(1).v)

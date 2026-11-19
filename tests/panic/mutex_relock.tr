@@ -1,0 +1,4 @@
+# expect-panic: this task already holds this Mutex
+fn main():
+    val m = Mutex(1)
+    m.lock(fn(v) -> m.get() + v)

@@ -463,6 +463,10 @@ pub fn builtin_function(name: &str) -> Option<(&'static str, &'static str)> {
         "assert" => ("fn assert(condition: Bool)", "Panic if `condition` is false."),
         "sqrt" => ("fn sqrt(x: Float) -> Float", "Square root."),
         "exit" => ("fn exit(code: Int)", "Exit the program immediately with the given status code."),
+        "spawn" => (
+            "fn spawn[T](f: fn() -> T) -> Task[T]",
+            "Start a task running `f`, alongside the code that started it (on another core, when one is free). `join()` waits for its result. What `f` uses is moved to the task, or copied if this code still uses it.",
+        ),
         "hash" => (
             "fn hash(values...) -> Int",
             "A hash of one or more values, mixed into one `Int`: `return hash(self.x, self.y)` in a `fn hash(self) -> Int` lets a type be a map key.",
@@ -471,7 +475,7 @@ pub fn builtin_function(name: &str) -> Option<(&'static str, &'static str)> {
     })
 }
 
-pub const BUILTIN_FUNCTIONS: &[&str] = &["print", "input", "args", "panic", "assert", "sqrt", "exit", "hash"];
+pub const BUILTIN_FUNCTIONS: &[&str] = &["print", "input", "args", "panic", "assert", "sqrt", "exit", "hash", "spawn"];
 
 pub const KEYWORDS: &[&str] = &[
     "fn", "val", "var", "if", "elif", "else", "while", "for", "in", "break", "continue", "return", "pass", "struct", "enum",
