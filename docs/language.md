@@ -763,8 +763,8 @@ for c in "héllo":       # each character, as a one-character string
 | `upper()`, `lower()` | In upper or lower case (ASCII letters) |
 | `repeat(n) -> String` | `n` copies: `"ab".repeat(3)` is `"ababab"` |
 | `pad_start(width)`, `pad_end(width)` | At least `width` characters, adding spaces (or a given character: `"7".pad_start(3, "0")` is `"007"`) |
-| `to_int()`, `to_float()`, `to_string()` | Conversions. Parsing panics on bad input |
-| `to_int_or_null()`, `to_float_or_null()` | `-> Int?` / `-> Float?`: `null` instead of a panic on bad input |
+| `to_int()`, `to_float()`, `to_bool()`, `to_string()` | Conversions. Parsing panics on bad input. `to_bool()` takes `true`/`yes`/`on`/`1` and `false`/`no`/`off`/`0`, in any case |
+| `to_int_or_null()`, `to_float_or_null()`, `to_bool_or_null()` | `-> Int?` / `-> Float?` / `-> Bool?`: `null` instead of a panic on bad input |
 
 `Int`, `Float` and `Bool` have `.to_string()`; `Int` has `.to_float()`; `Float` has `.to_int()`, which truncates.
 
@@ -1023,7 +1023,7 @@ Available modules:
 | [`math`](math.md) | Constants (`pi`, `e`, `inf`), powers and logarithms, trigonometry, rounding, `min`/`max`/`clamp`, `gcd` |
 | [`fs`](fs.md) | Reading and writing files, folders, paths |
 | [`net`](net.md) | TCP sockets |
-| [`env`](system.md#env) | Environment variables |
+| [`env`](system.md#env) | Environment variables, and `.env` files |
 | [`signal`](system.md#signal) | Catching signals |
 | [`url`](system.md#url) | Percent-encoding and query strings |
 

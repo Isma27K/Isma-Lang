@@ -1,0 +1,15 @@
+[true] -> true
+[False] -> false
+[ YES ] -> true
+[no] -> false
+[On] -> true
+[off] -> false
+[1] -> true
+[0] -> false
+[maybe] -> null
+[] -> null
+[2] -> null
+[truthy] -> null
+[yes please] -> null
+on means true
+false

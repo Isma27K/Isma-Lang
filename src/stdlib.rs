@@ -98,11 +98,14 @@ pub const RT: &[(&str, &[&str], &str, bool)] = &[
     ("bytes_to_list", &["Bytes"], "List[Int]", false),
     ("bytes_repr", &["Bytes"], "String", false),
     ("str_encode", &["String"], "Bytes", false),
+    ("str_to_bool", &["String"], "Bool", true),
     // env
     ("env_get", &["String"], "String?", false),
     ("env_set", &["String", "String"], "Bool", false),
     ("env_remove", &["String"], "Bool", false),
     ("env_all", &[], "List[String]", false),
+    ("env_root_dir", &[], "String", false),
+    ("env_claim_default", &[], "Bool", false),
     // signal
     ("signal_catch", &["Int"], "Unit", false),
     ("signal_reset", &["Int"], "Unit", false),

@@ -22,9 +22,27 @@ fn main():
 |---|---|
 | `get(name) -> String?` | The value, or `null` if it isn't set |
 | `get_or(name, default) -> String` | The value, or `default` |
+| `get_bool(name) -> Bool?` | As a `Bool` (`true`/`yes`/`on`/`1`, `false`/`no`/`off`/`0`, any case); `null` if unset or empty; panics on anything else |
+| `get_bool_or(name, default) -> Bool` | The same, or `default` |
 | `set(name, value)` | Set it. Panics if `name` is empty or contains `=` |
 | `remove(name)` | Unset it |
 | `all() -> Map[String, String]` | Every variable |
+| `load(path) -> Result[Unit, String]` | Read another `.env` file (see below) |
+
+### `.env` files
+
+The first time a program uses `env`, it reads the `.env` in the folder of its main file (`tarn app.tr` reads the one next to `app.tr`, from any folder). A built program that was moved away from its project reads the `.env` in the current folder instead. No `.env` is fine.
+
+```bash
+PORT=8080
+DATABASE_URL="postgres://localhost/app"   # a comment
+export GREETING='hello, world'            # single quotes: as written
+MOTD="first line
+second line"                              # double quotes: escapes, several lines
+LOG_FILE=${HOME}/logs/app.log             # another variable
+```
+
+Variables already set when the program starts win over the file. A malformed line stops the program with the file and line. `env.load("config/prod.env")` before using `env` reads that file instead of the default one; it returns an `Err` saying why a file can't be read or which line is wrong.
 
 ## `signal`
 

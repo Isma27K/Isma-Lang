@@ -1,0 +1,10 @@
+# `env.load(path)` before anything else replaces the default `.env`.
+import env
+
+fn main():
+    print(env.load("tests/run/env_files/other.env"))
+    print(env.get("TARN_OTHER"))
+    print(env.get("TARN_DOTENV_PORT"))           # tests/run/.env wasn't read
+    print(env.load("tests/run/env_files/bad.env"))
+    print(env.get("TARN_GOOD"))                  # nothing from a malformed file
+    print(env.load("tests/run/env_files/missing.env"))

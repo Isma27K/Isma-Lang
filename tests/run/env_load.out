@@ -1,0 +1,6 @@
+Ok(Unit)
+from other.env
+null
+Err(tests/run/env_files/bad.env:2: expected `=` after `TARN_BAD`, found `v`)
+null
+Err(cannot read tests/run/env_files/missing.env: No such file or directory)

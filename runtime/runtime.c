@@ -577,6 +577,31 @@ int64_t tarn_str_to_int(TarnStr *s, const char *file, int line, int col) {
     return (int64_t)v;
 }
 
+// A boolean in text: 1 for true/yes/on/1, 0 for false/no/off/0 (any case,
+// spaces around ignored), -1 for anything else.
+int64_t tarn_str_parse_bool(TarnStr *s) {
+    char buf[8];
+    if (!str_to_cbuf(s, buf, sizeof buf)) return -1;
+    for (char *p = buf; *p; p++)
+        if (*p >= 'A' && *p <= 'Z') *p = (char)(*p - 'A' + 'a');
+    static const char *yes[] = {"true", "yes", "on", "1"}, *no[] = {"false", "no", "off", "0"};
+    for (int i = 0; i < 4; i++) {
+        if (strcmp(buf, yes[i]) == 0) return 1;
+        if (strcmp(buf, no[i]) == 0) return 0;
+    }
+    return -1;
+}
+
+int64_t tarn_rt_str_to_bool(TarnStr *s, const char *file, int line, int col) {
+    int64_t v = tarn_str_parse_bool(s);
+    if (v < 0) {
+        char buf[200];
+        snprintf(buf, sizeof buf, "cannot parse \"%.*s\" as Bool (use true or false, yes or no, on or off, 1 or 0)", s->len > 64 ? 64 : (int)s->len, s->data);
+        tarn_die(file, line, col, buf);
+    }
+    return v;
+}
+
 // `to_int_or_null()`: 1 and the value in *out if `s` is a valid Int, else 0 (and *out = 0).
 int64_t tarn_str_parse_int(TarnStr *s, int64_t *out) {
     char buf[64], *end;
@@ -1841,6 +1866,21 @@ int64_t tarn_rt_env_remove(TarnStr *name) {
     int ok = n && name->len > 0 && !memchr(name->data, '=', (size_t)name->len) && unsetenv(n) == 0;
     free(n);
     return ok;
+}
+
+// The folder of the program's main file, written into the program by the
+// compiler ("" for a program that only existed in memory).
+extern const char tarn_root_dir[];
+
+TarnStr *tarn_rt_env_root_dir(void) { return str_from(tarn_root_dir, (int64_t)strlen(tarn_root_dir)); }
+
+// True only the first time: the env module loads the default `.env` then
+// (unless `env.load(path)` claimed it first).
+int64_t tarn_rt_env_claim_default(void) {
+    static int claimed;
+    if (claimed) return 0;
+    claimed = 1;
+    return 1;
 }
 
 // Every variable as `NAME=value`, in the order the system keeps them.

@@ -1,0 +1,18 @@
+# The env module reads the `.env` next to the main file (tests/run/.env)
+# the first time it's used.
+import env
+
+fn main():
+    print(env.get("TARN_DOTENV_PORT")?.to_int_or_null() ?: 0)
+    print(env.get("TARN_DOTENV_QUOTED"))
+    print(env.get("TARN_DOTENV_SINGLE"))
+    print(env.get("TARN_DOTENV_EXPANDED"))
+    print(env.get("TARN_DOTENV_MULTI"))
+    print("TARN_DOTENV_PORT" in env.all())
+    # Booleans: yes/no, true/false, on/off, 1/0. Unset or empty is null.
+    print(env.get_bool("TARN_DOTENV_DEBUG"))
+    print(env.get_bool("TARN_DOTENV_BLANK"))
+    print(env.get_bool_or("TARN_DOTENV_MISSING", true))
+    # Loading another file adds what isn't set yet.
+    print(env.load("tests/run/env_files/other.env"))
+    print(env.get("TARN_OTHER"))

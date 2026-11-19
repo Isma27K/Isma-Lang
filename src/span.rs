@@ -53,11 +53,21 @@ impl<'a> LineIndex<'a> {
 /// They share one offset space: each file starts at its own base offset.
 pub struct SourceMap<'a> {
     files: Vec<(String, u32, LineIndex<'a>)>,
+    /// The folder of the main file, as an absolute path ("" for a program in memory).
+    root_dir: String,
 }
 
 impl<'a> SourceMap<'a> {
     pub fn new(main_name: &str, main_text: &'a str) -> Self {
-        SourceMap { files: vec![(main_name.to_string(), 0, LineIndex::new(main_text))] }
+        SourceMap { files: vec![(main_name.to_string(), 0, LineIndex::new(main_text))], root_dir: String::new() }
+    }
+
+    pub fn set_root_dir(&mut self, dir: &str) {
+        self.root_dir = dir.to_string();
+    }
+
+    pub fn root_dir(&self) -> &str {
+        &self.root_dir
     }
 
     pub fn add(&mut self, name: &str, base: u32, text: &'a str) {

@@ -342,6 +342,13 @@ pub fn builtin_methods(t: &Type, tn: &str, type_name: &dyn Fn(&Type) -> String) 
             method("to_float", "fn to_float() -> Float".into(), "Parse as a `Float`. Panics if the string is not a valid number.", false),
             method("to_int_or_null", "fn to_int_or_null() -> Int?".into(), "Parse as an `Int`, or `null` if the string is not a valid integer.", false),
             method("to_float_or_null", "fn to_float_or_null() -> Float?".into(), "Parse as a `Float`, or `null` if the string is not a valid number.", false),
+            method(
+                "to_bool",
+                "fn to_bool() -> Bool".into(),
+                "Parse as a `Bool`: `true`, `yes`, `on` and `1` are true, `false`, `no`, `off` and `0` are false, in any case. Panics on anything else.",
+                false,
+            ),
+            method("to_bool_or_null", "fn to_bool_or_null() -> Bool?".into(), "Parse as a `Bool` (like `to_bool`), or `null` if the string is not one of those words.", false),
             to_string,
         ],
         Type::List(elem) => {

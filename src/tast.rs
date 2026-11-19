@@ -216,6 +216,8 @@ pub enum Builtin {
     /// `s.to_int_or_null()` / `s.to_float_or_null()`
     StrToIntOrNull,
     StrToFloatOrNull,
+    /// `s.to_bool_or_null()`
+    StrToBoolOrNull,
     StrSplit,
     StrSplitWhitespace,
     StrLines,

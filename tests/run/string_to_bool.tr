@@ -1,0 +1,10 @@
+# Booleans from text: `to_bool()` and `to_bool_or_null()`.
+fn main():
+    for s in ["true", "False", " YES ", "no", "On", "off", "1", "0"]:
+        print(f"[{s}] -> {s.to_bool()}")
+    for s in ["maybe", "", "2", "truthy", "yes please"]:
+        print(f"[{s}] -> {s.to_bool_or_null()}")
+    val flag: Bool? = "on".to_bool_or_null()
+    if flag != null and flag:
+        print("on means true")
+    print("nope".to_bool_or_null() ?: false)

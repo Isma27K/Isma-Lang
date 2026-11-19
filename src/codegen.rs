@@ -106,6 +106,9 @@ pub fn generate(prog: &Program, sources: &SourceMap, target_triple: Option<&str>
         let file = sources.file_name(i).as_bytes();
         let _ = writeln!(out, "@.file.{i} = private unnamed_addr constant [{} x i8] c\"{}\\00\"", file.len() + 1, escape_bytes(file));
     }
+    // The main file's folder, for the runtime (the env module's default `.env`).
+    let root = sources.root_dir().as_bytes();
+    let _ = writeln!(out, "@tarn_root_dir = constant [{} x i8] c\"{}\\00\"", root.len() + 1, escape_bytes(root));
     out.push_str(&g.globals);
     out.push('\n');
     out.push_str(RUNTIME_DECLS);
@@ -161,6 +164,7 @@ declare i64 @tarn_str_to_int(ptr, ptr, i32, i32) #0
 declare double @tarn_str_to_float(ptr, ptr, i32, i32) #0
 declare ptr @tarn_str_chars(ptr) #0
 declare void @tarn_drop_kept() #1
+declare i64 @tarn_str_parse_bool(ptr) #0
 declare ptr @tarn_str_char_at(ptr, i64) #0
 declare i64 @tarn_str_char_count(ptr) #0
 declare i64 @tarn_str_parse_int(ptr, ptr) #0
@@ -1577,6 +1581,17 @@ impl<'a> Codegen<'a> {
                 self.emit(format!("{r} = insertvalue {pair} {{ i1 true, {inner} {zero} }}, {inner} {}, 1", vals[0]));
             }
             Builtin::Unwrap => self.emit(format!("{r} = extractvalue {} {}, 1", llty(&tys[0]), vals[0])),
+            Builtin::StrToBoolOrNull => {
+                let code = self.fresh();
+                self.emit(format!("{code} = call i64 @tarn_str_parse_bool(ptr {})", vals[0]));
+                let has = self.fresh();
+                self.emit(format!("{has} = icmp sge i64 {code}, 0"));
+                let v = self.fresh();
+                self.emit(format!("{v} = icmp eq i64 {code}, 1"));
+                let half = self.fresh();
+                self.emit(format!("{half} = insertvalue {{ i1, i1 }} undef, i1 {has}, 0"));
+                self.emit(format!("{r} = insertvalue {{ i1, i1 }} {half}, i1 {v}, 1"));
+            }
             Builtin::StrToIntOrNull | Builtin::StrToFloatOrNull => {
                 let (f, t) = if b == Builtin::StrToIntOrNull { ("tarn_str_parse_int", "i64") } else { ("tarn_str_parse_float", "double") };
                 let slot = format!("%parse{}", self.tmp);

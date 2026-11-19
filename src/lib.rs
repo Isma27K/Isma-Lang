@@ -221,6 +221,10 @@ pub fn compile_project(project: &Project, target_triple: Option<&str>) -> Result
     for f in &project.files[1..] {
         sources.add(&f.display, f.base, &f.text);
     }
+    // Where the program's `.env` is by default (see the env module).
+    if let Some(dir) = root.path.as_deref().and_then(std::path::Path::parent) {
+        sources.set_root_dir(&dir.to_string_lossy());
+    }
     let ir = codegen::generate(&program, &sources, target_triple);
     Ok(Compiled { ir, mir: mir::print_program(&program), warnings: checked.warnings })
 }

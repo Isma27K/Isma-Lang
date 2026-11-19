@@ -234,7 +234,7 @@ The standard library is written in Tarn itself and compiled together with your p
 | [`math`](docs/math.md) | `pi`, `e`, `inf`; powers and logarithms; trigonometry; rounding; generic `min`, `max`, `clamp`, `abs`; `gcd`, `lcm`, `isqrt` |
 | [`fs`](docs/fs.md) | Read and write files, list and create folders, and take paths apart |
 | [`net`](docs/net.md) | TCP sockets: listen, accept, connect, read and write `Bytes`, with timeouts. Sockets close themselves (`fn drop`) |
-| [`env`](docs/system.md#env) | Environment variables |
+| [`env`](docs/system.md#env) | Environment variables, read from a `.env` file next to your program too |
 | [`signal`](docs/system.md#signal) | Catch `Ctrl-C`, `kill` and other signals, and stop cleanly |
 | [`url`](docs/system.md#url) | Percent-encoding and query strings |
 

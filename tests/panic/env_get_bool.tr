@@ -1,0 +1,8 @@
+# expect-panic: environment variable TARN_FLAG=maybe isn't a boolean
+import env
+
+fn main():
+    env.set("TARN_FLAG", "true")
+    print(env.get_bool("TARN_FLAG"))
+    env.set("TARN_FLAG", "maybe")
+    print(env.get_bool("TARN_FLAG"))

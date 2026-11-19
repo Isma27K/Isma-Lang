@@ -1,0 +1,12 @@
+8080
+two words
+${not expanded}
+8080/x
+one
+two
+true
+true
+null
+true
+Ok(Unit)
+from other.env

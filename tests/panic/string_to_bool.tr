@@ -1,0 +1,4 @@
+# expect-panic: cannot parse "maybe" as Bool (use true or false, yes or no, on or off, 1 or 0)
+fn main():
+    print("yes".to_bool())
+    print("maybe".to_bool())
