@@ -471,12 +471,13 @@ impl Parser {
     fn interface_decl(&mut self) -> PResult<InterfaceDecl> {
         let start = self.bump().span; // `interface`
         let name = self.expect_ident("interface name")?;
-        if self.at(&Tok::LBracket) {
-            let span = self.span();
+        let type_params = self.type_params()?;
+        if let Some(b) = type_params.iter().find_map(|t| t.bounds.first()) {
+            let span = b.span;
             return self.error_diag(
-                Diagnostic::error("interfaces can't have type parameters yet", span)
-                    .with_primary("not supported yet")
-                    .with_help("write the interface for one type, e.g. `fn get(self) -> Int`"),
+                Diagnostic::error("an interface's type parameters can't have bounds", span)
+                    .with_primary("remove this")
+                    .with_help("put the bound on the generic code that uses the interface"),
             );
         }
         let extends = self.interface_list()?;
@@ -487,6 +488,7 @@ impl Parser {
         }
         self.bump();
         let mut methods = Vec::new();
+        let mut defaults = Vec::new();
         while !self.at(&Tok::Dedent) && !self.at(&Tok::Eof) {
             match self.peek() {
                 Tok::Newline => {
@@ -499,6 +501,7 @@ impl Parser {
                     }
                 }
                 Tok::Fn => match self.interface_method() {
+                    Ok(f) if !f.body.is_empty() => defaults.push(f),
                     Ok(f) => methods.push(f),
                     Err(()) => self.synchronize(),
                 },
@@ -517,22 +520,22 @@ impl Parser {
                 }
             }
         }
+        let end = self.prev_span;
         self.eat(&Tok::Dedent);
-        let end = methods.last().map(|m| m.sig_span).unwrap_or(name.span);
-        Ok(InterfaceDecl { span: start.merge(end), name, extends, methods })
+        Ok(InterfaceDecl { span: start.merge(end), name, type_params, extends, methods, defaults })
     }
 
-    /// `fn area(self) -> Float` in an interface: a signature on a line of its own.
+    /// `fn area(self) -> Float` in an interface: a signature on a line of its
+    /// own (a method each type must have), or a default method with a body.
     fn interface_method(&mut self) -> PResult<FnDecl> {
-        let f = self.fn_sig()?;
+        let mut f = self.fn_sig()?;
         if self.at(&Tok::Colon) {
-            let span = self.span();
-            return self.error_diag(
-                Diagnostic::error("an interface method has no body", span)
-                    .with_primary("remove the `:` and what follows")
-                    .with_note("an interface only says which methods a type needs; each type writes its own")
-                    .with_help("write just the signature, like `fn area(self) -> Float`"),
-            );
+            f.body = self.block()?;
+            if f.body.is_empty() {
+                // (`pass`: a default method that does nothing.)
+                f.body.push(Stmt { kind: StmtKind::Pass, span: self.prev_span });
+            }
+            return Ok(f);
         }
         self.expect_newline()?;
         Ok(f)
@@ -654,7 +657,15 @@ impl Parser {
                 }
                 self.bump();
                 let ty = self.type_expr()?;
-                fields.push(FieldDecl { name: fname, ty, mutable: false });
+                if self.at(&Tok::Assign) {
+                    let span = self.span();
+                    return self.error_diag(
+                        Diagnostic::error("variant fields can't have default values", span)
+                            .with_primary("only struct fields can")
+                            .with_help("add a static method that builds the variant with the usual values"),
+                    );
+                }
+                fields.push(FieldDecl { name: fname, ty, mutable: false, default: None });
                 if !self.eat(&Tok::Comma) {
                     break;
                 }
@@ -688,12 +699,20 @@ impl Parser {
         }
         self.bump();
         let ty = self.type_expr()?;
-        if self.at(&Tok::Assign) {
-            let span = self.span();
-            return self.error("default field values are not supported yet", span);
-        }
+        // `port: Int = 8080`: a hidden static method gives the value.
+        let default = if self.at(&Tok::Assign) {
+            let eq = self.bump().span;
+            let value = self.expr()?;
+            let at = Span { start: eq.start, end: eq.start };
+            let span = value.span;
+            let body = vec![Stmt { kind: StmtKind::Return(Some(value)), span }];
+            let name = Ident { name: format!("__default_{}", name.name), span: at };
+            Some(Box::new(FnDecl { name, type_params: Vec::new(), self_param: None, params: Vec::new(), ret: Some(ty.clone()), body, sig_span: at }))
+        } else {
+            None
+        };
         self.expect_newline()?;
-        Ok(FieldDecl { name, ty, mutable })
+        Ok(FieldDecl { name, ty, mutable, default })
     }
 
     fn type_expr(&mut self) -> PResult<TypeExpr> {
@@ -701,6 +720,21 @@ impl Parser {
         if self.at(&Tok::LParen) {
             let start = self.bump().span;
             let mut inner = self.type_expr()?;
+            // `(Int, String)`: a tuple type.
+            if self.eat(&Tok::Comma) {
+                let mut elems = vec![inner];
+                while !self.at(&Tok::RParen) {
+                    elems.push(self.type_expr()?);
+                    if !self.eat(&Tok::Comma) {
+                        break;
+                    }
+                }
+                self.expect(Tok::RParen)?;
+                let nullable = self.eat(&Tok::Question);
+                let span = start.merge(self.prev_span);
+                let name = Ident { name: TUPLE_TYPE.into(), span };
+                return Ok(TypeExpr { module: None, name, args: elems, nullable, func: None, span });
+            }
             self.expect(Tok::RParen)?;
             if self.eat(&Tok::Question) {
                 if inner.nullable {
@@ -987,6 +1021,16 @@ impl Parser {
     fn let_stmt(&mut self) -> PResult<Stmt> {
         let start = self.span();
         let mutable = matches!(self.bump().tok, Tok::Var);
+        // `val (q, r) = divmod(17, 5)`
+        if self.at(&Tok::LParen) {
+            let pat = self.closed_pattern()?;
+            let ty = if self.eat(&Tok::Colon) { Some(self.type_expr()?) } else { None };
+            self.expect(Tok::Assign)?;
+            let value = self.expr()?;
+            let span = start.merge(self.prev_span);
+            self.expect_newline()?;
+            return Ok(Stmt { kind: StmtKind::LetTuple { mutable, pat, ty, value }, span });
+        }
         let name = self.expect_ident("variable name")?;
         let ty = if self.eat(&Tok::Colon) { Some(self.type_expr()?) } else { None };
         if !self.at(&Tok::Assign) {
@@ -1017,6 +1061,39 @@ impl Parser {
         let scrutinee = if looks_like_match { self.expr().ok() } else { None };
         match scrutinee {
             Some(scrutinee) if self.at(&Tok::Colon) => Some(self.match_body(start, scrutinee)),
+            _ => {
+                self.pos = pos;
+                self.prev_span = prev;
+                self.diags.truncate(ndiags);
+                None
+            }
+        }
+    }
+
+    /// `match code:` where a value is expected: like a statement `match`,
+    /// it must end its line (its cases follow, indented). `None`: `match`
+    /// is just a name here.
+    fn try_match_expr(&mut self) -> Option<PResult<Expr>> {
+        let (pos, ndiags, prev) = (self.pos, self.diags.len(), self.prev_span);
+        let start = self.bump().span;
+        let looks_like_match = starts_operand(self.peek()) || matches!(self.peek(), Tok::LParen | Tok::LBracket | Tok::LBrace | Tok::Minus);
+        let scrutinee = if looks_like_match { self.expr().ok() } else { None };
+        match scrutinee {
+            Some(scrutinee) if self.at(&Tok::Colon) => {
+                if !matches!(self.peek_nth(1), Tok::Newline) {
+                    let span = self.span();
+                    return Some(self.error_diag(
+                        Diagnostic::error("a `match` must end its line", span)
+                            .with_note("its cases go on the lines below it, indented, so it can't be inside parentheses or followed by more code")
+                            .with_help("put its value in a variable first: `val x = match ...:`, with the cases under it"),
+                    ));
+                }
+                Some(self.match_body(start, scrutinee).map(|st| {
+                    self.block_end = Some(self.pos);
+                    let StmtKind::Match { scrutinee, arms } = st.kind else { unreachable!() };
+                    Expr { kind: ExprKind::Match { scrutinee: Box::new(scrutinee), arms }, span: st.span }
+                }))
+            }
             _ => {
                 self.pos = pos;
                 self.prev_span = prev;
@@ -1166,6 +1243,18 @@ impl Parser {
             Tok::LParen => {
                 self.bump();
                 let p = self.pattern()?;
+                // `(x, 0)`: a tuple pattern.
+                if self.eat(&Tok::Comma) {
+                    let mut elems = vec![p];
+                    while !self.at(&Tok::RParen) {
+                        elems.push(self.pattern()?);
+                        if !self.eat(&Tok::Comma) {
+                            break;
+                        }
+                    }
+                    self.expect(Tok::RParen)?;
+                    return Ok(Pattern { kind: PatternKind::Tuple(elems), span: start.merge(self.prev_span) });
+                }
                 self.expect(Tok::RParen)?;
                 return Ok(Pattern { kind: p.kind, span: start.merge(self.prev_span) });
             }
@@ -1205,8 +1294,20 @@ impl Parser {
 
     fn for_stmt(&mut self) -> PResult<Stmt> {
         let start = self.expect(Tok::For)?;
-        let var = self.expect_ident("loop variable")?;
-        let second = if self.eat(&Tok::Comma) { Some(self.expect_ident("second loop variable")?) } else { None };
+        // `for (k, v) in pairs:`, `for i, (k, v) in pairs:`
+        let mut pats: [Option<Pattern>; 2] = [None, None];
+        let mut loop_var = |p: &mut Self, k: usize, what: &str| -> PResult<Ident> {
+            if p.at(&Tok::LParen) {
+                let pat = p.closed_pattern()?;
+                let id = Ident { name: format!("_for{k}"), span: pat.span };
+                pats[k] = Some(pat);
+                Ok(id)
+            } else {
+                p.expect_ident(what)
+            }
+        };
+        let var = loop_var(self, 0, "loop variable")?;
+        let second = if self.eat(&Tok::Comma) { Some(loop_var(self, 1, "second loop variable")?) } else { None };
         self.expect(Tok::In)?;
         let first = self.expr()?;
         let iter = if self.at(&Tok::DotDot) || self.at(&Tok::DotDotEq) {
@@ -1217,7 +1318,7 @@ impl Parser {
             ForIter::Expr(first)
         };
         let body = self.block()?;
-        Ok(Stmt { kind: StmtKind::For { var, second, iter, body }, span: start.merge(self.prev_span) })
+        Ok(Stmt { kind: StmtKind::For { var, second, iter, body, pats }, span: start.merge(self.prev_span) })
     }
 
     // ---------- expressions ----------
@@ -1468,12 +1569,28 @@ impl Parser {
                 }
                 Tok::Dot => {
                     self.bump();
+                    // `t.0`: an element of a tuple.
+                    if let Tok::Int(n) = self.peek().clone() {
+                        let at = self.bump().span;
+                        let name = Ident { name: n.to_string(), span: at };
+                        let span = e.span.merge(at);
+                        e = Expr { kind: ExprKind::Field(Box::new(e), name), span };
+                        continue;
+                    }
                     let name = self.expect_ident("field or method name")?;
                     let span = e.span.merge(name.span);
                     e = Expr { kind: ExprKind::Field(Box::new(e), name), span };
                 }
                 Tok::QuestionDot => {
                     self.bump();
+                    // `t?.0`
+                    if let Tok::Int(n) = self.peek().clone() {
+                        let at = self.bump().span;
+                        let name = Ident { name: n.to_string(), span: at };
+                        let span = e.span.merge(at);
+                        e = Expr { kind: ExprKind::SafeField(Box::new(e), name), span };
+                        continue;
+                    }
                     let name = self.expect_ident("field or method name after `?.`")?;
                     let span = e.span.merge(name.span);
                     e = Expr { kind: ExprKind::SafeField(Box::new(e), name), span };
@@ -1583,6 +1700,13 @@ impl Parser {
                 }
                 ExprKind::FStr(out)
             }
+            Tok::Ident(name) if name == "match" => {
+                if let Some(m) = self.try_match_expr() {
+                    return m;
+                }
+                self.bump();
+                ExprKind::Name(name)
+            }
             Tok::Ident(name) => {
                 self.bump();
                 ExprKind::Name(name)
@@ -1590,10 +1714,32 @@ impl Parser {
             Tok::Fn => return self.lambda(),
             Tok::LParen => {
                 self.bump();
+                if self.at(&Tok::RParen) {
+                    let at = self.span();
+                    return self.error_diag(
+                        Diagnostic::error("`()` isn't a value", span.merge(at))
+                            .with_note("a tuple has two or more elements: `(1, \"a\")`")
+                            .with_help("for a function that returns nothing, leave out the `return` value"),
+                    );
+                }
                 let e = self.expr()?;
-                if self.at(&Tok::Comma) {
-                    let span = self.span();
-                    return self.error("tuples are not supported yet", span);
+                // `(1, "a")`: a tuple.
+                if self.eat(&Tok::Comma) {
+                    let mut elems = vec![e];
+                    while !self.at(&Tok::RParen) {
+                        elems.push(self.expr()?);
+                        if !self.eat(&Tok::Comma) {
+                            break;
+                        }
+                    }
+                    self.expect(Tok::RParen)?;
+                    let span = span.merge(self.prev_span);
+                    if elems.len() == 1 {
+                        return self.error_diag(
+                            Diagnostic::error("a tuple needs at least two elements", span).with_help("for one value, leave out the parentheses and the comma"),
+                        );
+                    }
+                    return Ok(Expr { kind: ExprKind::Tuple(elems), span });
                 }
                 self.expect(Tok::RParen)?;
                 return Ok(Expr { kind: e.kind, span: span.merge(self.prev_span) });
@@ -1925,12 +2071,39 @@ mod tests {
         let Item::Fn(f) = &p.items[4] else { panic!() };
         assert_eq!(f.type_params[0].bounds.iter().map(|b| b.name.name.as_str()).collect::<Vec<_>>(), ["Shape", "Named"]);
         assert!(f.type_params[1].bounds.is_empty());
-        let (_, d) = parse("interface Shape:\n    fn area(self) -> Float:\n        return 1.0\n");
-        assert!(d[0].message.contains("an interface method has no body"), "{d:?}");
         let (_, d) = parse("interface Shape:\n    sides: Int\n");
         assert!(d[0].message.contains("interfaces list methods, not fields"), "{d:?}");
-        let (_, d) = parse("interface Box[T]:\n    fn get(self) -> T\n");
-        assert!(d[0].message.contains("can't have type parameters yet"), "{d:?}");
+        // Generic interfaces, and default methods (with bodies).
+        let p = parse_ok("interface Source[T](Named):\n    fn next(self) -> T?\n    fn take(self, n: Int) -> List[T]:\n        return []\n    fn nothing(self): pass\n");
+        let Item::Interface(i) = &p.items[0] else { panic!() };
+        assert_eq!(i.type_params[0].name.name, "T");
+        assert_eq!(i.methods.iter().map(|m| m.name.name.as_str()).collect::<Vec<_>>(), ["next"]);
+        assert_eq!(i.defaults.iter().map(|m| m.name.name.as_str()).collect::<Vec<_>>(), ["take", "nothing"]);
+        let (_, d) = parse("interface Box[T: Shape]:\n    fn get(self) -> T\n");
+        assert!(d[0].message.contains("type parameters can't have bounds"), "{d:?}");
+    }
+
+    #[test]
+    fn type_system_syntax() {
+        // static methods, field defaults, tuples, `match` values
+        let p = parse_ok(
+            "struct App:\n    port: Int = 8080\n    fn new() -> App:\n        return App()\n\nfn main():\n    val (a, (b, _)) = (1, (2, 3))\n    val t: (Int, String)? = null\n    print(t.0.1)\n    for i, (k, v) in pairs:\n        pass\n    val x = match a:\n        case (0, y): y\n        case _: 1\n    print(x)\n",
+        );
+        let Item::Struct(s) = &p.items[0] else { panic!() };
+        assert!(s.fields[0].default.is_some() && s.methods[0].self_param.is_none());
+        let Item::Fn(f) = &p.items[1] else { panic!() };
+        assert!(matches!(&f.body[0].kind, StmtKind::LetTuple { pat, .. } if matches!(&pat.kind, PatternKind::Tuple(ps) if ps.len() == 2)));
+        assert!(matches!(&f.body[1].kind, StmtKind::Let { ty: Some(t), .. } if t.name.name == TUPLE_TYPE && t.nullable && t.args.len() == 2));
+        assert_eq!(show(match &f.body[2].kind {
+            StmtKind::Expr(e) => e,
+            _ => panic!(),
+        }), "print(t.0.1)");
+        assert!(matches!(&f.body[3].kind, StmtKind::For { pats: [None, Some(_)], .. }));
+        assert!(matches!(&f.body[4].kind, StmtKind::Let { value: Expr { kind: ExprKind::Match { .. }, .. }, .. }));
+        // `match` stays a name where it can't start a `match`.
+        parse_ok("fn main():\n    val match = 1\n    print(match + 1)\n");
+        let (_, d) = parse("fn main():\n    print(match x:\n        case _: 1)\n");
+        assert!(d.iter().any(|d| d.message.contains("a `match` must end its line")), "{d:?}");
     }
 
     #[test]

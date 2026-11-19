@@ -1,0 +1,4 @@
+# expect-error: `(Int, String)` has no element `2`
+fn main():
+    val t = (1, "a")
+    print(t.2)

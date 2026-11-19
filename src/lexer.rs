@@ -229,14 +229,16 @@ impl<'a> Lexer<'a> {
             self.pos += 1;
         }
         let mut is_float = false;
-        if self.peek() == b'.' && self.peek_at(1).is_ascii_digit() {
+        // `t.0.1`: right after a `.`, a number is a tuple element's index, never a float.
+        let after_dot = matches!(self.tokens.last(), Some(Token { tok: Tok::Dot | Tok::QuestionDot, .. }));
+        if self.peek() == b'.' && self.peek_at(1).is_ascii_digit() && !after_dot {
             is_float = true;
             self.pos += 1;
             while self.peek().is_ascii_digit() || self.peek() == b'_' {
                 self.pos += 1;
             }
         }
-        if matches!(self.peek(), b'e' | b'E') {
+        if matches!(self.peek(), b'e' | b'E') && !after_dot {
             let save = self.pos;
             self.pos += 1;
             if matches!(self.peek(), b'+' | b'-') {

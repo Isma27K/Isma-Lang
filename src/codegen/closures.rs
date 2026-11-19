@@ -215,6 +215,7 @@ impl<'a> Codegen<'a> {
             self.closures_done += 1;
             self.closure_class(sid, &mut out);
         }
+        self.box_finder_functions(&mut out);
         out
     }
 
@@ -243,9 +244,52 @@ impl<'a> Codegen<'a> {
             out,
             "define internal void @tarn.cl{sid}.mem(ptr %p) #0 {{\n  %szp = getelementptr {lt}, ptr null, i32 1\n  %sz = ptrtoint ptr %szp to i64\n  call void @tarn_free(ptr %p, i64 %sz)\n  ret void\n}}\n"
         );
+        // A box's type info also has the tag of the type of what it holds (for `case Circle`).
+        let tag = match &self.prog.structs[sid].closure {
+            Some(Type::Iface(_)) => {
+                let held = self.prog.structs[sid].fields[0].ty.clone();
+                format!(", ptr {}", self.type_tag(&held))
+            }
+            _ => String::new(),
+        };
+        let words = if tag.is_empty() { "ptr, ptr, ptr, ptr" } else { "ptr, ptr, ptr, ptr, ptr" };
         let _ = writeln!(
             out,
-            "@tarn.ti.cl{sid} = internal constant {{ ptr, ptr, ptr, ptr }} {{ ptr @tarn.cl{sid}.trace, ptr @tarn.cl{sid}.drop, ptr @tarn.cl{sid}.white, ptr @tarn.cl{sid}.mem }}\n"
+            "@tarn.ti.cl{sid} = internal constant {{ {words} }} {{ ptr @tarn.cl{sid}.trace, ptr @tarn.cl{sid}.drop, ptr @tarn.cl{sid}.white, ptr @tarn.cl{sid}.mem{tag} }}\n"
         );
+    }
+
+    /// The global that stands for type `t` in boxes' type info (one for all
+    /// interface types: such a box holds another box).
+    pub(super) fn type_tag(&mut self, t: &Type) -> String {
+        let m = if matches!(t, Type::Iface(_)) { "iface".to_string() } else { mangle(t) };
+        if !self.type_tags.contains(&m) {
+            self.type_tags.push(m.clone());
+            let _ = writeln!(self.globals, "@tarn.tag.{m} = internal constant i8 0");
+        }
+        format!("@tarn.tag.{m}")
+    }
+
+    /// A function finding, in an interface value, the box that holds a `t`
+    /// (looking through boxes that hold other interface values), or null.
+    pub(super) fn box_finder(&mut self, t: &Type) -> String {
+        self.closure_rt = true;
+        if !self.box_finders.contains(t) {
+            self.box_finders.push(t.clone());
+        }
+        format!("@tarn.find.{}", mangle(t))
+    }
+
+    fn box_finder_functions(&mut self, out: &mut String) {
+        while self.box_finders_done < self.box_finders.len() {
+            let t = self.box_finders[self.box_finders_done].clone();
+            self.box_finders_done += 1;
+            let (tag, nested) = (self.type_tag(&t), self.type_tag(&Type::Iface(0)));
+            let m = mangle(&t);
+            let _ = writeln!(
+                out,
+                "define internal ptr @tarn.find.{m}(ptr %b) #0 {{\nentry:\n  br label %loop\nloop:\n  %p = phi ptr [ %b, %entry ], [ %inner, %next ]\n  %tip = getelementptr inbounds i8, ptr %p, i64 8\n  %ti = load ptr, ptr %tip\n  %tagp = getelementptr inbounds i8, ptr %ti, i64 32\n  %tag = load ptr, ptr %tagp\n  %hit = icmp eq ptr %tag, {tag}\n  br i1 %hit, label %found, label %more\nmore:\n  %deeper = icmp eq ptr %tag, {nested}\n  br i1 %deeper, label %next, label %miss\nnext:\n  %vp = getelementptr inbounds i8, ptr %p, i64 24\n  %inner = load ptr, ptr %vp\n  br label %loop\nfound:\n  ret ptr %p\nmiss:\n  ret ptr null\n}}\n"
+            );
+        }
     }
 }

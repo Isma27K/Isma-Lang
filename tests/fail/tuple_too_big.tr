@@ -1,0 +1,4 @@
+# expect-error: a tuple can have at most 6 elements, not 7
+fn main():
+    val t = (1, 2, 3, 4, 5, 6, 7)
+    print(t)

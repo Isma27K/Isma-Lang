@@ -1,0 +1,9 @@
+# expect-error: is generic, so it can't be used as a value
+struct Box:
+    n: Int
+
+    fn pair[T](self, other: T) -> T:
+        return other
+
+fn main():
+    val f = Box(1).pair

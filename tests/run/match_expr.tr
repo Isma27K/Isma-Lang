@@ -1,0 +1,57 @@
+# `match` as a value: each case gives its expression, or its block's last
+# line; a case can also leave with `return`, `continue` or a panic.
+
+enum Shape:
+    Circle(r: Float)
+    Rect(w: Float, h: Float)
+    Empty
+
+fn label(code: Int) -> String:
+    return match code:
+        case 200: "ok"
+        case 404: "not found"
+        case c if c >= 500:
+            val kind = "server"
+            f"{kind} error {c}"
+        case _: "other"
+
+fn parse(s: String) -> Result[Int, String]:
+    val n = match s.to_int_or_null():
+        case null: return Err(f"bad: {s}")
+        case v: v * 2
+    return Ok(n)
+
+fn area(s: Shape) -> Float:
+    return match s:
+        case Circle(r): 3.0 * r * r
+        case Rect(w, h): w * h
+        case Empty: 0.0
+
+fn main():
+    for c in [200, 404, 503, 7]:
+        print(label(c))
+    print(parse("21"))
+    print(parse("x"))
+    print(area(Shape.Rect(2.0, 3.0)))
+    val names = ["a", "bb", "ccc"]
+    for n in names:
+        val size = match n.len():
+            case 1: "small"
+            case 2:
+                match n:
+                    case "bb": "double b"
+                    case _: "medium"
+            case _: null
+        print(size)
+    var total = 0
+    for i in 0..10:
+        total += match i % 3:
+            case 0: 10
+            case 1: continue
+            case _: 1
+    print(total)
+    val sh: List[Shape] = [Shape.Empty]
+    val first = match sh.len():
+        case 0: Shape.Empty
+        case _: sh[0]
+    print(area(first))

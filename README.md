@@ -221,7 +221,7 @@ fn main():
     print(dist(Point(0.0, 0.0), Point(3.0, 4.0)))
 ```
 
-The [**language guide**](docs/language.md) covers everything: types, constants, strictness rules, lints, functions and lambdas, structs, enums and `match`, operator functions, generics, interfaces, lists, maps, strings, null safety, modules, built-ins and panics.
+The [**language guide**](docs/language.md) covers everything: types, constants, strictness rules, lints, functions and lambdas, structs (with default values and static methods), enums and `match` (also as a value), operator functions, generics, interfaces (generic, with default methods), iterators, lists, maps, tuples, strings, null safety, modules, built-ins and panics.
 
 <a id="batteries"></a>
 ## Batteries included
@@ -238,7 +238,7 @@ The standard library is written in Tarn itself and compiled together with your p
 | [`signal`](docs/system.md#signal) | Catch `Ctrl-C`, `kill` and other signals, and stop cleanly |
 | [`url`](docs/system.md#url) | Percent-encoding and query strings |
 
-`Result`, `Ok`, `Err` and `Unit` are always there, without an import: see [recoverable errors](docs/language.md#recoverable-errors).
+`Result`, `Ok`, `Err`, `Unit` and the `Iterator` interface are always there, without an import: see [recoverable errors](docs/language.md#recoverable-errors) and [iterators](docs/language.md#iterators).
 
 ```python
 import fs
@@ -352,13 +352,13 @@ These are the best of 3 runs on an AMD Ryzen 5 5500. Reproduce them with `./benc
 **Main priority: getting Tarn ready for Traiz.** Traiz is a REST API framework written in Tarn. It's a separate project that programs install as a dependency with Thorn, Tarn's package manager. The language needs these first, in this order. The website's *Project → Traiz, the REST framework* page explains why each one is needed.
 
 - [x] **1. Errors and I/O:** recoverable errors (`Result` and `?`), `Bytes`, sockets (`net`), environment variables and signals, strings by character with efficient appends and percent-encoding
-- [ ] **2. The type system:** static methods, default field values, generic interfaces and default methods, `match` on the type inside an interface value, `match` as an expression, closures that capture `var`s and methods as values, tuples, iterators for your own types
+- [x] **2. The type system:** static methods, default field values, generic interfaces and default methods, `match` on the type inside an interface value, `match` as an expression, closures that capture `var`s and methods as values, tuples, iterators for your own types
 - [ ] **3. Concurrency:** lightweight tasks on an event loop across every core (no `async`/`await` split), shared state that is safe across threads (and `fn drop` on generic structs, for lock guards), panics that stop only their own task
 - [ ] **4. Compile-time code:** reflection over a type's fields (`struct User(Json):`) and attributes (`@get("/users/{id}")`) that libraries read at compile time
 - [ ] **5. Libraries and tools:** Thorn, the package manager, a `json` module, calling C directly (TLS, databases, zlib), crypto and encoding, a `log` module, `tarn test`
 - [ ] **Then Traiz itself,** as its own project and package: an HTTP server, routing, middleware, typed handlers, JSON bodies
 
-Later, after Traiz: sets, `xs[-1]`, operators that use the right operand's type, `sort()` for `<=>` types, interface values without a box, `Result`s without an allocation, `Bytes` map keys and shared slices, UDP and Unix sockets, a bridge to Python's libraries, a `random` module, Windows support.
+Later, after Traiz: sets, `xs[-1]`, operators that use the right operand's type, `sort()` for `<=>` types, interface values without a box, `Result`s and tuples without an allocation, generic methods as values, `Self` in any interface method, static methods in interfaces, default values for function parameters, `if` as an expression, `Bytes` map keys and shared slices, UDP and Unix sockets, a bridge to Python's libraries, a `random` module, Windows support.
 
 <a id="development"></a>
 ## Development

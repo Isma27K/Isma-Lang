@@ -31,10 +31,14 @@ pub enum Item {
 #[derive(Debug)]
 pub struct InterfaceDecl {
     pub name: Ident,
+    /// `[T]` in `interface Source[T]:`.
+    pub type_params: Vec<TypeParam>,
     /// `Shape, Named` in `interface NamedShape(Shape, Named):`.
     pub extends: Vec<TypeExpr>,
-    /// Each one's `body` is empty.
+    /// The methods a type must have: each one's `body` is empty.
     pub methods: Vec<FnDecl>,
+    /// Default methods, with bodies: every type that fits gets them, unless it has its own.
+    pub defaults: Vec<FnDecl>,
     /// From `interface` to the end of the last method.
     pub span: Span,
 }
@@ -157,7 +161,13 @@ pub struct FieldDecl {
     pub name: Ident,
     pub ty: TypeExpr,
     pub mutable: bool,
+    /// `port: Int = 8080`: the default value, as a hidden static method
+    /// (`__default_port`, returning it) that runs at each construction leaving the field out.
+    pub default: Option<Box<FnDecl>>,
 }
+
+/// The `name` of a tuple type `(Int, String)` (its elements are the `args`).
+pub const TUPLE_TYPE: &str = "(tuple)";
 
 #[derive(Debug, Clone)]
 pub struct TypeExpr {
@@ -220,13 +230,18 @@ pub struct Stmt {
 #[derive(Debug)]
 pub enum StmtKind {
     Let { mutable: bool, name: Ident, ty: Option<TypeExpr>, value: Expr },
+    /// `val (q, r) = divmod(a, b)`: a tuple taken apart into names (`pat`
+    /// holds only names, `_` and nested tuples).
+    LetTuple { mutable: bool, pat: Pattern, ty: Option<TypeExpr>, value: Expr },
     Assign { target: Expr, op: Option<BinOp>, value: Expr },
     Expr(Expr),
     If { branches: Vec<(Expr, Block)>, else_block: Option<Block> },
     While { cond: Expr, body: Block },
     /// `for x in xs:`, or with two names: `for i, x in xs:` (index and
     /// element) and `for k, v in m:` (key and value).
-    For { var: Ident, second: Option<Ident>, iter: ForIter, body: Block },
+    /// `for (k, v) in pairs:` takes each element apart: `pats` holds the
+    /// tuple patterns for `var` and `second` (whose names are then placeholders).
+    For { var: Ident, second: Option<Ident>, iter: ForIter, body: Block, pats: [Option<Pattern>; 2] },
     Match { scrutinee: Expr, arms: Vec<MatchArm> },
     Break,
     Continue,
@@ -269,6 +284,8 @@ pub enum PatternKind {
     Or(Vec<Pattern>),
     /// `p as name`
     As(Box<Pattern>, Ident),
+    /// `(x, 0)`: a tuple, element by element.
+    Tuple(Vec<Pattern>),
 }
 
 #[derive(Debug)]
@@ -311,6 +328,8 @@ pub enum ExprKind {
     List(Vec<Expr>),
     /// `{"a": 1, "b": 2}`, or `{}`.
     Map(Vec<(Expr, Expr)>),
+    /// `(1, "a")`: a tuple (two or more elements).
+    Tuple(Vec<Expr>),
     /// `x in xs` / `x not in xs`.
     In { item: Box<Expr>, container: Box<Expr>, negated: bool },
     Null,
@@ -324,6 +343,9 @@ pub enum ExprKind {
     Jump(Jump),
     /// `fn(x) -> x * 2`
     Lambda(Box<Lambda>),
+    /// `match x:` used as a value (`val label = match code:`): each case's
+    /// value is its expression, or the last line of its block.
+    Match { scrutinee: Box<Expr>, arms: Vec<MatchArm> },
     /// Placeholder produced after a parse error.
     Error,
 }

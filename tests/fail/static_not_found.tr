@@ -1,0 +1,9 @@
+# expect-error: struct `App` has no static method `run`
+struct App:
+    port: Int
+
+    fn run(self):
+        pass
+
+fn main():
+    App.run()

@@ -47,7 +47,8 @@ pub fn reference() -> Value {
             .structs
             .iter()
             .enumerate()
-            .filter(|(_, s)| s.ns == ns && !s.instance && !short(&s.name).starts_with('_'))
+            // (Tuples, `(A, B)`, are syntax: the guide covers them.)
+            .filter(|(_, s)| s.ns == ns && !s.instance && !short(&s.name).starts_with(['_', '(']))
             .map(|(sid, s)| {
                 let ty = if s.iface {
                     Type::Iface(sid)

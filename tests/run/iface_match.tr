@@ -1,0 +1,77 @@
+# `match` on the type of the value inside an interface value: structs,
+# enum variants and built-in types, through boxes holding other interface values too.
+
+interface Figure:
+    fn area(self) -> Float
+
+interface Named:
+    fn to_string(self) -> String
+
+struct Circle:
+    r: Float
+    fn area(self) -> Float:
+        return 3.0 * self.r * self.r
+
+struct Sq:
+    s: Float
+    fn area(self) -> Float:
+        return self.s * self.s
+
+enum Blob:
+    Big(size: Float)
+    Tiny
+    fn area(self) -> Float:
+        return 1.0
+
+fn describe(f: Figure) -> String:
+    return match f:
+        case Circle(r) if r > 10.0: "big circle"
+        case Circle(r): f"circle {r}"
+        case Sq as s: f"square of side {s.s}"
+        case Blob.Big(n): f"big blob {n}"
+        case _: "something else"
+
+fn kind(x: Named) -> String:
+    match x:
+        case Int as n:
+            return f"int {n + 1}"
+        case String as s:
+            return f"string {s.upper()}"
+        case _:
+            return "other"
+
+fn main():
+    val figs: List[Figure] = [Circle(1.0), Sq(2.0), Circle(20.0), Blob.Big(3.0), Blob.Tiny]
+    for f in figs:
+        print(describe(f))
+    val things: List[Named] = [42, "hi", true]
+    for t in things:
+        print(kind(t))
+    val maybe: Figure? = null
+    match maybe:
+        case null:
+            print("none")
+        case Circle:
+            print("a circle")
+        case _:
+            print("other")
+    nested()
+
+interface Solid(Figure):
+    fn volume(self) -> Float
+
+struct Cube:
+    s: Float
+    fn area(self) -> Float:
+        return 6.0 * self.s * self.s
+    fn volume(self) -> Float:
+        return self.s * self.s * self.s
+
+fn show(f: Figure) -> String:
+    return match f:
+        case Cube(s): f"cube {s}"
+        case _: "?"
+
+fn nested():
+    val s: Solid = Cube(2.0)
+    print(show(s))

@@ -1,4 +1,4 @@
-# expect-error: matching on which type is inside a `Shape` isn't supported yet
+# expect-error: this case can never match: `Dog` isn't a `Shape`
 interface Shape:
     fn area(self) -> Float
 
@@ -8,8 +8,13 @@ struct Circle:
     fn area(self) -> Float:
         return self.r
 
+struct Dog:
+    name: String
+
 fn kind(s: Shape) -> Int:
     match s:
+        case Dog:
+            return 2
         case Circle(r):
             return 1
         case _:

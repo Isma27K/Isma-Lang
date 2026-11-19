@@ -100,6 +100,8 @@ pub struct FnSymbol {
     /// A copy of a generic function for some type arguments (`max[Int]`):
     /// not a declaration of its own, so outlines and completion skip it.
     pub instance: bool,
+    /// A static method (no `self`): called on the type, `App.new()`.
+    pub is_static: bool,
 }
 
 /// A struct, or an enum when `variants` is `Some` (they share one table).
@@ -123,6 +125,9 @@ pub struct StructSymbol {
     pub instance: bool,
     /// An interface (its `methods` are the ones it asks for).
     pub iface: bool,
+    /// Default methods it gets from the interfaces it says it fits (and
+    /// doesn't replace): function ids of their declarations.
+    pub inherited: Vec<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -140,6 +145,8 @@ pub struct FieldSymbol {
     pub ty: String,
     pub mutable: bool,
     pub span: Span,
+    /// `8080` in `port: Int = 8080`, as written.
+    pub default: Option<String>,
 }
 
 impl IdeInfo {
@@ -170,7 +177,7 @@ impl IdeInfo {
                     let f = &self.functions[fid];
                     // Operator functions (`fn +`) are used through their operator, not `.`,
                     // and `fn drop` runs by itself: it can't be called.
-                    if hide_private && f.name.starts_with('_') || crate::ast::is_operator_name(&f.name) || f.name == "drop" && !s.iface {
+                    if hide_private && f.name.starts_with('_') || crate::ast::is_operator_name(&f.name) || f.name == "drop" && !s.iface || f.is_static {
                         continue;
                     }
                     let of = if s.iface { "method of interface" } else { "method of" };
@@ -187,6 +194,19 @@ impl IdeInfo {
                         takes_args: !f.signature.contains("(self)"),
                     });
                 }
+                for &fid in &s.inherited {
+                    let f = &self.functions[fid];
+                    if out.iter().any(|m| m.name == f.name) {
+                        continue;
+                    }
+                    out.push(Member {
+                        name: f.name.clone(),
+                        signature: f.signature.clone(),
+                        doc: f.doc.clone().unwrap_or_default(),
+                        kind: MemberKind::Method,
+                        takes_args: !f.signature.contains("(self)"),
+                    });
+                }
                 if matches!(t, Type::Enum(_, false)) && !out.iter().any(|m| m.name == "to_string") {
                     out.push(method("to_string", "fn to_string() -> String".into(), "The variant's name.", false));
                 }
@@ -196,6 +216,27 @@ impl IdeInfo {
             Type::Nullable(inner) => self.members(inner),
             _ => builtin_methods(t, &self.type_name(t), &|t| self.type_name(t)),
         }
+    }
+
+    /// The static methods of struct or enum `sid`, for `Point.` completion.
+    pub fn static_members(&self, sid: usize) -> Vec<Member> {
+        let Some(s) = self.structs.get(sid) else { return Vec::new() };
+        let hide_private = s.ns != 0;
+        s.methods
+            .iter()
+            .map(|&fid| &self.functions[fid])
+            .filter(|f| f.is_static && !(hide_private && f.name.starts_with('_')) && !f.name.starts_with("__"))
+            .map(|f| Member {
+                name: f.name.clone(),
+                signature: f.signature.clone(),
+                doc: match &f.doc {
+                    Some(d) => format!("static method of `{}`\n\n{d}", s.name),
+                    None => format!("static method of `{}`", s.name),
+                },
+                kind: MemberKind::Method,
+                takes_args: !f.signature.contains("()"),
+            })
+            .collect()
     }
 
     /// The module the entry file imports as `binding` (`time`, or `geo` in `import geometry as geo`).
@@ -219,7 +260,7 @@ impl IdeInfo {
             .collect();
         for s in self.structs.iter().filter(|s| s.ns == ns && !s.instance) {
             let short = s.name.rsplit('.').next().unwrap_or(&s.name).to_string();
-            if short.starts_with('_') {
+            if short.starts_with(['_', '(']) {
                 continue;
             }
             out.push(Member {

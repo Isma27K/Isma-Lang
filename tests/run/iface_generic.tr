@@ -1,0 +1,74 @@
+# Generic interfaces (`Source[T]`), default methods, bounds that mention
+# other type parameters (`S: Source[T]`), and `T` inferred from them.
+
+interface Shape:
+    fn area(self) -> Float
+    fn name(self) -> String
+
+    fn describe(self) -> String:
+        return f"{self.name()} of area {self.area()}"
+
+    fn bigger_than(self, other: Shape) -> Bool:
+        return self.area() > other.area()
+
+struct Circle(Shape):
+    r: Float
+    fn area(self) -> Float:
+        return 3.0 * self.r * self.r
+    fn name(self) -> String:
+        return "circle"
+
+struct Sq:
+    s: Float
+    fn area(self) -> Float:
+        return self.s * self.s
+    fn name(self) -> String:
+        return "square"
+    fn describe(self) -> String:
+        return "a square, of course"
+
+interface Source[T]:
+    fn next(self) -> T?
+
+    fn take(self, n: Int) -> List[T]:
+        val out: List[T] = []
+        while out.len() < n:
+            val x = self.next() ?: break
+            out.push(x)
+        return out
+
+struct Counter:
+    var at: Int
+    fn next(self) -> Int?:
+        self.at += 1
+        if self.at > 5:
+            return null
+        return self.at
+
+fn total[S: Source[Int]](s: S) -> Int:
+    var sum = 0
+    while true:
+        val x = s.next() ?: break
+        sum += x
+    return sum
+
+fn first_of[T, S: Source[T]](s: S) -> T?:
+    return s.next()
+
+fn show[T: Shape](x: T) -> String:
+    return x.describe()
+
+fn main():
+    val c = Circle(1.0)
+    print(c.describe())
+    print(show(Sq(2.0)))
+    print(show(c))
+    val shapes: List[Shape] = [c, Sq(3.0)]
+    for s in shapes:
+        print(s.describe())
+    print(c.bigger_than(Sq(1.0)))
+    print(total(Counter(0)))
+    print(first_of(Counter(2)))
+    val src: Source[Int] = Counter(0)
+    print(src.take(3))
+    print(src.next())

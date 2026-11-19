@@ -1,0 +1,6 @@
+# expect-error: variant fields can't have default values
+enum Shape:
+    Circle(r: Float = 1.0)
+
+fn main():
+    pass

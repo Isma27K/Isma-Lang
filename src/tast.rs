@@ -124,6 +124,9 @@ pub struct TArm {
     pub pat: TPat,
     pub guard: Option<TExpr>,
     pub body: Vec<TStmt>,
+    /// In a `match` used as a value: what the case gives, after its body
+    /// (`None` when the body leaves with `return`, `break`... or panics).
+    pub value: Option<TExpr>,
 }
 
 /// A checked pattern; `ty` is the type of the value it's matched against.
@@ -148,6 +151,9 @@ pub enum TPatKind {
     Null,
     /// A non-null value of a `T?` whose `T` matches the inner pattern.
     Some(Box<TPat>),
+    /// On an interface value: the value inside is a `.0` (a concrete type),
+    /// which matches the inner pattern.
+    Is(Type, Box<TPat>),
     Or(Vec<TPat>),
 }
 
@@ -431,6 +437,9 @@ pub enum TExprKind {
     /// Run the statements, then evaluate the expression (the code that the
     /// list methods taking functions, like `map` and `filter`, become).
     Block(Vec<TStmt>, Box<TExpr>),
+    /// `match` as a value: exhaustive like the statement; the value is the
+    /// `value` of the case that runs.
+    Match(Box<TExpr>, Vec<TArm>),
 }
 
 impl TExpr {

@@ -1,0 +1,63 @@
+# Lambdas share the `var`s they capture with the code around them (the
+# variable moves into a cell), across calls, loops and recursion.
+
+fn make_counter() -> fn() -> Int:
+    var count = 0
+    return fn() -> Int:
+        count += 1
+        return count
+
+fn main():
+    val next = make_counter()
+    next()
+    next()
+    print(next())
+    var total = 0
+    val add = fn(x: Int):
+        total += x
+    add(5)
+    add(7)
+    print(total)
+    total = 100
+    add(1)
+    print(total)
+    var log: List[String] = []
+    val note = fn(s: String):
+        log.push(s)
+        if log.len() > 2:
+            log = []
+    for w in ["a", "b", "c", "d"]:
+        note(w)
+    print(log)
+    val fns: List[fn() -> Int] = []
+    for i in 0..3:
+        var k = i * 10
+        fns.push(fn() -> k)
+        k += 1
+    print(fns.map(fn(f) -> f()))
+    var name: String? = "x"
+    val reset = fn():
+        name = null
+    if name != null:
+        print(name?.len())
+    reset()
+    print(name)
+    print(sum_to(100))
+    print(twice("a"))
+
+fn sum_to(n: Int) -> Int:
+    var f: (fn(Int) -> Int)? = null
+    f = fn(k: Int) -> Int:
+        if k == 0:
+            return 0
+        return k + f!!(k - 1)
+    return f(n)
+
+fn twice[T](x: T) -> List[T]:
+    var out: List[T] = []
+    val add = fn(v: T):
+        out.push(v)
+        out = out
+    add(x)
+    add(x)
+    return out

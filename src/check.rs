@@ -18,12 +18,16 @@ mod ifaces;
 mod lambdas;
 mod list_fns;
 mod maps;
+mod iters;
+mod tuples;
 use consts::*;
 use generics::*;
 use ifaces::*;
 use lambdas::*;
 
 const BUILTINS: &[&str] = &["print", "input", "args", "panic", "assert", "sqrt", "exit", "hash"];
+/// The most elements a tuple can have (the prelude's `Tuple2` to `Tuple6`).
+const MAX_TUPLE: usize = 6;
 const RESERVED_TYPES: &[&str] = &["Int", "Float", "Bool", "String", "Bytes", "List", "Map", "Unit"];
 
 struct FuncSig {
@@ -275,6 +279,22 @@ pub struct Checker {
     /// Names whose import failed (already reported): their uses stay quiet.
     failed_imports: std::collections::HashSet<(usize, String)>,
     methods: HashMap<(StructId, String), FuncId>,
+    /// Static methods (no `self`): `App.new()`.
+    statics: HashMap<(StructId, String), FuncId>,
+    /// While declaring an interface's default method: its hidden `Self`.
+    declaring_default: Option<ParamId>,
+    /// Default methods of interfaces (their declarations).
+    default_decls: HashSet<FuncId>,
+    /// Per struct or enum: the interfaces it says it fits (`struct Circle(Shape):`).
+    declared_ifaces: HashMap<StructId, Vec<StructId>>,
+    /// Interfaces whose default methods a type that fits them gets in the
+    /// code being checked, besides the ones the type declares (a box's method table).
+    extra_default_ifaces: Vec<StructId>,
+    /// The prelude's tuple structs, by number of elements (`Tuple2` for `(A, B)`).
+    tuples: Vec<Option<StructId>>,
+    /// Default values of struct fields (struct, field index): the hidden
+    /// static method that gives each one.
+    defaults: HashMap<(StructId, usize), FuncId>,
     /// Operator functions; several per kind when they take different parameter types.
     operators: HashMap<(StructId, OpKind), Vec<FuncId>>,
     diags: Vec<Diagnostic>,
@@ -333,6 +353,9 @@ pub struct Checker {
     lambda_stack: Vec<LambdaFrame>,
     /// Closure code (lambda bodies, function wrappers) checked but not yet put in the program.
     lambda_funcs: Vec<(FuncId, TFunc)>,
+    /// Methods used as values (`users.list`): per method (or interface and
+    /// slot), the closure code calling it and its closure struct.
+    bound_methods: HashMap<(usize, usize), (FuncId, StructId)>,
     /// Per function: the closure code calling it through a value; and back.
     fn_wrappers: HashMap<FuncId, FuncId>,
     wrapped: HashMap<FuncId, FuncId>,
@@ -342,6 +365,15 @@ pub struct Checker {
     in_template: bool,
     /// Inside a one-line lambda (`fn(x) -> ...`), where `return`, `break` and `continue` can't be used.
     in_lambda_expr: usize,
+    /// `var`s of the function being checked that a lambda captures: each
+    /// lives in a cell (a struct with one mutable field), so the function
+    /// and its lambdas share it. See `lambdas.rs`.
+    cells: HashMap<LocalId, StructId>,
+    /// Captured `var`s that a lambda assigns, and where.
+    cell_assigned: HashMap<LocalId, Span>,
+    /// Names that lambdas in the function being checked assign: `var`s of
+    /// those names can't be smart-cast (a lambda could change them any time).
+    lambda_assigned: HashSet<String>,
     // interfaces (see `ifaces.rs`)
     /// Per interface (its id in the struct table): its methods.
     ifaces: HashMap<StructId, IfaceInfo>,
@@ -391,6 +423,13 @@ pub fn analyze(files: &[SourceFile]) -> Analysis {
         names: HashMap::new(),
         failed_imports: Default::default(),
         methods: HashMap::new(),
+        statics: HashMap::new(),
+        defaults: HashMap::new(),
+        tuples: vec![None; MAX_TUPLE + 1],
+        declaring_default: None,
+        default_decls: HashSet::new(),
+        declared_ifaces: HashMap::new(),
+        extra_default_ifaces: Vec::new(),
         operators: HashMap::new(),
         diags: Vec::new(),
         locals: Vec::new(),
@@ -427,10 +466,14 @@ pub fn analyze(files: &[SourceFile]) -> Analysis {
         lambda_stack: Vec::new(),
         lambda_funcs: Vec::new(),
         fn_wrappers: HashMap::new(),
+        bound_methods: HashMap::new(),
         wrapped: HashMap::new(),
         cur_fn: None,
         in_template: false,
         in_lambda_expr: 0,
+        cells: HashMap::new(),
+        cell_assigned: HashMap::new(),
+        lambda_assigned: HashSet::new(),
         ifaces: HashMap::new(),
         boxes: HashMap::new(),
         sigs_ready: false,
@@ -750,7 +793,8 @@ impl Checker {
         }
         let mut out = format!("struct {title}:");
         for f in &s.fields {
-            out.push_str(&format!("\n    {} {}: {}", if f.mutable { "var" } else { "val" }, f.name, f.ty));
+            let default = f.default.as_ref().map(|d| format!(" = {d}")).unwrap_or_default();
+            out.push_str(&format!("\n    {} {}: {}{default}", if f.mutable { "var" } else { "val" }, f.name, f.ty));
         }
         for &m in &s.methods {
             out.push_str(&format!("\n    {}", method(m)));
@@ -762,11 +806,24 @@ impl Checker {
     }
 
     fn finish_ide(&mut self) {
+        // Types get the default methods of the interfaces they say they fit.
+        for (sid, ifaces) in self.declared_ifaces.clone() {
+            let mut inherited = Vec::new();
+            for i in ifaces {
+                for (name, decl, _) in self.ifaces.get(&i).map(|x| x.defaults.clone()).unwrap_or_default() {
+                    if !self.has_method(sid, &name) && !inherited.contains(&decl) {
+                        inherited.push(decl);
+                    }
+                }
+            }
+            self.ide.structs[sid].inherited = inherited;
+        }
         // Instances of generic types have the methods of their type.
         for sid in 0..self.ide.structs.len() {
             let origin = self.struct_origin[sid];
             if origin != sid {
                 self.ide.structs[sid].methods = self.ide.structs[origin].methods.clone();
+                self.ide.structs[sid].inherited = self.ide.structs[origin].inherited.clone();
             }
         }
         for (span, sid) in std::mem::take(&mut self.pending_struct_hovers) {
@@ -857,7 +914,6 @@ impl Checker {
         for &(ns, program) in units {
             self.ns = ns;
             for item in &program.items {
-                let none: &[TypeParam] = &[];
                 let (name_id, end, enum_boxed, tparams, iface) = match item {
                     Item::Struct(s) => {
                         let end = s.fields.iter().map(|f| f.ty.span.end).chain(s.methods.iter().map(|m| fn_full_span(m).end)).max();
@@ -867,7 +923,7 @@ impl Checker {
                         let end = e.variants.iter().map(|v| v.span.end).chain(e.methods.iter().map(|m| fn_full_span(m).end)).max();
                         (&e.name, end, Some(e.variants.iter().any(|v| !v.fields.is_empty())), &e.type_params[..], false)
                     }
-                    Item::Interface(i) => (&i.name, Some(i.span.end), None, none, true),
+                    Item::Interface(i) => (&i.name, Some(i.span.end), None, &i.type_params[..], true),
                     _ => continue,
                 };
                 let name = &name_id.name;
@@ -905,6 +961,16 @@ impl Checker {
                 if !pids.is_empty() {
                     self.struct_instances.insert((id, args), id);
                 }
+                // The prelude's `Tuple2[A, B]` is the tuple type `(A, B)`.
+                let tuple_arity = name.strip_prefix("Tuple").and_then(|n| n.parse::<usize>().ok()).filter(|n| (2..=MAX_TUPLE).contains(n) && Some(ns) == self.prelude_ns);
+                let (shown, display) = match tuple_arity {
+                    Some(n) => {
+                        self.tuples[n] = Some(id);
+                        let t = format!("({})", pnames.join(", "));
+                        (t.clone(), t)
+                    }
+                    None => (shown, display),
+                };
                 self.structs.push(TStruct { name: shown, fields: Vec::new(), variants: enum_boxed.map(|_| Vec::new()), generic: !pids.is_empty(), closure: None, vtable: Vec::new(), drop: None });
                 self.def_types.push(match enum_boxed {
                     _ if iface => Type::Iface(id),
@@ -928,6 +994,7 @@ impl Checker {
                     type_args: Vec::new(),
                     instance: false,
                     iface,
+                    inherited: Vec::new(),
                 });
                 self.field_spans.push(Vec::new());
                 self.pending_struct_hovers.push((name_id.span, id));
@@ -949,7 +1016,9 @@ impl Checker {
                 let Some(&sid) = self.struct_index.get(&(ns, name.name.clone())) else { continue };
                 if self.struct_spans[sid] == name.span {
                     let pids = self.struct_params[sid].clone();
+                    self.type_env = self.struct_env(sid);
                     self.resolve_bounds(&pids, tps);
+                    self.type_env.clear();
                 }
             }
         }
@@ -965,7 +1034,8 @@ impl Checker {
                     Item::Interface(i) => {
                         let Some(&sid) = self.struct_index.get(&(ns, i.name.name.clone())) else { continue };
                         if self.struct_spans[sid] == i.name.span {
-                            self.declare_interface(sid, i);
+                            self.fields_ready[sid] = true;
+                            self.declare_interface(sid, i, ns, &mut bodies);
                         }
                     }
                     Item::Struct(s) => {
@@ -976,6 +1046,7 @@ impl Checker {
                         self.type_env = self.struct_env(sid);
                         let mut seen: HashMap<&str, Span> = HashMap::new();
                         let mut fields = Vec::new();
+                        let mut defaults: Vec<(usize, &FnDecl)> = Vec::new();
                         for f in &s.fields {
                             if let Some(prev) = seen.get(f.name.name.as_str()) {
                                 self.err(
@@ -987,22 +1058,41 @@ impl Checker {
                             seen.insert(&f.name.name, f.name.span);
                             let ty = self.resolve_type(&f.ty);
                             let tn = self.tn(&ty);
+                            let default = f.default.as_ref().map(|d| {
+                                defaults.push((fields.len(), &**d));
+                                let value = match d.body.first().map(|st| &st.kind) {
+                                    Some(StmtKind::Return(Some(v))) => self.snippet(v.span),
+                                    _ => None,
+                                };
+                                value.unwrap_or_else(|| "...".into())
+                            });
+                            let shown = match &default {
+                                Some(d) => format!("{tn} = {d}"),
+                                None => tn.clone(),
+                            };
                             self.ide.structs[sid].fields.push(FieldSymbol {
                                 name: f.name.name.clone(),
                                 ty: tn.clone(),
                                 mutable: f.mutable,
                                 span: f.name.span,
+                                default,
                             });
                             self.field_spans[sid].push(f.name.span);
                             let kw = if f.mutable { "var" } else { "val" };
                             let sname = self.structs[sid].name.clone();
-                            self.hover(f.name.span, format!("{kw} {}: {tn}", f.name.name), Some(format!("field of `{sname}`")));
+                            self.hover(f.name.span, format!("{kw} {}: {shown}", f.name.name), Some(format!("field of `{sname}`")));
                             fields.push(TField { name: f.name.name.clone(), ty, mutable: f.mutable });
                         }
                         self.structs[sid].fields = fields;
                         self.type_env.clear();
                         self.fields_ready[sid] = true;
                         self.unused_type_params(sid);
+                        // Each default value is a hidden static method, run where the field is left out.
+                        for (idx, d) in defaults {
+                            let fid = self.declare_fn(d, Some(sid));
+                            self.defaults.insert((sid, idx), fid);
+                            bodies.push((d, Some(sid), ns, fid));
+                        }
                         let fields: Vec<&str> = seen.keys().copied().collect();
                         self.declare_methods(sid, &s.methods, &fields, ns, &mut bodies);
                         self.declared_interfaces(sid, &s.implements);
@@ -1480,19 +1570,24 @@ impl Checker {
                 self.err(Diagnostic::error(format!("`{}` is both a field and a method of `{tname}`", m.name.name), m.name.span));
                 continue;
             }
-            if m.self_param.is_none() {
-                self.err(
-                    Diagnostic::error(format!("method `{}` must take `self` as its first parameter", m.name.name), m.sig_span)
-                        .with_note("static methods are not supported yet; use a top-level function"),
-                );
-                continue;
-            }
-            if let Some(&prev) = self.methods.get(&(sid, m.name.name.clone())) {
+            if let Some(&prev) = self.methods.get(&(sid, m.name.name.clone())).or_else(|| self.statics.get(&(sid, m.name.name.clone()))) {
                 let prev_span = self.funcs[prev].span;
                 self.err(
                     Diagnostic::error(format!("method `{}` is defined more than once", m.name.name), m.name.span)
                         .with_label(prev_span, "first defined here"),
                 );
+                continue;
+            }
+            // Without `self`: a static method, called on the type (`App.new()`).
+            if m.self_param.is_none() {
+                if m.name.name == "drop" {
+                    self.err(Diagnostic::error("`fn drop` takes only `self` and returns nothing", m.sig_span).with_help("write it as `fn drop(self):`"));
+                    continue;
+                }
+                let fid = self.declare_fn(m, Some(sid));
+                self.statics.insert((sid, m.name.name.clone()), fid);
+                self.ide.structs[sid].methods.push(fid);
+                bodies.push((m, Some(sid), ns, fid));
                 continue;
             }
             let fid = self.declare_fn(m, Some(sid));
@@ -1748,12 +1843,24 @@ impl Checker {
         // Type parameters: the owner's (`struct Box[T]`), then the function's own.
         let outer: Vec<ParamId> = owner.map(|s| self.struct_params[s].clone()).unwrap_or_default();
         let own = self.declare_type_params(&f.type_params, &f.name.name, &outer);
+        // (A bound can mention the other type parameters: `S: Source[T]`.)
+        self.type_env = outer.iter().chain(&own).map(|p| (self.type_params[*p].name.clone(), Type::Param(*p))).collect();
         self.resolve_bounds(&own, &f.type_params);
-        let all: Vec<ParamId> = outer.iter().chain(&own).copied().collect();
+        // A default method of an interface has a hidden `Self`: the type it runs for.
+        let self_param = self.declaring_default.take();
+        let all: Vec<ParamId> = outer.iter().chain(&self_param).chain(&own).copied().collect();
         self.type_env = all.iter().map(|p| (self.type_params[*p].name.clone(), Type::Param(*p))).collect();
         let mut params = Vec::new();
-        if let Some(sid) = owner {
-            params.push(("self".to_string(), self.def_types[sid].clone()));
+        // (Interface methods always take `self`: checked before.)
+        let has_self = owner.is_some() && f.self_param.is_some();
+        if let Some(sid) = owner
+            && has_self
+        {
+            let me = match self_param {
+                Some(sp) => Type::Param(sp),
+                None => self.def_types[sid].clone(),
+            };
+            params.push(("self".to_string(), me));
         }
         let mut seen: HashMap<&str, Span> = HashMap::new();
         for p in &f.params {
@@ -1791,7 +1898,9 @@ impl Checker {
         let (name, symbol) = match owner {
             Some(sid) => {
                 let sname = &self.structs[sid].name;
-                let short = short_name(sname);
+                // (A tuple `(A, B)` is `Tuple2` in symbols.)
+                let tuple = format!("Tuple{}", self.struct_params[sid].len());
+                let short = if sname.starts_with('(') { tuple.as_str() } else { short_name(sname) };
                 // Operator functions get a name, numbered because they can be overloaded.
                 let method = if is_operator_name(&f.name.name) { format!("op_{}{}", OpKind::mangled(&f.name.name), self.funcs.len()) } else { f.name.name.clone() };
                 let symbol = if self.ns == 0 { format!("tarn_m_{short}_{method}") } else { format!("tarn_m_{msym}__{short}_{method}") };
@@ -1801,11 +1910,14 @@ impl Checker {
             None if self.ns == 0 => (f.name.name.clone(), format!("tarn_fn_{}", f.name.name)),
             None => (format!("{module}.{}", f.name.name), format!("tarn_{msym}__{}", f.name.name)),
         };
-        let sig = self.signature(&f.name.name, &own, &params, &ret, owner.is_some());
+        // A static method of a generic type picks the type's parameters at the call too (`Box.empty()`).
+        let picked: Vec<ParamId> = if owner.is_some() && !has_self { all.clone() } else { own.clone() };
+        let sig = self.signature(&f.name.name, &own, &params, &ret, has_self);
         let comment = self.doc_comment(f.sig_span.start);
+        let of = if has_self { "method of" } else { "static method of" };
         let hover_doc = match (owner, &comment) {
-            (Some(sid), Some(c)) => Some(format!("method of `{}`\n\n{c}", self.structs[sid].name)),
-            (Some(sid), None) => Some(format!("method of `{}`", self.structs[sid].name)),
+            (Some(sid), Some(c)) => Some(format!("{of} `{}`\n\n{c}", self.structs[sid].name)),
+            (Some(sid), None) => Some(format!("{of} `{}`", self.structs[sid].name)),
             (None, c) if self.ns != 0 => Some(format!("in module `{module}`{}", c.as_ref().map(|c| format!("\n\n{c}")).unwrap_or_default())),
             (None, c) => c.clone(),
         };
@@ -1819,13 +1931,14 @@ impl Checker {
             ns: self.ns,
             doc: comment,
             instance: false,
+            is_static: owner.is_some() && !has_self,
         });
         let id = self.funcs.len();
         if !own.is_empty() {
             self.generic_hovers.push((id, f.name.span));
         }
         let instance = (!all.is_empty()).then(|| (id, all.iter().map(|p| Type::Param(*p)).collect()));
-        self.funcs.push(FuncSig { name, symbol, params, ret, span: f.name.span, type_params: all, tparams: own, instance });
+        self.funcs.push(FuncSig { name, symbol, params, ret, span: f.name.span, type_params: all, tparams: picked, instance });
         self.bound_needs(id);
         id
     }
@@ -1835,7 +1948,10 @@ impl Checker {
         if list.is_empty() {
             return;
         }
+        // (`struct Mapped[T, U](Iterator[U]):` can use the type's parameters.)
+        self.type_env = self.struct_env(sid);
         let types: Vec<(Type, Span)> = list.iter().map(|t| (self.resolve_type(t), t.span)).collect();
+        self.type_env.clear();
         self.implements.push((sid, types));
     }
 
@@ -1859,6 +1975,10 @@ impl Checker {
             return self.resolve_fn_type(f);
         }
         let name = t.name.name.as_str();
+        if name == TUPLE_TYPE {
+            let elems: Vec<Type> = t.args.iter().map(|a| self.resolve_type(a)).collect();
+            return self.tuple_type(elems, t.span);
+        }
         if let Some(m) = &t.module {
             return self.resolve_module_type(m, t);
         }
@@ -1991,6 +2111,9 @@ impl Checker {
         self.cur_fn = Some(fid);
         self.in_template = self.funcs[fid].instance.is_some() && !self.is_concrete_instance(fid);
         self.in_lambda_expr = 0;
+        self.cells.clear();
+        self.cell_assigned.clear();
+        self.lambda_assigned = lambda_assigned_names(&f.body);
         self.locals.clear();
         self.local_meta.clear();
         self.nonnull.clear();
@@ -2000,17 +2123,19 @@ impl Checker {
         let sig_params: Vec<(String, Type)> = self.funcs[fid].params.clone();
         self.ret_ty = self.funcs[fid].ret.clone();
         let mut params = Vec::new();
+        let has_self = owner.is_some() && f.self_param.is_some();
         for (i, (name, ty)) in sig_params.iter().enumerate() {
-            let span = if owner.is_some() && i == 0 {
+            let span = if has_self && i == 0 {
                 f.self_param.unwrap_or(f.name.span)
             } else {
-                f.params[i - owner.is_some() as usize].name.span
+                f.params[i - has_self as usize].name.span
             };
             let id = self.new_local(name, ty.clone(), span, LocalKind::Param);
             self.scopes[0].insert(name.clone(), LocalBinding { id, mutable: false, span });
             params.push(id);
         }
-        let body = self.block(&f.body, false);
+        let mut body = self.block(&f.body, false);
+        self.apply_cells(&mut body);
         if self.ret_ty != Type::Unit && !self.ret_ty.is_error() && !block_diverges(&body) {
             let rt = self.tn(&self.ret_ty);
             let span = f.ret.as_ref().map(|r| r.span).unwrap_or(f.sig_span);
@@ -2148,7 +2273,12 @@ impl Checker {
     }
 
     fn is_smart_cast(&self, p: &NullPath) -> bool {
-        self.nonnull.contains(p) && self.first_var_field(p).is_none()
+        self.nonnull.contains(p) && self.first_var_field(p).is_none() && !self.shared_var(p.root)
+    }
+
+    /// Is local `id` a `var` that a lambda assigns (so it can't be smart-cast)?
+    fn shared_var(&self, id: LocalId) -> bool {
+        self.local_meta.get(id).is_some_and(|m| m.kind == LocalKind::Var && self.lambda_assigned.contains(&m.name))
     }
 
     fn add_facts(&mut self, facts: Vec<NullPath>) {
@@ -2253,6 +2383,10 @@ impl Checker {
         if !self.nonnull.contains(&p) {
             return None;
         }
+        if p.fields.is_empty() && self.shared_var(p.root) {
+            let name = &self.local_meta[p.root].name;
+            return Some(format!("it was checked for `null`, but a lambda assigns `{name}`, so it could have changed since then; copy it into a `val` first: `val {name}_now = {name}`"));
+        }
         let field = self.first_var_field(&p)?;
         let copy = self.snippet(e.span).map(|s| format!(": `val {} = {s}`", field)).unwrap_or_default();
         Some(format!(
@@ -2346,7 +2480,7 @@ impl Checker {
                         .with_label(end, "any code after this is unreachable"),
                 );
             }
-            if let Some(t) = self.stmt(s) {
+            for t in self.stmts_of(s) {
                 if ended_at.is_none() && ends_flow(&t) {
                     ended_at = Some(s.span);
                 }
@@ -2357,6 +2491,22 @@ impl Checker {
             self.scopes.pop();
         }
         out
+    }
+
+    /// One statement of a block, as the statements it becomes (`val (a, b) = t` sets each name).
+    fn stmts_of(&mut self, s: &Stmt) -> Vec<TStmt> {
+        match &s.kind {
+            StmtKind::LetTuple { mutable, pat, ty, value } => {
+                let declared = ty.as_ref().map(|t| self.resolve_type(t));
+                let mut v = self.expr(value, declared.as_ref());
+                if let Some(d) = &declared {
+                    v = self.coerce(v, d, ty.as_ref().map(|t| t.span));
+                }
+                let kind = if *mutable { LocalKind::Var } else { LocalKind::Val };
+                self.destructure(pat, v, kind)
+            }
+            _ => self.stmt(s).into_iter().collect(),
+        }
     }
 
     fn expect_bool(&mut self, e: &Expr, what: &str) -> TExpr {
@@ -2418,6 +2568,11 @@ impl Checker {
                     self.add_facts(vec![NullPath::local(id)]);
                 }
                 TStmt::Let(id, v)
+            }
+            StmtKind::LetTuple { .. } => {
+                // (Blocks take these apart into several statements: see `stmts_of`.)
+                let stmts = self.stmts_of(s);
+                return Some(TStmt::If { branches: vec![(Self::mk(TExprKind::Bool(true), Type::Bool, s.span), stmts)], else_block: None });
             }
             StmtKind::Assign { target, op, value } => self.assign(target, *op, value, s.span)?,
             StmtKind::Expr(e) => {
@@ -2491,8 +2646,11 @@ impl Checker {
                 }
                 TStmt::While { cond: c, body: b }
             }
-            StmtKind::For { var, second, iter, body } => match iter {
+            StmtKind::For { var, second, iter, body, pats } => match iter {
                 ForIter::Range { start, end, inclusive } => {
+                    if let Some(p) = pats.iter().flatten().next() {
+                        self.err(Diagnostic::error("a range gives `Int`s, which can't be taken apart", p.span).with_help("use one name: `for i in a..b:`"));
+                    }
                     if let Some(sv) = second {
                         self.err(
                             Diagnostic::error("a range gives one value per step", sv.span)
@@ -2527,7 +2685,20 @@ impl Checker {
                 ForIter::Expr(e) => {
                     let tl = self.expr(e, None);
                     if matches!(tl.ty, Type::Map(..)) {
+                        if let Some(p) = pats.iter().flatten().next() {
+                            self.err(
+                                Diagnostic::error("a map gives each key and value as two loop variables, not a tuple", p.span)
+                                    .with_help("write `for k, v in m:`"),
+                            );
+                        }
                         return Some(self.for_map(var, second.as_ref(), tl, body, e.span));
+                    }
+                    // A value of your own type: its iterator's `next()` until `null`.
+                    if matches!(tl.ty.non_null(), Type::Struct(_) | Type::Enum(..) | Type::Iface(_) | Type::Param(_)) {
+                        if tl.ty.is_nullable() {
+                            self.null_use_error(&tl, NullUse::Value);
+                        }
+                        return Some(self.for_iter(var, second.as_ref(), pats, tl, body, e.span));
                     }
                     let elem = match &tl.ty {
                         Type::List(t) => (**t).clone(),
@@ -2563,16 +2734,30 @@ impl Checker {
                     {
                         self.ide.inlay_hints.push((iv.span.end, ": Int".into()));
                     }
-                    if evar.name != "_" && !elem.is_error() {
+                    let destructured = pats.iter().any(Option::is_some);
+                    if evar.name != "_" && !elem.is_error() && !destructured {
                         let hint = format!(": {}", self.tn(&elem));
                         self.ide.inlay_hints.push((evar.span.end, hint));
                     }
                     self.forget_assigned_in(body);
                     let before = self.nonnull.clone();
                     let index = ivar.map(|iv| self.declare_local(iv, Type::Int, LocalKind::LoopVar));
-                    let v = self.declare_local(evar, elem, LocalKind::LoopVar);
+                    let v = self.declare_local(evar, elem.clone(), LocalKind::LoopVar);
+                    // `for (k, v) in pairs:` takes each element apart.
+                    let epat = if second.is_some() { &pats[1] } else { &pats[0] };
+                    let mut b = match epat {
+                        Some(p) => {
+                            self.local_meta[v].used = true;
+                            let it = Self::mk(TExprKind::Local(v), elem, p.span);
+                            self.destructure(p, it, LocalKind::LoopVar)
+                        }
+                        None => Vec::new(),
+                    };
+                    if second.is_some() && pats[0].is_some() {
+                        self.err(Diagnostic::error("the index of `for i, x in ...` is an `Int`, not a tuple", var.span).with_primary("can't take an `Int` apart"));
+                    }
                     self.loop_depth += 1;
-                    let b = self.block(body, true);
+                    b.extend(self.block(body, true));
                     self.loop_depth -= 1;
                     self.scopes.pop();
                     self.nonnull = before;
@@ -2591,6 +2776,126 @@ impl Checker {
     }
 
     fn match_stmt(&mut self, scrutinee: &Expr, arms: &[MatchArm]) -> TStmt {
+        let (ts, tarms) = self.match_core(scrutinee, arms, None);
+        TStmt::Match { scrutinee: ts, arms: tarms }
+    }
+
+    /// `match` used as a value. `expected`: the type wanted here, if known;
+    /// otherwise the cases' values agree on one (`Int` and `null` make `Int?`).
+    fn match_expr(&mut self, scrutinee: &Expr, arms: &[MatchArm], expected: Option<&Type>, span: Span) -> TExpr {
+        let (ts, mut tarms) = self.match_core(scrutinee, arms, Some(expected));
+        let mut ty: Option<(Type, Span)> = None;
+        if let Some(e) = expected {
+            ty = Some((e.clone(), span));
+        } else {
+            for a in &tarms {
+                let Some(v) = &a.value else { continue };
+                if v.ty.is_error() {
+                    continue;
+                }
+                ty = match ty {
+                    None => Some((v.ty.clone(), v.span)),
+                    Some((t, at)) if v.ty.assignable(&t) => Some((t, at)),
+                    Some((t, at)) => match join_types(&t, &v.ty) {
+                        Some(j) => Some((j, at)),
+                        None => {
+                            let (a, b) = (self.tn(&t), self.tn(&v.ty));
+                            let mut d = Diagnostic::error(format!("the cases of this `match` give different types: `{a}` and `{b}`"), v.span)
+                                .with_primary(format!("this is `{b}`"))
+                                .with_label(at, format!("this is `{a}`"));
+                            if let Some(i) = self.common_iface(&t, &v.ty) {
+                                let iname = self.tn(&Type::Iface(i));
+                                d = d.with_help(format!("both are {}: say that's the type wanted, as in `val x: {iname} = match ...`", a_type(&iname)));
+                            }
+                            self.err(d);
+                            Some((Type::Error, at))
+                        }
+                    },
+                };
+            }
+        }
+        let ty = match ty {
+            Some((Type::Null, _)) => {
+                self.err(Diagnostic::error("cannot tell the type of this `match` from `null` alone", span).with_help("give the variable a type, e.g. `val x: Int? = match ...`"));
+                Type::Error
+            }
+            Some((Type::Unit, at)) => {
+                self.err(Diagnostic::error("this `match` gives no value", at).with_primary("this case gives nothing").with_help("end each case with the value it gives"));
+                Type::Error
+            }
+            Some((t, _)) => t,
+            // Every case leaves (`return`, `break`, a panic).
+            None => expected.cloned().unwrap_or(Type::Unit),
+        };
+        for a in &mut tarms {
+            if let Some(v) = a.value.take() {
+                a.value = Some(if ty.is_error() || v.ty.is_error() { v } else { self.coerce(v, &ty, None) });
+            }
+        }
+        Self::mk(TExprKind::Match(Box::new(ts), tarms), ty, span)
+    }
+
+    /// What one case of a `match` used as a value gives: its body's last line
+    /// (an expression, or a `match` giving a value), after the lines before it.
+    fn case_value(&mut self, stmts: &[Stmt], expected: Option<&Type>, at: Span) -> (Vec<TStmt>, Option<TExpr>) {
+        self.scopes.push(HashMap::new());
+        let Some((last, init)) = stmts.split_last() else {
+            self.scopes.pop();
+            return (Vec::new(), None);
+        };
+        let mut body = self.block(init, false);
+        let value = match &last.kind {
+            StmtKind::Expr(e) => {
+                let t = self.expr(e, expected);
+                if t.diverges() {
+                    body.push(TStmt::Expr(t));
+                    None
+                } else if t.ty == Type::Unit {
+                    self.err(
+                        Diagnostic::error("this case gives no value", last.span)
+                            .with_primary("this gives nothing")
+                            .with_label(at, "in this case")
+                            .with_note("the last line of a case is its value; a `match` used as a value needs one from every case that doesn't `return`, `break` or panic"),
+                    );
+                    body.push(TStmt::Expr(t));
+                    Some(Self::error_expr(last.span))
+                } else {
+                    Some(t)
+                }
+            }
+            StmtKind::Match { scrutinee, arms } => Some(self.match_expr(scrutinee, arms, expected, last.span)),
+            StmtKind::Pass => {
+                self.err(
+                    Diagnostic::error("this case gives no value", last.span)
+                        .with_primary("`pass` is nothing")
+                        .with_note("a `match` used as a value needs a value from every case that doesn't `return`, `break` or panic"),
+                );
+                Some(Self::error_expr(last.span))
+            }
+            _ => {
+                if let Some(t) = self.stmt(last) {
+                    body.push(t);
+                }
+                if body.iter().any(ends_flow) {
+                    None
+                } else {
+                    self.err(
+                        Diagnostic::error("this case gives no value", last.span)
+                            .with_primary("the last line of a case is its value")
+                            .with_label(at, "in this case")
+                            .with_note("a `match` used as a value needs a value from every case that doesn't `return`, `break` or panic"),
+                    );
+                    Some(Self::error_expr(last.span))
+                }
+            }
+        };
+        self.scopes.pop();
+        (body, value)
+    }
+
+    /// The checks shared by `match` statements and values. `value`: for a
+    /// `match` used as a value, the type expected for it (if known).
+    fn match_core(&mut self, scrutinee: &Expr, arms: &[MatchArm], value: Option<Option<&Type>>) -> (TExpr, Vec<TArm>) {
         let ts = self.expr(scrutinee, None);
         let sty = ts.ty.clone();
         if sty == Type::Unit {
@@ -2637,7 +2942,10 @@ impl Checker {
                 self.add_facts(when_true);
                 tg
             });
-            let body = self.block(&arm.body, true);
+            let (body, val) = match value {
+                Some(expected) => self.case_value(&arm.body, expected, arm.span),
+                None => (self.block(&arm.body, true), None),
+            };
             if !body.iter().any(ends_flow) {
                 ends.push(std::mem::take(&mut self.nonnull));
             }
@@ -2647,7 +2955,7 @@ impl Checker {
                 None => rows.push(vec![ap]),
                 Some(_) => guarded = true,
             }
-            tarms.push(TArm { pat, guard, body });
+            tarms.push(TArm { pat, guard, body, value: val });
         }
         if check_cover && !pattern_errors {
             let space = Space { structs: &self.structs };
@@ -2661,8 +2969,16 @@ impl Checker {
                 let first = space.show(&missing[0], &sty);
                 let tn = self.tn(&sty);
                 let mut d = Diagnostic::error(format!("this `match` doesn't handle every value: {what} not covered"), scrutinee.span)
-                    .with_primary(format!("this is `{tn}`"))
-                    .with_help(format!("add a case for it:\n\ncase {first}:\n    ...\n\nor end with `case _:` to handle everything else"));
+                    .with_primary(format!("this is `{tn}`"));
+                d = if let Type::Iface(i) = sty.non_null()
+                    && first == "_"
+                {
+                    let iname = self.structs[*i].name.clone();
+                    d.with_note(format!("{} can hold a value of any type that fits it, even one written later, so no list of types covers them all", a_type(&iname)))
+                        .with_help("end with `case _:` to handle every other type")
+                } else {
+                    d.with_help(format!("add a case for it:\n\ncase {first}:\n    ...\n\nor end with `case _:` to handle everything else"))
+                };
                 if guarded {
                     d = d.with_note("cases with an `if` guard don't count here, because their guard might be false");
                 }
@@ -2676,7 +2992,7 @@ impl Checker {
             Some((first, rest)) => first.iter().filter(|p| rest.iter().all(|e| e.contains(p))).cloned().collect(),
             None => before,
         };
-        TStmt::Match { scrutinee: ts, arms: tarms }
+        (ts, tarms)
     }
 
     /// Warn about a case (or an alternative of a `|`) that earlier cases already cover.
@@ -2725,6 +3041,12 @@ impl Checker {
             }
             PatternKind::As(inner, name) => {
                 let t = self.check_pattern(inner, ty, cx);
+                // `case Circle as c:` on a `Shape`: `c` is the `Circle`.
+                if let TPatKind::Is(c, sub) = t.kind {
+                    let id = self.bind_name(name, &c, cx);
+                    let bound = TPat { kind: TPatKind::Bind(id, sub), ty: c.clone() };
+                    return pat(TPatKind::Is(c, Box::new(bound)));
+                }
                 let id = self.bind_name(name, ty, cx);
                 pat(TPatKind::Bind(id, Box::new(t)))
             }
@@ -2795,6 +3117,7 @@ impl Checker {
                 wild()
             }
             PatternKind::Ctor { path, args } => self.ctor_pattern(p, path, args.as_deref(), ty, cx),
+            PatternKind::Tuple(elems) => self.tuple_pattern(p, elems, ty, cx),
         }
     }
 
@@ -2846,15 +3169,12 @@ impl Checker {
         let (sid, qual_ok) = match ty {
             Type::Enum(id, _) => (*id, path.len() == 1 || self.names_type(&path[..path.len() - 1], *id)),
             Type::Struct(id) => (*id, self.names_type(path, *id)),
+            // `case Circle(r):` on a `Shape`: which type is inside.
+            Type::Iface(i) => return self.type_test_pattern(p, path, args, *i, cx),
             _ => {
                 let tn = self.tn(ty);
-                let mut d = Diagnostic::error(format!("mismatched types: `{shown}` can't match {}", a_type(&tn)), p.span)
+                let d = Diagnostic::error(format!("mismatched types: `{shown}` can't match {}", a_type(&tn)), p.span)
                     .with_primary(format!("expected {} pattern", a_type(&tn)));
-                if matches!(ty.non_null(), Type::Iface(_)) {
-                    d = d
-                        .with_note(format!("matching on which type is inside {} isn't supported yet", a_type(&tn)))
-                        .with_help(format!("call `{tn}`'s methods instead, or add a method to `{tn}` that answers the question"));
-                }
                 self.err(d);
                 cx.errors = true;
                 return TPat { kind: TPatKind::Wild, ty: ty.clone() };
@@ -2906,6 +3226,81 @@ impl Checker {
         }
         let subs = self.field_patterns(&fields, args, &last.name, p.span, cx);
         TPat { kind: TPatKind::Variant(sid, k, subs), ty: ty.clone() }
+    }
+
+    /// `case Circle(r):`, `case Circle as c:`, `case Shape.Empty:`, `case Int as n:`
+    /// on a value of interface `iface`: the type inside, and what it must match.
+    fn type_test_pattern(&mut self, p: &Pattern, path: &[Ident], args: Option<&[PatArg]>, iface: StructId, cx: &mut PatCx) -> TPat {
+        let ity = Type::Iface(iface);
+        let iname = self.structs[iface].name.clone();
+        let fail = |c: &mut Checker, d: Diagnostic, cx: &mut PatCx| {
+            c.err(d);
+            cx.errors = true;
+            TPat { kind: TPatKind::Wild, ty: ity.clone() }
+        };
+        let shown: Vec<&str> = path.iter().map(|i| i.name.as_str()).collect();
+        let shown = shown.join(".");
+        // Which type: a built-in one, a struct or enum, or an enum's variant (`Shape.Empty`).
+        let builtin = match (path, args) {
+            ([n], None) => match n.name.as_str() {
+                "Int" => Some(Type::Int),
+                "Float" => Some(Type::Float),
+                "Bool" => Some(Type::Bool),
+                "String" => Some(Type::Str),
+                "Bytes" => Some(Type::Bytes),
+                _ => None,
+            },
+            _ => None,
+        };
+        let found = |c: &mut Checker, path: &[Ident]| match path {
+            [name] => c.visible_struct(&name.name),
+            [module, name] => c.imported_module(&module.name).and_then(|m| c.struct_index.get(&(m, name.name.clone())).copied()),
+            _ => None,
+        };
+        let (t, inner) = if let Some(t) = builtin {
+            (t, None)
+        } else if let Some(sid) = found(self, path) {
+            (self.def_types[sid].clone(), Some(sid))
+        } else if path.len() > 1
+            && let Some(sid) = found(self, &path[..path.len() - 1])
+            && self.structs[sid].variants.is_some()
+        {
+            (self.def_types[sid].clone(), Some(sid))
+        } else {
+            let d = Diagnostic::error(format!("`{shown}` isn't a type, so it can't match a value of interface `{iname}`"), p.span)
+                .with_primary("not a type")
+                .with_note(format!("a case on {} names the type of what's inside: `case Circle(r):`, `case Circle as c:`", a_type(&iname)));
+            return fail(self, d, cx);
+        };
+        if let Some(sid) = inner {
+            if matches!(t, Type::Iface(_)) {
+                let d = Diagnostic::error(format!("`{shown}` is an interface: a case can only test for a concrete type"), p.span)
+                    .with_note("a value is always of one concrete type; which interfaces it fits isn't kept at run time");
+                return fail(self, d, cx);
+            }
+            if !self.struct_params[sid].is_empty() {
+                let d = Diagnostic::error(format!("`{shown}` is generic: a case can't tell which `{shown}[...]` is inside"), p.span)
+                    .with_help("add a method to the interface that answers the question instead");
+                return fail(self, d, cx);
+            }
+        }
+        if let Err(m) = self.fit(&t, iface) {
+            let tn = self.tn(&t);
+            let d = Diagnostic::error(format!("this case can never match: `{tn}` isn't {}", a_type(&iname)), p.span)
+                .with_primary(format!("a `{iname}` never holds a `{tn}`"))
+                .with_note(m.reason);
+            return fail(self, d, cx);
+        }
+        let sub = match inner {
+            // The type alone (`case Circle:`) matches any value of it.
+            Some(sid) if args.is_some() || path.len() > 1 && !self.names_type(path, sid) => self.ctor_pattern(p, path, args, &t, cx),
+            Some(sid) => {
+                self.names_type(path, sid);
+                TPat { kind: TPatKind::Wild, ty: t.clone() }
+            }
+            None => TPat { kind: TPatKind::Wild, ty: t.clone() },
+        };
+        TPat { kind: TPatKind::Is(t, Box::new(sub)), ty: ity }
     }
 
     /// Does `path` (`Shape`, `time.Month`) name the struct or enum `sid`? Adds hovers when it does.
@@ -2993,13 +3388,15 @@ impl Checker {
 
     /// `Shape` or `module.Shape`, when an expression names an enum (to build a variant).
     /// With the type arguments it's given, for a generic enum (`Tree[Int]`).
-    fn enum_ref<'e>(&mut self, e: &'e Expr) -> Option<(StructId, Option<&'e [TypeExpr]>)> {
+    /// `Point`, `geo.Point`, `Box[Int]`: an expression that names a struct,
+    /// enum or interface (not a value), as the left side of `Point.origin()`.
+    fn type_ref<'e>(&mut self, e: &'e Expr) -> Option<(StructId, Option<&'e [TypeExpr]>)> {
         if let ExprKind::TypeApply(inner, targs) = &e.kind {
-            let (sid, _) = self.enum_ref(inner)?;
+            let (sid, _) = self.type_ref(inner)?;
             return Some((sid, Some(targs)));
         }
         let sid = match &e.kind {
-            ExprKind::Name(n) if self.lookup(n).is_none() => self.visible_struct(n)?,
+            ExprKind::Name(n) if self.lookup(n).is_none() && !self.is_outer_local(n) => self.visible_struct(n)?,
             ExprKind::Field(m, n) => {
                 let ExprKind::Name(mn) = &m.kind else { return None };
                 if self.lookup(mn).is_some() || !self.imports.contains_key(&(self.ns, mn.clone())) {
@@ -3007,17 +3404,11 @@ impl Checker {
                 }
                 let module_ns = self.imported_module(mn)?;
                 let sid = self.struct_index.get(&(module_ns, n.name.clone())).copied()?;
-                if !matches!(self.def_types[sid], Type::Enum(..)) {
-                    return None;
-                }
                 self.module_hover(module_ns, m.span);
                 sid
             }
             _ => return None,
         };
-        if !matches!(self.def_types[sid], Type::Enum(..)) {
-            return None;
-        }
         let name_span = match &e.kind {
             ExprKind::Field(_, n) => n.span,
             _ => e.span,
@@ -3025,6 +3416,143 @@ impl Checker {
         self.pending_struct_hovers.push((name_span, sid));
         self.ide.definitions.push((name_span, self.struct_spans[sid]));
         Some((sid, None))
+    }
+
+    /// `Point.origin()`, `Shape.Circle(1.0)`, `Box[Int].empty()`: something
+    /// named on type `sid` (`targs`: its type arguments, if written), called with `args`.
+    #[allow(clippy::too_many_arguments)]
+    fn type_member_call(&mut self, sid: StructId, targs: Option<&[TypeExpr]>, name: &Ident, args: &[Arg], explicit: Option<&[TypeExpr]>, expected: Option<&Type>, span: Span) -> TExpr {
+        let is_variant = self.structs[sid].variants().iter().any(|v| v.name == name.name);
+        if !is_variant && let Some(&decl) = self.statics.get(&(sid, name.name.clone())) {
+            return self.static_call(sid, decl, targs, name, args, explicit, expected, span);
+        }
+        if self.structs[sid].variants.is_some() {
+            return self.variant_value(sid, name, Some(args), targs.or(explicit), expected, span);
+        }
+        self.no_static(sid, name);
+        for a in args {
+            let _ = self.expr(&a.value, None);
+        }
+        Self::error_expr(span)
+    }
+
+    /// "`Point` has no static method `x`", with what it is instead.
+    fn no_static(&mut self, sid: StructId, name: &Ident) {
+        let tname = self.structs[sid].name.clone();
+        let short = short_name(&tname).to_string();
+        let kind = match self.def_types[sid] {
+            Type::Iface(_) => "interface",
+            Type::Enum(..) => "enum",
+            _ => "struct",
+        };
+        let mut d = Diagnostic::error(format!("{kind} `{tname}` has no static method `{}`", name.name), name.span).with_primary("not found");
+        if self.has_method(sid, &name.name) {
+            d = d.with_note(format!("`{}` takes `self`: call it on {} value, as in `x.{}(...)`", name.name, a_type(&short), name.name));
+        } else if self.structs[sid].fields.iter().any(|f| f.name == name.name) {
+            d = d.with_note(format!("`{}` is a field: read it from a `{short}` value", name.name));
+        } else {
+            let origin = self.struct_origin[sid];
+            let names: Vec<String> = self.statics.keys().filter(|(s, _)| *s == origin).map(|(_, n)| n.clone()).collect();
+            if let Some(s) = suggest(&name.name, names.iter().map(|s| s.as_str())) {
+                d = d.with_help(format!("did you mean `{s}`?"));
+            } else if kind == "struct" {
+                d = d.with_help(format!("a method without `self` is a static method: `fn {}(...) -> {short}:` inside `struct {short}`", name.name));
+            }
+        }
+        self.err(d);
+    }
+
+    /// The static method `decl` of type `sid` (of its instance, when `targs`
+    /// says which: `Box[Int].empty()`), as a function to call or use as a value.
+    fn static_fn(&mut self, sid: StructId, decl: FuncId, targs: Option<&[TypeExpr]>, span: Span) -> Option<FuncId> {
+        let Some(targs) = targs else { return Some(decl) };
+        let tn = self.structs[sid].name.clone();
+        let t = TypeExpr { module: None, name: Ident { name: short_name(&tn).to_string(), span }, args: targs.to_vec(), nullable: false, func: None, span };
+        match self.apply_type_args(sid, &t, &short_name(&tn).to_string()) {
+            Type::Struct(i) | Type::Enum(i, _) => Some(self.member_instance(decl, i)),
+            _ => None,
+        }
+    }
+
+    /// `Shape.Empty`, `App.new`, `Point.norm` without a call: a variant, or a
+    /// static method or method (taking the value as its first argument) used as a function value.
+    fn type_member_value(&mut self, sid: StructId, targs: Option<&[TypeExpr]>, name: &Ident, expected: Option<&Type>, span: Span) -> TExpr {
+        let is_variant = self.structs[sid].variants().iter().any(|v| v.name == name.name);
+        let private = is_private(&name.name) && self.struct_ns[sid] != self.ns;
+        let tname = self.structs[sid].name.clone();
+        if !is_variant && let Some(&decl) = self.statics.get(&(sid, name.name.clone())) {
+            if private {
+                self.err(Diagnostic::error(format!("static method `{}` of `{tname}` is private", name.name), name.span));
+                return Self::error_expr(span);
+            }
+            self.fn_use_hover(decl, name.span);
+            let Some(fid) = self.static_fn(sid, decl, targs, span) else { return Self::error_expr(span) };
+            return self.fn_value(fid, &format!("{}.{}", short_name(&tname), name.name), None, expected, span);
+        }
+        if !is_variant && !matches!(self.def_types[sid], Type::Iface(_)) && self.has_method(sid, &name.name) && !is_operator_name(&name.name) {
+            // `Point.norm`: the method as a function taking the `Point` first.
+            if private {
+                self.err(Diagnostic::error(format!("method `{}` of `{tname}` is private", name.name), name.span));
+                return Self::error_expr(span);
+            }
+            let inst = match targs {
+                Some(targs) => {
+                    let t = TypeExpr { module: None, name: Ident { name: short_name(&tname).to_string(), span }, args: targs.to_vec(), nullable: false, func: None, span };
+                    match self.apply_type_args(sid, &t, short_name(&tname)) {
+                        Type::Struct(i) | Type::Enum(i, _) => i,
+                        _ => return Self::error_expr(span),
+                    }
+                }
+                None if !self.struct_params[sid].is_empty() => {
+                    let short = short_name(&tname).to_string();
+                    let ps: Vec<String> = self.struct_params[sid].iter().map(|p| self.type_params[*p].name.clone()).collect();
+                    self.err(
+                        Diagnostic::error(format!("`{short}` is generic: say which `{short}` the method is for"), name.span)
+                            .with_help(format!("give its type arguments: `{short}[{}].{}`", ps.join(", "), name.name)),
+                    );
+                    return Self::error_expr(span);
+                }
+                None => sid,
+            };
+            let Some(fid) = self.method(inst, &name.name) else { return Self::error_expr(span) };
+            if self.structs[sid].drop == Some(fid) {
+                self.err(Diagnostic::error("`drop` can't be used as a value: it runs by itself", name.span));
+                return Self::error_expr(span);
+            }
+            self.fn_use_hover(fid, name.span);
+            return self.fn_value(fid, &format!("{}.{}", short_name(&tname), name.name), None, expected, span);
+        }
+        if self.structs[sid].variants.is_some() {
+            return self.variant_value(sid, name, None, targs, expected, span);
+        }
+        self.no_static(sid, name);
+        Self::error_expr(span)
+    }
+
+    /// `App.new(8080)`: a call of static method `decl` of type `sid`.
+    #[allow(clippy::too_many_arguments)]
+    fn static_call(&mut self, sid: StructId, decl: FuncId, targs: Option<&[TypeExpr]>, name: &Ident, args: &[Arg], explicit: Option<&[TypeExpr]>, expected: Option<&Type>, span: Span) -> TExpr {
+        if is_private(&name.name) && self.struct_ns[sid] != self.ns {
+            let sname = self.structs[sid].name.clone();
+            self.err(Diagnostic::error(format!("static method `{}` of `{sname}` is private", name.name), name.span));
+            for a in args {
+                let _ = self.expr(&a.value, None);
+            }
+            return Self::error_expr(span);
+        }
+        let code = self.ide.functions[decl].signature.clone();
+        let comment = self.ide.functions[decl].doc.clone();
+        let doc = Some(format!("static method of `{}`{}", self.structs[sid].name, comment.map(|c| format!("\n\n{c}")).unwrap_or_default()));
+        self.hover(name.span, code, doc);
+        self.ide.definitions.push((name.span, self.funcs[decl].span));
+        let Some(fid) = self.static_fn(sid, decl, targs, span) else {
+            for a in args {
+                let _ = self.expr(&a.value, None);
+            }
+            return Self::error_expr(span);
+        };
+        let what = format!("`{}`", self.funcs[decl].name);
+        self.call_fn(fid, &what, None, args, explicit, expected, name.span, span)
     }
 
     /// `Shape.Circle(args)` (or `Shape.Empty` when `args` is `None`).
@@ -3385,16 +3913,14 @@ impl Checker {
     }
 
     fn assign(&mut self, target: &Expr, op: Option<BinOp>, value: &Expr, span: Span) -> Option<TStmt> {
-        let (place, place_ty) = match &target.kind {
+        let (place, place_ty) = 'place: { match &target.kind {
             ExprKind::Name(name) => {
                 let Some(b) = self.lookup(name) else {
                     if self.is_outer_local(name) {
-                        self.err(
-                            Diagnostic::error(format!("a lambda can't assign to `{name}`, a variable from outside it"), target.span)
-                                .with_primary("assigned here, inside the lambda")
-                                .with_note("a lambda works with copies of the values it uses from around it")
-                                .with_help("return the new value from the lambda instead, or keep it in a list or struct, which the lambda shares"),
-                        );
+                        // A `var` from around the lambda: assigned in the cell it shares with that code.
+                        if let Some(place) = self.captured_place(name, target.span) {
+                            break 'place place;
+                        }
                     } else {
                         let _ = self.expr(target, None); // reports unknown name
                     }
@@ -3475,7 +4001,7 @@ impl Checker {
                 let _ = self.expr(value, None);
                 return None;
             }
-        };
+        } };
         let mut v = self.expr(value, Some(&place_ty));
         let local = match &place {
             Place::Local(id) => Some(*id),
@@ -4014,6 +4540,8 @@ impl Checker {
                 }
             }
             ExprKind::Call { callee, args } => self.call(callee, args, span, expected),
+            ExprKind::Match { scrutinee, arms } => self.match_expr(scrutinee, arms, expected, span),
+            ExprKind::Tuple(elems) => self.tuple_value(elems, expected, span),
             ExprKind::Field(obj, field) => {
                 if let ExprKind::Name(m) = &obj.kind
                     && self.lookup(m).is_none()
@@ -4023,8 +4551,8 @@ impl Checker {
                     self.module_hover(module_ns, obj.span);
                     return t;
                 }
-                if let Some((sid, targs)) = self.enum_ref(obj) {
-                    return self.variant_value(sid, field, None, targs, expected, span);
+                if let Some((sid, targs)) = self.type_ref(obj) {
+                    return self.type_member_value(sid, targs, field, expected, span);
                 }
                 // `geometry.area`: a module's function used as a value.
                 if let ExprKind::Name(m) = &obj.kind
@@ -4207,6 +4735,10 @@ impl Checker {
     /// `t.field` (`t` already checked).
     fn field_access(&mut self, t: TExpr, field: &Ident, span: Span) -> TExpr {
         match &t.ty {
+            Type::Struct(sid) if self.is_tuple(*sid) => {
+                let sid = *sid;
+                self.tuple_field(t, sid, field, span)
+            }
             Type::Struct(sid) => {
                 let sid = *sid;
                 match self.structs[sid].fields.iter().position(|f| f.name == field.name) {
@@ -4215,11 +4747,21 @@ impl Checker {
                         self.field_use(sid, idx, field.span);
                         self.narrow(Self::mk(TExprKind::Field(Box::new(t), sid, idx), ty, span))
                     }
+                    // `users.list`: a method, bound to this value.
+                    None if self.has_method(sid, &field.name) => self.method_value(t, sid, field, span),
                     None => {
                         self.no_field(&Type::Struct(sid), field);
                         Self::error_expr(span)
                     }
                 }
+            }
+            Type::Enum(sid, _) if self.has_method(*sid, &field.name) => {
+                let sid = *sid;
+                self.method_value(t, sid, field, span)
+            }
+            Type::Iface(i) if self.iface_slot(*i, &field.name).is_some() => {
+                let i = *i;
+                self.iface_method_value(t, i, field, span)
             }
             Type::Error => Self::error_expr(span),
             Type::Param(p) => {
@@ -4667,8 +5209,8 @@ impl Checker {
                 Self::error_expr(span)
             }
             ExprKind::Field(obj, method) => {
-                if let Some((sid, targs)) = self.enum_ref(obj) {
-                    return self.variant_value(sid, method, Some(args), targs.or(explicit), expected, span);
+                if let Some((sid, targs)) = self.type_ref(obj) {
+                    return self.type_member_call(sid, targs, method, args, explicit, expected, span);
                 }
                 if let ExprKind::Name(m) = &obj.kind
                     && self.lookup(m).is_none()
@@ -4753,14 +5295,29 @@ impl Checker {
         // A generic struct: its type arguments come from the fields' values (`Box(5)` is a `Box[Int]`).
         let tparams = self.struct_params[sid].clone();
         let me = self.def_types[sid].clone();
-        match self.infer_args(&what, &tparams, &params, &me, args, explicit, expected, span) {
+        // Fields with a default value can be left out.
+        let optional: Vec<bool> = (0..params.len()).map(|i| self.defaults.contains_key(&(sid, i))).collect();
+        match self.infer_args_with(&what, &tparams, &params, &optional, &me, args, explicit, expected, span) {
             Some((targs, bound)) => {
                 if !tparams.is_empty() {
                     self.check_type_bounds(sid, &bound, span);
                 }
                 let inst = if tparams.is_empty() { Some(sid) } else { self.struct_instance(sid, bound) };
                 match inst {
-                    Some(i) => Self::mk(TExprKind::StructNew(i, targs), self.def_types[i].clone(), span),
+                    Some(i) => {
+                        let mut vals = Vec::new();
+                        for (k, t) in targs.into_iter().enumerate() {
+                            vals.push(match t {
+                                Some(t) => t,
+                                None => {
+                                    let f = self.member_instance(self.defaults[&(sid, k)], i);
+                                    let ty = self.funcs[f].ret.clone();
+                                    Self::mk(TExprKind::Call(f, Vec::new()), ty, span)
+                                }
+                            });
+                        }
+                        Self::mk(TExprKind::StructNew(i, vals), self.def_types[i].clone(), span)
+                    }
                     None => Self::error_expr(span),
                 }
             }
@@ -4834,6 +5391,14 @@ impl Checker {
 
     /// Hooks into the runtime that only standard-library modules may call.
     fn intrinsic_call(&mut self, name: &str, args: &[Arg], span: Span) -> TExpr {
+        // `__repr(x)`: `x` as text, with strings quoted (tuples' `to_string`).
+        if name == "__repr" {
+            if !self.arity(args, 1, "`__repr`", span) {
+                return Self::error_expr(span);
+            }
+            let t = self.expr(&args[0].value, None);
+            return self.repr(t, span);
+        }
         if let Some(i) = name.strip_prefix("__").and_then(crate::stdlib::rt_index) {
             let (_, params, ret, _) = crate::stdlib::RT[i];
             if !self.arity(args, params.len(), &format!("`{name}`"), span) {
@@ -5228,11 +5793,17 @@ impl Checker {
                         self.call_value(f, args, span)
                     }
                     None => {
+                        // A default method of an interface it fits.
+                        if let Some((d, owner)) = self.default_for(&rty, m) {
+                            return self.default_call(recv, d, owner, method, args, explicit, span);
+                        }
                         let sname = self.structs[sid].name.clone();
                         let kind = if self.structs[sid].variants.is_some() { "enum" } else { "struct" };
                         let mut d = Diagnostic::error(format!("no method `{m}` on {kind} `{sname}`"), method.span).with_primary("method not found");
                         if self.structs[sid].fields.iter().any(|f| f.name == m) {
                             d = d.with_note(format!("`{m}` is a field, not a method; access it without parentheses: `.{m}`"));
+                        } else if self.statics.contains_key(&(self.struct_origin[sid], m.to_string())) {
+                            d = d.with_note(format!("`{m}` is a static method (it has no `self`): call it on the type, `{}.{m}(...)`", short_name(&sname)));
                         } else {
                             let names: Vec<String> = self.method_names(sid);
                             if let Some(s) = suggest(m, names.iter().map(|s| s.as_str())) {
@@ -5248,6 +5819,9 @@ impl Checker {
                 }
             }
             _ => {
+                if let Some((d, owner)) = self.default_for(&rty, m) {
+                    return self.default_call(recv, d, owner, method, args, explicit, span);
+                }
                 let tn = self.tn(&rty);
                 let available = match &rty {
                     Type::Int => "`to_string()`, `to_float()`",
@@ -5270,6 +5844,99 @@ impl Checker {
             }
         }
     }
+}
+
+/// The names assigned inside lambdas in `body` (at any depth).
+fn lambda_assigned_names(body: &[Stmt]) -> HashSet<String> {
+    fn stmts(ss: &[Stmt], inside: bool, out: &mut HashSet<String>) {
+        for s in ss {
+            match &s.kind {
+                StmtKind::Let { value, .. } | StmtKind::LetTuple { value, .. } => expr(value, inside, out),
+                StmtKind::Assign { target, value, .. } => {
+                    if inside && let ExprKind::Name(n) = &target.kind {
+                        out.insert(n.clone());
+                    }
+                    expr(target, inside, out);
+                    expr(value, inside, out);
+                }
+                StmtKind::Expr(e) | StmtKind::Return(Some(e)) => expr(e, inside, out),
+                StmtKind::If { branches, else_block } => {
+                    for (c, b) in branches {
+                        expr(c, inside, out);
+                        stmts(b, inside, out);
+                    }
+                    if let Some(b) = else_block {
+                        stmts(b, inside, out);
+                    }
+                }
+                StmtKind::While { cond, body } => {
+                    expr(cond, inside, out);
+                    stmts(body, inside, out);
+                }
+                StmtKind::For { iter, body, .. } => {
+                    match iter {
+                        ForIter::Range { start, end, .. } => {
+                            expr(start, inside, out);
+                            expr(end, inside, out);
+                        }
+                        ForIter::Expr(e) => expr(e, inside, out),
+                    }
+                    stmts(body, inside, out);
+                }
+                StmtKind::Match { scrutinee, arms } => {
+                    expr(scrutinee, inside, out);
+                    for a in arms {
+                        stmts(&a.body, inside, out);
+                    }
+                }
+                StmtKind::Break | StmtKind::Continue | StmtKind::Return(None) | StmtKind::Pass => {}
+            }
+        }
+    }
+    fn expr(e: &Expr, inside: bool, out: &mut HashSet<String>) {
+        match &e.kind {
+            ExprKind::Lambda(l) => match &l.body {
+                LambdaBody::Block(b) => stmts(b, true, out),
+                LambdaBody::Expr(x) => expr(x, true, out),
+            },
+            ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) | ExprKind::Elvis(a, b) => {
+                expr(a, inside, out);
+                expr(b, inside, out);
+            }
+            ExprKind::In { item, container, .. } => {
+                expr(item, inside, out);
+                expr(container, inside, out);
+            }
+            ExprKind::Unary(_, x) | ExprKind::Field(x, _) | ExprKind::SafeField(x, _) | ExprKind::NotNull(x) | ExprKind::Try(x) | ExprKind::TypeApply(x, _) => {
+                expr(x, inside, out)
+            }
+            ExprKind::Call { callee, args } => {
+                expr(callee, inside, out);
+                args.iter().for_each(|a| expr(&a.value, inside, out));
+            }
+            ExprKind::List(es) | ExprKind::Tuple(es) => es.iter().for_each(|x| expr(x, inside, out)),
+            ExprKind::Map(es) => es.iter().for_each(|(k, v)| {
+                expr(k, inside, out);
+                expr(v, inside, out);
+            }),
+            ExprKind::FStr(parts) => parts.iter().for_each(|p| {
+                if let FStrPart::Expr(x) = p {
+                    expr(x, inside, out)
+                }
+            }),
+            ExprKind::Jump(Jump::Return(Some(x))) => expr(x, inside, out),
+            ExprKind::Match { scrutinee, arms } => {
+                expr(scrutinee, inside, out);
+                for a in arms {
+                    stmts(&a.body, inside, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = HashSet::new();
+    stmts(body, false, &mut out);
+    out
 }
 
 /// The type of a list literal holding both an `a` and a `b`, e.g. `Int` and `null` make `Int?`.
@@ -5375,5 +6042,8 @@ fn expr_breaks(e: &TExpr) -> bool {
         TExprKind::Boxed(_, x) => expr_breaks(x),
         TExprKind::Try { value, on_err, .. } => expr_breaks(value) || expr_breaks(on_err),
         TExprKind::Block(stmts, e) => contains_break(stmts) || expr_breaks(e),
+        TExprKind::Match(x, arms) => {
+            expr_breaks(x) || arms.iter().any(|a| a.guard.as_ref().is_some_and(expr_breaks) || contains_break(&a.body) || a.value.as_ref().is_some_and(expr_breaks))
+        }
     }
 }

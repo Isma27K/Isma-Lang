@@ -1,0 +1,16 @@
+# expect-max-allocs: 4
+# A chain of iterator adapters allocates the adapters once, not per value:
+# the counter, `Mapped`, `Filtered` (the lambdas capture nothing).
+struct Upto(Iterator[Int]):
+    var at: Int
+    end: Int
+
+    fn next(self) -> Int?:
+        if self.at >= self.end:
+            return null
+        self.at += 1
+        return self.at - 1
+
+fn main():
+    val total = Upto(0, 100000).map(fn(x) -> x * 3).filter(fn(x) -> x % 2 == 0).fold(0, fn(a, x) -> a + x)
+    print(total)

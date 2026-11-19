@@ -1,0 +1,7 @@
+# expect-error: struct `P` is missing argument(s): `y: Int`
+struct P:
+    x: Int = 0
+    y: Int
+
+fn main():
+    print(P().x)

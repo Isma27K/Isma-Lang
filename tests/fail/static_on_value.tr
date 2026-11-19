@@ -1,0 +1,10 @@
+# expect-error: is a static method (it has no `self`)
+struct App:
+    port: Int
+
+    fn new(port: Int) -> App:
+        return App(port)
+
+fn main():
+    val a = App.new(1)
+    print(a.new(2).port)

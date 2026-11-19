@@ -23,16 +23,22 @@
 
 use super::*;
 
-/// An interface (by its id in the struct table).
-#[derive(Default)]
+/// An interface (by its id in the struct table; a generic one's instances,
+/// like `Source[Int]`, have their own, with their types filled in).
+#[derive(Default, Clone)]
 pub(super) struct IfaceInfo {
     /// Its methods in the order of its method tables, each with its
     /// declaration: its own, then those of the interfaces it includes.
+    /// Default methods without type parameters of their own are here too
+    /// (a type can replace them, so they're called through the table).
     pub methods: Vec<(String, FuncId)>,
     /// Its own methods.
     pub own: Vec<(String, FuncId)>,
     /// `NamedShape(Shape, Named)`: the interfaces it includes, and where each is named.
     pub extends: Vec<(StructId, Span)>,
+    /// Every default method (its own and included ones): name, declaration,
+    /// and the interface (instance) that declares it.
+    pub defaults: Vec<(String, FuncId, StructId)>,
 }
 
 /// Why a type doesn't fit an interface.
@@ -62,7 +68,7 @@ impl Checker {
 
     /// `interface Shape:` (pass 2): its own methods' signatures, and the
     /// interfaces it includes.
-    pub(super) fn declare_interface(&mut self, sid: StructId, decl: &InterfaceDecl) {
+    pub(super) fn declare_interface<'p>(&mut self, sid: StructId, decl: &'p InterfaceDecl, ns: usize, bodies: &mut Vec<(&'p FnDecl, Option<StructId>, usize, FuncId)>) {
         let iname = self.structs[sid].name.clone();
         let mut info = IfaceInfo::default();
         for m in &decl.methods {
@@ -107,6 +113,48 @@ impl Checker {
             self.ide.structs[sid].methods.push(fid);
             info.own.push((name.clone(), fid));
         }
+        // Default methods: generic code over a hidden `Self` that fits the interface.
+        for m in &decl.defaults {
+            let name = &m.name.name;
+            if is_operator_name(name) {
+                self.err(Diagnostic::error(format!("an interface can't have `fn {name}`"), m.sig_span).with_primary("operator function"));
+                continue;
+            }
+            if m.self_param.is_none() {
+                self.err(
+                    Diagnostic::error(format!("default method `{name}` must take `self` as its first parameter"), m.sig_span)
+                        .with_note("a default method runs for each type that fits the interface, on a value of it"),
+                );
+                continue;
+            }
+            if let Some(prev) = info.own.iter().find(|(n, _)| n == name).map(|(_, f)| *f).or_else(|| info.defaults.iter().find(|(n, ..)| n == name).map(|(_, f, _)| *f)) {
+                let prev_span = self.funcs[prev].span;
+                self.err(Diagnostic::error(format!("method `{name}` is listed more than once"), m.name.span).with_label(prev_span, "first listed here"));
+                continue;
+            }
+            let sp = self.type_params.len();
+            self.type_params.push(ParamInfo { name: "Self".into(), span: m.name.span, owner: iname.clone(), bounds: vec![(sid, m.name.span)] });
+            self.ide.params.push("Self".into());
+            self.declaring_default = Some(sp);
+            let fid = self.declare_fn(m, Some(sid));
+            self.declaring_default = None;
+            self.ide.functions[fid].doc = Some(match self.ide.functions[fid].doc.take() {
+                Some(d) => format!("default method of interface `{iname}`\n\n{d}"),
+                None => format!("default method of interface `{iname}`"),
+            });
+            if let Some(h) = self.ide.hovers.iter_mut().rev().find(|h| h.span == m.name.span) {
+                h.doc = self.ide.functions[fid].doc.clone();
+            }
+            self.methods.insert((sid, name.clone()), fid);
+            self.ide.structs[sid].methods.push(fid);
+            self.default_decls.insert(fid);
+            // One without type parameters of its own can be replaced by a type: it's in the method tables.
+            if m.type_params.is_empty() {
+                info.own.push((name.clone(), fid));
+            }
+            info.defaults.push((name.clone(), fid, sid));
+            bodies.push((m, Some(sid), ns, fid));
+        }
         for t in &decl.extends {
             match self.resolve_type(t) {
                 Type::Iface(j) => info.extends.push((j, t.span)),
@@ -134,6 +182,43 @@ impl Checker {
         for id in ids {
             self.flatten_iface(id, &mut Vec::new(), &mut done);
         }
+        // Instances of generic interfaces made so far (`Source[Int]` in a signature).
+        let instances: Vec<StructId> =
+            (0..self.structs.len()).filter(|&i| matches!(self.def_types[i], Type::Iface(_)) && self.struct_origin[i] != i).collect();
+        for i in instances {
+            self.fill_iface_instance(i);
+        }
+    }
+
+    /// Instance `inst` of a generic interface (`Source[Int]`): its methods,
+    /// defaults and included interfaces, with its type arguments filled in.
+    pub(super) fn fill_iface_instance(&mut self, inst: StructId) {
+        let origin = self.struct_origin[inst];
+        if origin == inst || self.ifaces.contains_key(&inst) {
+            return;
+        }
+        let Some(o) = self.ifaces.get(&origin).cloned() else { return };
+        // (Put something in first: filling it in can make more instances.)
+        self.ifaces.insert(inst, IfaceInfo::default());
+        let map: Vec<(ParamId, Type)> = self.struct_params[origin].iter().copied().zip(self.struct_args[inst].clone()).collect();
+        let member = |c: &mut Checker, f: FuncId| match c.funcs[f].instance.clone() {
+            Some((decl, args)) => {
+                let args: Vec<Type> = args.iter().map(|a| c.subst(a, &map)).collect();
+                c.fn_instance(decl, args)
+            }
+            None => f,
+        };
+        let iface = |c: &mut Checker, j: StructId| match c.subst(&Type::Iface(j), &map) {
+            Type::Iface(x) => x,
+            _ => j,
+        };
+        let info = IfaceInfo {
+            methods: o.methods.iter().map(|(n, f)| (n.clone(), member(self, *f))).collect(),
+            own: o.own.iter().map(|(n, f)| (n.clone(), member(self, *f))).collect(),
+            extends: o.extends.iter().map(|(j, s)| (iface(self, *j), *s)).collect(),
+            defaults: o.defaults.iter().map(|(n, d, j)| (n.clone(), *d, iface(self, *j))).collect(),
+        };
+        self.ifaces.insert(inst, info);
     }
 
     /// Fill in the full method list of interface `id` (`path`: the interfaces
@@ -155,9 +240,18 @@ impl Checker {
         path.push(id);
         let extends = self.ifaces[&id].extends.clone();
         let mut methods = self.ifaces[&id].own.clone();
+        let mut defaults = self.ifaces[&id].defaults.clone();
         for (j, span) in extends {
-            self.flatten_iface(j, path, done);
-            for (name, fid) in self.ifaces[&j].methods.clone() {
+            // (`Peekable[T](Source[T])` includes an instance: its interface is done first.)
+            let origin = self.struct_origin[j];
+            self.flatten_iface(origin, path, done);
+            self.fill_iface_instance(j);
+            for (name, d, owner) in self.ifaces.get(&j).map(|i| i.defaults.clone()).unwrap_or_default() {
+                if !defaults.iter().any(|(n, ..)| *n == name) && !methods.iter().any(|(n, _)| *n == name) {
+                    defaults.push((name, d, owner));
+                }
+            }
+            for (name, fid) in self.ifaces.get(&j).map(|i| i.methods.clone()).unwrap_or_default() {
                 match methods.iter().find(|(n, _)| *n == name) {
                     Some((_, prev)) if *prev == fid => {}
                     Some((_, prev)) => {
@@ -184,7 +278,9 @@ impl Checker {
                 self.ide.structs[id].methods.push(*fid);
             }
         }
-        self.ifaces.get_mut(&id).unwrap().methods = methods;
+        let info = self.ifaces.get_mut(&id).unwrap();
+        info.methods = methods;
+        info.defaults = defaults;
         done.insert(id);
     }
 
@@ -280,6 +376,9 @@ impl Checker {
     pub(super) fn check_implements(&mut self, sid: StructId, list: &[(Type, Span)]) {
         let me = self.def_types[sid].clone();
         let tname = short_name(&self.structs[sid].name).to_string();
+        // Their default methods are then methods of this type too.
+        let declared: Vec<StructId> = list.iter().filter_map(|(t, _)| if let Type::Iface(i) = t { Some(*i) } else { None }).collect();
+        self.declared_ifaces.insert(sid, declared);
         for (t, span) in list {
             let Type::Iface(i) = *t else {
                 if !t.is_error() {
@@ -324,6 +423,9 @@ impl Checker {
                 for (name, want) in methods {
                     let found = self.ifaces.get(&j).and_then(|i| i.methods.iter().find(|(n, _)| *n == name)).map(|(_, f)| *f);
                     let Some(found) = found else {
+                        if self.is_default(want) {
+                            continue;
+                        }
                         return Err(Misfit { method: Some(want), reason: format!("`{tn}` has no method `{name}`"), fixable: None, differs: false });
                     };
                     if let Err(how) = self.same_signature(want, found) {
@@ -348,6 +450,10 @@ impl Checker {
                         continue;
                     }
                     let Some(found) = self.method(sid, &name) else {
+                        // A default method fills in what the type doesn't have.
+                        if self.is_default(want) {
+                            continue;
+                        }
                         if self.structs[sid].fields.iter().any(|f| f.name == name) {
                             let reason = format!("`{name}` is a field of `{short}`, not a method (a type can't have both: rename the field, then add the method)");
                             return Err(Misfit { method: Some(want), reason, fixable: None, differs: false });
@@ -367,6 +473,9 @@ impl Checker {
             // Built-in types fit methods without parameters that they have.
             _ => {
                 for (name, want) in methods {
+                    if self.is_default(want) {
+                        continue;
+                    }
                     if self.funcs[want].params.len() > 1 {
                         return Err(Misfit {
                             method: Some(want),
@@ -493,9 +602,15 @@ impl Checker {
     pub(super) fn check_type_bounds(&mut self, origin: StructId, args: &[Type], span: Span) {
         let params = self.struct_params[origin].clone();
         let owner = short_name(&self.structs[origin].name).to_string();
+        // (A bound can mention the type's other parameters: `I: Iterator[T]`.)
+        let map: Vec<(ParamId, Type)> = params.iter().copied().zip(args.iter().cloned()).collect();
         for (p, t) in params.iter().zip(args) {
             for (i, _) in self.type_params[*p].bounds.clone() {
-                self.check_bound(PendingBound { ty: t.clone(), iface: i, span, owner: owner.clone(), param: *p });
+                let iface = match self.subst(&Type::Iface(i), &map) {
+                    Type::Iface(j) => j,
+                    _ => i,
+                };
+                self.check_bound(PendingBound { ty: t.clone(), iface, span, owner: owner.clone(), param: *p });
             }
         }
     }
@@ -608,7 +723,10 @@ impl Checker {
             args.push(Arg { name: None, value: Expr { kind: ExprKind::Name(n), span } });
         }
         let value = Self::mk(TExprKind::Field(Box::new(Self::mk(TExprKind::Local(me), Type::Struct(b), span)), b, 0), ty.clone(), span);
+        // (A type that only fits the interface still gets its default methods here.)
+        let extra = std::mem::replace(&mut self.extra_default_ifaces, vec![iface]);
         let (call, failed) = self.quietly(|c| c.method_call(value, &Ident { name: name.clone(), span }, &args, None, None, span));
+        self.extra_default_ifaces = extra;
         let body = if ret == Type::Unit { vec![TStmt::Expr(call)] } else { vec![TStmt::Return(Some(call))] };
         self.swap_state(&mut outer);
         let inner = outer;
@@ -650,6 +768,10 @@ impl Checker {
         let m = method.name.as_str();
         let iname = self.structs[iface].name.clone();
         let Some((slot, decl)) = self.iface_slot(iface, m) else {
+            // A default method with type parameters of its own: its code runs on the interface value.
+            if let Some((d, owner)) = self.iface_default(iface, m).or_else(|| self.default_for(&Type::Iface(iface), m)) {
+                return self.default_call(recv, d, owner, method, args, explicit, span);
+            }
             let names: Vec<String> = self.ifaces.get(&iface).map(|i| i.methods.iter().map(|(n, _)| n.clone()).collect()).unwrap_or_default();
             let mut d = Diagnostic::error(format!("no method `{m}` on interface `{iname}`"), method.span).with_primary("method not found");
             if let Some(s) = suggest(m, names.iter().map(|s| s.as_str())) {
@@ -690,6 +812,12 @@ impl Checker {
     /// code is checked again for each type it's used with; this is the generic version.)
     pub(super) fn bound_call(&mut self, recv: TExpr, p: ParamId, method: &Ident, args: &[Arg], explicit: Option<&[TypeExpr]>, span: Span) -> Option<TExpr> {
         let m = method.name.as_str();
+        // A default method of a bound: its code for this `T`. (Each type's
+        // own copy of the generic code calls the type's own method, if it has one.)
+        let default = self.type_params[p].bounds.iter().find_map(|(i, _)| self.iface_default(*i, m));
+        if let Some((d, owner)) = default {
+            return Some(self.default_call(recv, d, owner, method, args, explicit, span));
+        }
         let found = self.type_params[p].bounds.iter().find_map(|(i, _)| self.iface_slot(*i, m).map(|(k, f)| (*i, k, f)));
         let (iface, slot, decl) = found?;
         let code = self.ide.functions[decl].signature.clone();
@@ -697,5 +825,77 @@ impl Checker {
         self.hover(method.span, code, Some(doc));
         self.ide.definitions.push((method.span, self.funcs[decl].span));
         Some(self.dispatch(recv, slot, decl, m, args, explicit, span))
+    }
+}
+
+impl Checker {
+    // ---------- default methods ----------
+
+    /// Is `fid` a default method of an interface (or a copy of one)?
+    pub(super) fn is_default(&self, fid: FuncId) -> bool {
+        self.default_decls.contains(&fid) || self.funcs[fid].instance.as_ref().is_some_and(|(d, _)| self.default_decls.contains(d))
+    }
+
+    /// Default method `name` of interface `iface`: its declaration, and the
+    /// interface (instance) that declares it.
+    pub(super) fn iface_default(&self, iface: StructId, name: &str) -> Option<(FuncId, StructId)> {
+        self.ifaces.get(&iface)?.defaults.iter().find(|(n, ..)| n == name).map(|(_, d, o)| (*d, *o))
+    }
+
+    /// Default method `decl` of interface `owner` (an instance, for a generic
+    /// one), running for `self_ty`: a copy of its code with `Self` = `self_ty`
+    /// (its own type parameters still to be picked at the call).
+    pub(super) fn default_instance(&mut self, decl: FuncId, owner: StructId, self_ty: Type) -> FuncId {
+        let tps = self.funcs[decl].type_params.clone();
+        let mut args = self.struct_args[owner].clone();
+        let n = args.len();
+        args.push(self_ty);
+        args.extend(tps[n + 1..].iter().map(|p| Type::Param(*p)));
+        self.fn_instance(decl, args)
+    }
+
+    /// A call of default method `decl` (of interface `owner`) on `recv`.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn default_call(&mut self, recv: TExpr, decl: FuncId, owner: StructId, method: &Ident, args: &[Arg], explicit: Option<&[TypeExpr]>, span: Span) -> TExpr {
+        let fid = self.default_instance(decl, owner, recv.ty.clone());
+        let code = self.ide.functions[decl].signature.clone();
+        let doc = format!("default method of interface `{}`", self.structs[owner].name);
+        self.hover(method.span, code, Some(doc));
+        self.ide.definitions.push((method.span, self.funcs[decl].span));
+        let what = format!("method `{}`", method.name);
+        self.call_fn(fid, &what, Some(recv), args, explicit, None, method.span, span)
+    }
+
+    /// A default method `name` that type `t` gets from an interface: one it
+    /// says it fits (`struct Circle(Shape):`), the bound of a type parameter
+    /// that stands for it in the generic code being compiled, or the
+    /// interface of the method table being built.
+    pub(super) fn default_for(&mut self, t: &Type, name: &str) -> Option<(FuncId, StructId)> {
+        let mut cands: Vec<StructId> = self.extra_default_ifaces.clone();
+        if let Some(f) = self.cur_fn
+            && let Some((decl, args)) = self.funcs[f].instance.clone()
+        {
+            let tps = self.funcs[decl].type_params.clone();
+            let map: Vec<(ParamId, Type)> = tps.iter().copied().zip(args.iter().cloned()).collect();
+            for (p, a) in tps.iter().zip(&args) {
+                if a == t {
+                    for (b, _) in self.type_params[*p].bounds.clone() {
+                        if let Type::Iface(x) = self.subst(&Type::Iface(b), &map) {
+                            cands.push(x);
+                        }
+                    }
+                }
+            }
+        }
+        if let Type::Struct(sid) | Type::Enum(sid, _) = t {
+            let origin = self.struct_origin[*sid];
+            let map: Vec<(ParamId, Type)> = self.struct_params[origin].iter().copied().zip(self.struct_args[*sid].clone()).collect();
+            for i in self.declared_ifaces.get(&origin).cloned().unwrap_or_default() {
+                if let Type::Iface(x) = self.subst(&Type::Iface(i), &map) {
+                    cands.push(x);
+                }
+            }
+        }
+        cands.into_iter().find_map(|i| self.iface_default(i, name))
     }
 }

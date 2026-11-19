@@ -34,6 +34,8 @@ pub enum Ctor {
     Str(String),
     Null,
     Some,
+    /// An interface value holding a value of this type.
+    Is(Type),
 }
 
 /// Lower a checked pattern (bindings match anything).
@@ -48,6 +50,7 @@ pub fn of_tpat(p: &TPat) -> Pat {
         TPatKind::Bool(v) => Pat::Ctor(Ctor::Bool(*v), Vec::new()),
         TPatKind::Null => Pat::Ctor(Ctor::Null, Vec::new()),
         TPatKind::Some(inner) => Pat::Ctor(Ctor::Some, vec![of_tpat(inner)]),
+        TPatKind::Is(t, inner) => Pat::Ctor(Ctor::Is(t.clone()), vec![of_tpat(inner)]),
         TPatKind::Or(alts) => Pat::Or(alts.iter().map(of_tpat).collect()),
     }
 }
@@ -76,6 +79,7 @@ impl Space<'_> {
             (Type::Enum(id, _), Ctor::Variant(k)) => self.structs[*id].variants()[*k].fields.iter().map(|f| f.ty.clone()).collect(),
             (Type::Struct(id), Ctor::Struct) => self.structs[*id].fields.iter().map(|f| f.ty.clone()).collect(),
             (Type::Nullable(inner), Ctor::Some) => vec![(**inner).clone()],
+            (Type::Iface(_), Ctor::Is(t)) => vec![t.clone()],
             _ => Vec::new(),
         }
     }
@@ -174,11 +178,14 @@ impl Space<'_> {
                         let name = &self.structs[*id].variants()[*k].name;
                         if shown.is_empty() { name.clone() } else { format!("{name}({})", shown.join(", ")) }
                     }
+                    // A tuple: `(_, 0)`.
+                    (Ctor::Struct, Type::Struct(id)) if self.structs[*id].name.starts_with('(') => format!("({})", shown.join(", ")),
                     (Ctor::Struct, Type::Struct(id)) => {
                         let name = crate::types::short_name(&self.structs[*id].name).to_string();
                         format!("{name}({})", shown.join(", "))
                     }
                     (Ctor::Some, _) => shown.into_iter().next().unwrap_or_else(|| "_".into()),
+                    (Ctor::Is(_), _) => shown.into_iter().next().unwrap_or_else(|| "_".into()),
                     (Ctor::Null, _) => "null".into(),
                     (Ctor::Bool(b), _) => b.to_string(),
                     (Ctor::Int(v), _) => v.to_string(),

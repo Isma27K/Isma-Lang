@@ -1,0 +1,42 @@
+# Tuples: `(1, "a")`, `t.0`, taking them apart in `val`, `var`, `for` and
+# `match`, comparing, printing and using them as map keys.
+
+fn divmod(a: Int, b: Int) -> (Int, Int):
+    return (a / b, a % b)
+
+fn main():
+    val (q, r) = divmod(17, 5)
+    print(f"{q} {r}")
+    val t = (1, "a")
+    print(t)
+    print(t.0 + 1)
+    print(t.1)
+    val pairs: List[(String, Int)] = [("a", 1), ("b", 2)]
+    for (name, n) in pairs:
+        print(f"{name}={n}")
+    for i, (name, n) in pairs:
+        print(f"{i}: {name}={n}")
+    print(pairs)
+    print(f"{(1, 2) == (1, 2)} {(1, 2) == (2, 1)} {(1, "b") < (1, "c")}")
+    val m: Map[(Int, Int), String] = {(0, 0): "origin"}
+    m[(1, 2)] = "p"
+    print(f"{m[(1, 2)]} {m[(0, 0)]} {(0, 0) in m}")
+    match divmod(10, 5):
+        case (2, 0):
+            print("exact")
+        case (x, y):
+            print(f"{x} rest {y}")
+    val nested = ((1, 2), (3, "x"))
+    val ((a, _), (c, d)) = nested
+    print(f"{a} {c} {d}")
+    print(nested.1.1)
+    var (u, v) = (1.5, true)
+    u += 1.0
+    v = not v
+    print(f"{u} {v}")
+    # nullable tuples, tuples of interface values, and the biggest size
+    val maybe: (Int, String)? = null
+    print(maybe?.0)
+    val six = (1, 2.5, "c", true, (5, 6), [7])
+    print(six)
+    print(six.4.1)

@@ -1,0 +1,30 @@
+# Default values for struct fields: left out at construction, each one is
+# computed again for every new value (a fresh list each time).
+
+struct Config:
+    host: String = "localhost"
+    port: Int = 8080
+    tags: List[String] = []
+    var retries: Int = Config.usual_retries()
+    name: String
+
+    fn usual_retries() -> Int:
+        return 3
+
+struct Box[T]:
+    items: List[T] = []
+    label: String = "box"
+
+fn main():
+    val a = Config(name="a")
+    val b = Config(name="b", port=9000)
+    a.tags.push("x")
+    print(f"{a.host}:{a.port} {a.tags} {b.tags} {a.retries}")
+    print(f"{b.host}:{b.port}")
+    val c = Config("h", 1, ["t"], 5, "c")
+    print(f"{c.host} {c.port} {c.tags} {c.retries} {c.name}")
+    val bx: Box[Int] = Box()
+    bx.items.push(3)
+    print(f"{bx.items} {bx.label}")
+    val by = Box[String](label="named")
+    print(f"{by.items.len()} {by.label}")

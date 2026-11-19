@@ -1,0 +1,9 @@
+# expect-error: default method `unit` must take `self` as its first parameter
+interface Shape:
+    fn area(self) -> Float
+
+    fn unit() -> Float:
+        return 1.0
+
+fn main():
+    pass

@@ -1,0 +1,39 @@
+# Methods as values: `users.add` remembers its receiver, for structs and
+# interface values alike.
+
+interface Shape:
+    fn area(self) -> Float
+    fn scaled(self, k: Float) -> Float
+
+struct Sq:
+    s: Float
+    fn area(self) -> Float:
+        return self.s * self.s
+    fn scaled(self, k: Float) -> Float:
+        return self.area() * k
+
+struct Users:
+    var names: List[String]
+    fn add(self, n: String):
+        self.names.push(n)
+    fn list(self) -> List[String]:
+        return self.names
+
+fn run(handler: fn() -> List[String]) -> Int:
+    return handler().len()
+
+fn main():
+    val u = Users([])
+    val add = u.add
+    add("ana")
+    add("bo")
+    print(run(u.list))
+    for n in ["c", "d"]:
+        add(n)
+    print(u.list())
+    val sh: Shape = Sq(2.0)
+    val a = sh.area
+    val sc = sh.scaled
+    print(f"{a()} {sc(0.5)}")
+    val fs = [u.list, fn() -> ["x"]]
+    print(fs.map(fn(f) -> f().len()))

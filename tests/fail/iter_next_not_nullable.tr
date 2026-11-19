@@ -1,0 +1,8 @@
+# expect-error: so a loop over it would never end
+struct Forever:
+    fn next(self) -> Int:
+        return 1
+
+fn main():
+    for x in Forever():
+        print(x)

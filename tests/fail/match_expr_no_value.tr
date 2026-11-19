@@ -1,0 +1,8 @@
+# expect-error: this case gives no value
+fn main():
+    val x = 3
+    val a = match x:
+        case 1: "one"
+        case _:
+            print("other")
+    print(a)

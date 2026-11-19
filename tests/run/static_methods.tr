@@ -1,0 +1,52 @@
+# Static methods: functions inside a type, without `self`, called on the
+# type. Also generic ones, enums', and both kinds of methods as values.
+
+struct App:
+    port: Int
+    name: String
+
+    # Builds an app with the usual name.
+    fn new(port: Int) -> App:
+        return App(port, App.default_name())
+
+    fn default_name() -> String:
+        return "app"
+
+    fn describe(self) -> String:
+        return f"{self.name}:{self.port}"
+
+struct Stack[T]:
+    items: List[T]
+
+    fn empty() -> Stack[T]:
+        return Stack[T]([])
+
+    fn of(x: T) -> Stack[T]:
+        return Stack([x])
+
+    fn size(self) -> Int:
+        return self.items.len()
+
+enum Color:
+    Red
+    Green
+
+    fn parse(s: String) -> Color?:
+        return match s:
+            case "red": Color.Red
+            case "green": Color.Green
+            case _: null
+
+fn main():
+    print(App.new(8080).describe())
+    val s: Stack[Int] = Stack.empty()
+    print(s.size())
+    print(Stack.of("x").size())
+    print(Stack[String].empty().size())
+    print(Color.parse("green"))
+    print(Color.parse("blue"))
+    # A static method as a value, and a method as a function taking the value first.
+    val make = App.new
+    print(make(1).describe())
+    val describe = App.describe
+    print([App.new(2), App.new(3)].map(describe))

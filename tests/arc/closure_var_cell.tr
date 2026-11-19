@@ -1,0 +1,10 @@
+# expect-max-allocs: 3
+# A `var` a lambda captures lives in one cell (plus the closure itself),
+# however many times the lambda changes it.
+fn main():
+    var count = 0
+    val bump = fn(by: Int):
+        count += by
+    for i in 0..100000:
+        bump(i % 3)
+    print(count)

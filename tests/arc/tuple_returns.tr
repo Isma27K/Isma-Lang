@@ -1,0 +1,12 @@
+# expect-max-allocs: 1003
+# A tuple is a small object: returning one allocates it (and taking it
+# apart frees it), once per call here.
+fn divmod(a: Int, b: Int) -> (Int, Int):
+    return (a / b, a % b)
+
+fn main():
+    var total = 0
+    for i in 0..1000:
+        val (q, r) = divmod(i, 7)
+        total += q + r
+    print(total)

@@ -1,0 +1,16 @@
+# expect-error: is an interface: a case can only test for a concrete type
+interface Shape:
+    fn area(self) -> Float
+
+interface Named:
+    fn name(self) -> String
+
+fn f(s: Shape) -> Int:
+    match s:
+        case Named:
+            return 1
+        case _:
+            return 0
+
+fn main():
+    pass

@@ -196,7 +196,7 @@ fn rvalue_roles(f: &Func, rv: &Rvalue, sigs: &[Vec<bool>], r: &mut Roles) {
             }
         }
         Rvalue::Boxed(_, o) => add(o, true, r),
-        Rvalue::Field(o, ..) | Rvalue::VariantField(o, ..) | Rvalue::Tag(o) => add(&Operand::Var(*o), false, r),
+        Rvalue::Field(o, ..) | Rvalue::VariantField(o, ..) | Rvalue::Tag(o) | Rvalue::IsType(o, _) | Rvalue::Unbox(o, _) => add(&Operand::Var(*o), false, r),
         Rvalue::Index(l, i, _) => {
             add(&Operand::Var(*l), false, r);
             add(i, false, r);
@@ -222,7 +222,7 @@ fn stmt_roles(f: &Func, s: &Stmt, sigs: &[Vec<bool>], borrowed: Option<&[bool]>)
             }
             if rc(f, *d) {
                 r.def = Some(*d);
-                r.projection = alias || matches!(rv, Rvalue::Field(..) | Rvalue::Index(..) | Rvalue::VariantField(..));
+                r.projection = alias || matches!(rv, Rvalue::Field(..) | Rvalue::Index(..) | Rvalue::VariantField(..) | Rvalue::Unbox(..));
             }
         }
         Stmt::Eval(rv) => rvalue_roles(f, rv, sigs, &mut r),
@@ -493,6 +493,8 @@ impl Ownership {
                     Rvalue::Field(o, sid, idx) => (*o, Some(Class::Field(*sid, *idx))),
                     Rvalue::VariantField(o, sid, k, i) => (*o, Some(Class::Variant(*sid, *k, *i))),
                     Rvalue::Index(l, ..) => (*l, Some(Class::Elem(elem_of(&f.vars[*l].ty)))),
+                    // (What a box holds never changes.)
+                    Rvalue::Unbox(o, _) => (*o, None),
                     Rvalue::Use(Operand::Var(x)) if rc(f, *x) => (*x, None),
                     _ => continue,
                 };

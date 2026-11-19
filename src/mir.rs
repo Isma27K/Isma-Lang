@@ -128,6 +128,12 @@ pub enum Rvalue {
     /// Call the method in slot `.1` of the method table of interface value
     /// `.0` (borrowing it and every argument); it returns a `.3`.
     CallMethod(Operand, usize, Vec<Operand>, Type, Span),
+    /// Does interface value `.0` hold a value of type `.1` (`Bool`)? (Looks
+    /// through boxes holding other interface values.)
+    IsType(VarId, Type),
+    /// Projection: the `.1` inside interface value `.0` (only valid when it
+    /// holds one). Box contents never change, so it can stay borrowed.
+    Unbox(VarId, Type),
 }
 
 /// What a `New` builds.
@@ -228,7 +234,7 @@ impl Rvalue {
             | Rvalue::Closure(_, _, args) => args.iter().collect(),
             Rvalue::CallIndirect(f, args, _) | Rvalue::CallMethod(f, _, args, ..) => std::iter::once(f).chain(args).collect(),
             Rvalue::Boxed(_, o) => vec![o],
-            Rvalue::Field(..) | Rvalue::Index(..) | Rvalue::Tag(_) | Rvalue::VariantField(..) | Rvalue::MapNew(..) => vec![],
+            Rvalue::Field(..) | Rvalue::Index(..) | Rvalue::Tag(_) | Rvalue::VariantField(..) | Rvalue::MapNew(..) | Rvalue::IsType(..) | Rvalue::Unbox(..) => vec![],
             // (the list / object of a projection is a VarId, see `base`)
         }
     }
@@ -236,7 +242,7 @@ impl Rvalue {
     /// The object a projection reads from.
     pub fn base(&self) -> Option<VarId> {
         match self {
-            Rvalue::Field(o, ..) | Rvalue::VariantField(o, ..) | Rvalue::Tag(o) => Some(*o),
+            Rvalue::Field(o, ..) | Rvalue::VariantField(o, ..) | Rvalue::Tag(o) | Rvalue::IsType(o, _) | Rvalue::Unbox(o, _) => Some(*o),
             Rvalue::Index(l, ..) => Some(*l),
             _ => None,
         }
@@ -246,7 +252,7 @@ impl Rvalue {
     pub fn uses(&self) -> Vec<VarId> {
         let mut out: Vec<VarId> = self.operands().iter().filter_map(|o| o.var()).collect();
         match self {
-            Rvalue::Field(o, ..) | Rvalue::VariantField(o, ..) | Rvalue::Tag(o) => out.push(*o),
+            Rvalue::Field(o, ..) | Rvalue::VariantField(o, ..) | Rvalue::Tag(o) | Rvalue::IsType(o, _) | Rvalue::Unbox(o, _) => out.push(*o),
             Rvalue::Index(l, i, _) => {
                 out.push(*l);
                 out.extend(i.var());
@@ -353,6 +359,8 @@ fn print_func(out: &mut String, f: &Func, p: &Program, names: &[String]) {
         Rvalue::CallIndirect(f, args, _) => format!("{}({})", op(f), ops(args)),
         Rvalue::Boxed(sid, o) => format!("box {} as {}", op(o), p.structs[*sid].closure.as_ref().map(|t| t.display(names, &[])).unwrap_or_default()),
         Rvalue::CallMethod(o, slot, args, ..) => format!("{}.<method {slot}>({})", op(o), ops(args)),
+        Rvalue::IsType(o, t) => format!("{} is {}", var(*o), t.display(names, &[])),
+        Rvalue::Unbox(o, t) => format!("{} as {}", var(*o), t.display(names, &[])),
     };
     for (b, block) in f.blocks.iter().enumerate() {
         let _ = writeln!(out, "  bb{b}:");

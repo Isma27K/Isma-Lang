@@ -351,8 +351,12 @@ impl Server {
                 doc.ide.structs.iter().position(|s| s.ns == ns && !s.instance && s.name.rsplit('.').next() == Some(name))
             }),
         };
-        if let Some(e) = named.map(|sid| &doc.ide.structs[sid]).filter(|s| s.variants.is_some()) {
-            return Some(e.variants.iter().flatten().map(variant_item).collect());
+        // `Point.` -> its static methods (and an enum's variants)
+        if let Some(sid) = named {
+            let s = &doc.ide.structs[sid];
+            let mut items: Vec<lt::CompletionItem> = s.variants.iter().flatten().map(variant_item).collect();
+            items.extend(doc.ide.static_members(sid).into_iter().map(member_item));
+            return Some(items);
         }
         let mut word_end = off;
         while word_end < text.len() && is_ident(text.as_bytes()[word_end]) {
@@ -1223,6 +1227,36 @@ mod tests {
             kinds,
             [("Shape", lt::SymbolKind::INTERFACE), ("Solid", lt::SymbolKind::INTERFACE), ("Cube", lt::SymbolKind::STRUCT), ("total", lt::SymbolKind::FUNCTION), ("main", lt::SymbolKind::FUNCTION)]
         );
+    }
+
+    const TYPES_SRC: &str = "interface Shape:\n    fn area(self) -> Float\n\n    fn describe(self) -> String:\n        return \"shape\"\n\nstruct Circle(Shape):\n    r: Float = 1.0\n\n    fn new(r: Float) -> Circle:\n        return Circle(r)\n\n    fn area(self) -> Float:\n        return self.r\n\nfn main():\n    val c = Circle.new(2.0)\n    val t = (1, \"a\")\n    print(t.0)\n    print(c.describe())\n    c.\n";
+
+    #[test]
+    fn static_methods_defaults_and_tuples() {
+        let (s, uri) = server_with(TYPES_SRC);
+        let hover = |needle: &str, delta: usize| {
+            let h = s.hover(lt::HoverParams { text_document_position_params: tdp(&uri, at(TYPES_SRC, needle, delta)), work_done_progress_params: Default::default() });
+            let lt::HoverContents::Markup(m) = h.unwrap_or_else(|| panic!("no hover at {needle}")).contents else { panic!() };
+            m.value
+        };
+        let shown = hover("new(2.0)", 0);
+        assert!(shown.contains("fn new(r: Float) -> Circle") && shown.contains("static method of `Circle`"), "{shown}");
+        let shown = hover("r: Float = 1.0", 0);
+        assert!(shown.contains("val r: Float = 1.0"), "{shown}");
+        let shown = hover("0)\n    print(c", 0);
+        assert!(shown.contains("(Int, String).0: Int"), "{shown}");
+        let shown = hover("describe())", 0);
+        assert!(shown.contains("fn describe(self) -> String") && shown.contains("default method of interface `Shape`"), "{shown}");
+        // `c.` offers the default method too, but not the static one.
+        let items = complete(&s, &uri, at(TYPES_SRC, "    c.\n", 6));
+        let labels: Vec<_> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.contains(&"describe") && labels.contains(&"area") && !labels.contains(&"new"), "{labels:?}");
+        // `Circle.` offers the static methods.
+        let src = "struct Circle:\n    r: Float\n\n    fn new(r: Float) -> Circle:\n        return Circle(r)\n\n    fn area(self) -> Float:\n        return self.r\n\nfn main():\n    Circle.\n";
+        let (s2, uri2) = server_with(src);
+        let items = complete(&s2, &uri2, at(src, "    Circle.\n", 11));
+        let labels: Vec<_> = items.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(labels, ["new"]);
     }
 
     #[test]

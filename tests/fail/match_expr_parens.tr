@@ -1,0 +1,5 @@
+# expect-error: a `match` must end its line
+fn main():
+    val x = 3
+    print(match x:
+        case _: 1)

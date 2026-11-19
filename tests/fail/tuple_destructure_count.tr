@@ -1,0 +1,4 @@
+# expect-error: can't take this apart into 3 names
+fn main():
+    val (a, b, c) = (1, 2)
+    print(a)

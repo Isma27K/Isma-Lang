@@ -1,0 +1,8 @@
+# expect-error: a lambda assigns `name`
+fn main():
+    var name: String? = "x"
+    val reset = fn():
+        name = null
+    if name != null:
+        reset()
+        print(name.len())

@@ -165,7 +165,7 @@ impl<'a> Lower<'a> {
                 self.scoped_binds(inner, out);
             }
             TPatKind::Variant(_, _, subs) | TPatKind::Struct(_, subs) | TPatKind::Or(subs) => subs.iter().for_each(|s| self.scoped_binds(s, out)),
-            TPatKind::Some(inner) => self.scoped_binds(inner, out),
+            TPatKind::Some(inner) | TPatKind::Is(_, inner) => self.scoped_binds(inner, out),
             _ => {}
         }
     }
@@ -438,30 +438,7 @@ impl<'a> Lower<'a> {
                 self.goto(lc);
                 self.cur = le;
             }
-            TStmt::Match { scrutinee, arms } => {
-                // The value is evaluated once; then each case is tried in order.
-                let v = self.operand(scrutinee);
-                let v = self.as_var(v, &scrutinee.ty);
-                let end = self.new_block();
-                for arm in arms {
-                    let next = self.new_block();
-                    self.pattern(&arm.pat, v, next);
-                    if let Some(g) = &arm.guard {
-                        let c = self.operand(g);
-                        let body = self.new_block();
-                        self.term(Term::Branch(c, body, next));
-                        self.cur = body;
-                    }
-                    let mut binds = Vec::new();
-                    self.scoped_binds(&arm.pat, &mut binds);
-                    self.scoped(binds, |l| l.stmts(&arm.body));
-                    self.goto(end);
-                    self.cur = next;
-                }
-                // The checker proved the cases exhaustive.
-                self.term(Term::Unreachable);
-                self.cur = end;
-            }
+            TStmt::Match { scrutinee, arms } => self.match_(scrutinee, arms, None),
             TStmt::Break => {
                 let (_, target, depth) = *self.loops.last().expect("break outside loop");
                 self.keep_alive_from(depth);
@@ -488,6 +465,40 @@ impl<'a> Lower<'a> {
                 }
             }
         }
+    }
+
+    /// A `match`: the value is evaluated once; then each case is tried in
+    /// order. For a `match` used as a value, each case's value goes into `res`.
+    fn match_(&mut self, scrutinee: &TExpr, arms: &[tast::TArm], res: Option<VarId>) {
+        let v = self.operand(scrutinee);
+        let v = self.as_var(v, &scrutinee.ty);
+        let end = self.new_block();
+        for arm in arms {
+            let next = self.new_block();
+            self.pattern(&arm.pat, v, next);
+            if let Some(g) = &arm.guard {
+                let c = self.operand(g);
+                let body = self.new_block();
+                self.term(Term::Branch(c, body, next));
+                self.cur = body;
+            }
+            let mut binds = Vec::new();
+            self.scoped_binds(&arm.pat, &mut binds);
+            self.scoped(binds, |l| {
+                l.stmts(&arm.body);
+                if let (Some(value), Some(res)) = (&arm.value, res)
+                    && !l.terminated()
+                {
+                    let o = l.operand(value);
+                    l.push(Stmt::Assign(res, Rvalue::Use(o)));
+                }
+            });
+            self.goto(end);
+            self.cur = next;
+        }
+        // The checker proved the cases exhaustive.
+        self.term(Term::Unreachable);
+        self.cur = end;
     }
 
     /// `acc = acc + part` on strings (in place when `acc` is the only reference).
@@ -620,6 +631,15 @@ impl<'a> Lower<'a> {
                         self.push(Stmt::Assign(f, Rvalue::Field(v, *sid, i)));
                         self.pattern(sub, f, fail);
                     }
+                }
+            }
+            // An interface value: which type is inside, then that value.
+            TPatKind::Is(t, inner) => {
+                self.test(Rvalue::IsType(v, t.clone()), fail);
+                if !matches!(inner.kind, TPatKind::Wild) {
+                    let x = self.temp(t.clone());
+                    self.push(Stmt::Assign(x, Rvalue::Unbox(v, t.clone())));
+                    self.pattern(inner, x, fail);
                 }
             }
             TPatKind::Or(alts) => {
@@ -1108,6 +1128,15 @@ impl<'a> Lower<'a> {
                 self.stmts(stmts);
                 self.rvalue(value)
             }
+            TExprKind::Match(scrutinee, arms) => {
+                if e.ty == Type::Unit {
+                    self.match_(scrutinee, arms, None);
+                    return Rvalue::Use(Operand::Bool(false)); // (a unit value; never used)
+                }
+                let res = self.temp(e.ty.clone());
+                self.match_(scrutinee, arms, Some(res));
+                Rvalue::Use(Operand::Var(res))
+            }
             TExprKind::Jump(s) => {
                 self.stmt(s);
                 Rvalue::Use(Operand::Bool(false))
@@ -1128,10 +1157,34 @@ fn independent_of(e: &TExpr, id: LocalId) -> bool {
     }
 }
 
+/// Statements inside an expression (`match` values, the loops list methods become).
+fn mark_reassigned_expr(e: &TExpr, out: &mut [bool]) {
+    match &e.kind {
+        TExprKind::Match(x, arms) => {
+            mark_reassigned_expr(x, out);
+            for a in arms {
+                mark_reassigned(&a.body, out);
+                if let Some(v) = &a.value {
+                    mark_reassigned_expr(v, out);
+                }
+            }
+        }
+        TExprKind::Block(stmts, v) => {
+            mark_reassigned(stmts, out);
+            mark_reassigned_expr(v, out);
+        }
+        _ => {}
+    }
+}
+
 fn mark_reassigned(stmts: &[TStmt], out: &mut [bool]) {
     for s in stmts {
         match s {
-            TStmt::Assign { place: tast::Place::Local(id), .. } => out[*id] = true,
+            TStmt::Let(_, e) | TStmt::Expr(e) | TStmt::Return(Some(e)) => mark_reassigned_expr(e, out),
+            TStmt::Assign { place: tast::Place::Local(id), value, .. } => {
+                out[*id] = true;
+                mark_reassigned_expr(value, out);
+            }
             TStmt::If { branches, else_block } => {
                 for (_, b) in branches {
                     mark_reassigned(b, out);

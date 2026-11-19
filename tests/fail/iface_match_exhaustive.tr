@@ -1,0 +1,16 @@
+# expect-error: can hold a value of any type that fits it
+interface Shape:
+    fn area(self) -> Float
+
+struct Circle:
+    r: Float
+
+    fn area(self) -> Float:
+        return self.r
+
+fn f(s: Shape) -> Float:
+    return match s:
+        case Circle(r): r
+
+fn main():
+    pass

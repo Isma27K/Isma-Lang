@@ -1,5 +1,6 @@
 # Always available, in every file, without an import: `Result` with `Ok` and
-# `Err`, and `Unit`.
+# `Err`, `Unit`, the structs behind tuples (`(A, B)` is a `Tuple2[A, B]`),
+# and the `Iterator` interface with the iterators its methods give.
 
 # The outcome of something that can fail: its value (`Ok`) or what went wrong (`Err`).
 #
@@ -92,3 +93,261 @@ enum Result[T, E]:
 #         return Ok()
 enum Unit:
     Unit
+
+# Tuples: `(Int, String)` is a `Tuple2[Int, String]`, written `(1, "a")` and
+# read with `t.0`, `t.1`. The compiler names them by their elements, and
+# `==`, `<=>`, `hash` and printing go element by element.
+struct Tuple2[A, B]:
+    _0: A
+    _1: B
+
+    fn ==(self, other: Tuple2[A, B]) -> Bool:
+        return self._0 == other._0 and self._1 == other._1
+
+    fn <=>(self, other: Tuple2[A, B]) -> Int:
+        val c0 = self._0 <=> other._0
+        if c0 != 0:
+            return c0
+        return self._1 <=> other._1
+
+    fn hash(self) -> Int:
+        return hash(self._0, self._1)
+
+    fn to_string(self) -> String:
+        return f"({__repr(self._0)}, {__repr(self._1)})"
+
+struct Tuple3[A, B, C]:
+    _0: A
+    _1: B
+    _2: C
+
+    fn ==(self, other: Tuple3[A, B, C]) -> Bool:
+        return self._0 == other._0 and self._1 == other._1 and self._2 == other._2
+
+    fn <=>(self, other: Tuple3[A, B, C]) -> Int:
+        val c0 = self._0 <=> other._0
+        if c0 != 0:
+            return c0
+        val c1 = self._1 <=> other._1
+        if c1 != 0:
+            return c1
+        return self._2 <=> other._2
+
+    fn hash(self) -> Int:
+        return hash(self._0, self._1, self._2)
+
+    fn to_string(self) -> String:
+        return f"({__repr(self._0)}, {__repr(self._1)}, {__repr(self._2)})"
+
+struct Tuple4[A, B, C, D]:
+    _0: A
+    _1: B
+    _2: C
+    _3: D
+
+    fn ==(self, other: Tuple4[A, B, C, D]) -> Bool:
+        return self._0 == other._0 and self._1 == other._1 and self._2 == other._2 and self._3 == other._3
+
+    fn <=>(self, other: Tuple4[A, B, C, D]) -> Int:
+        val c0 = self._0 <=> other._0
+        if c0 != 0:
+            return c0
+        val c1 = self._1 <=> other._1
+        if c1 != 0:
+            return c1
+        val c2 = self._2 <=> other._2
+        if c2 != 0:
+            return c2
+        return self._3 <=> other._3
+
+    fn hash(self) -> Int:
+        return hash(self._0, self._1, self._2, self._3)
+
+    fn to_string(self) -> String:
+        return f"({__repr(self._0)}, {__repr(self._1)}, {__repr(self._2)}, {__repr(self._3)})"
+
+struct Tuple5[A, B, C, D, E]:
+    _0: A
+    _1: B
+    _2: C
+    _3: D
+    _4: E
+
+    fn ==(self, other: Tuple5[A, B, C, D, E]) -> Bool:
+        return self._0 == other._0 and self._1 == other._1 and self._2 == other._2 and self._3 == other._3 and self._4 == other._4
+
+    fn <=>(self, other: Tuple5[A, B, C, D, E]) -> Int:
+        val c0 = self._0 <=> other._0
+        if c0 != 0:
+            return c0
+        val c1 = self._1 <=> other._1
+        if c1 != 0:
+            return c1
+        val c2 = self._2 <=> other._2
+        if c2 != 0:
+            return c2
+        val c3 = self._3 <=> other._3
+        if c3 != 0:
+            return c3
+        return self._4 <=> other._4
+
+    fn hash(self) -> Int:
+        return hash(self._0, self._1, self._2, self._3, self._4)
+
+    fn to_string(self) -> String:
+        return f"({__repr(self._0)}, {__repr(self._1)}, {__repr(self._2)}, {__repr(self._3)}, {__repr(self._4)})"
+
+struct Tuple6[A, B, C, D, E, F]:
+    _0: A
+    _1: B
+    _2: C
+    _3: D
+    _4: E
+    _5: F
+
+    fn ==(self, other: Tuple6[A, B, C, D, E, F]) -> Bool:
+        return self._0 == other._0 and self._1 == other._1 and self._2 == other._2 and self._3 == other._3 and self._4 == other._4 and self._5 == other._5
+
+    fn <=>(self, other: Tuple6[A, B, C, D, E, F]) -> Int:
+        val c0 = self._0 <=> other._0
+        if c0 != 0:
+            return c0
+        val c1 = self._1 <=> other._1
+        if c1 != 0:
+            return c1
+        val c2 = self._2 <=> other._2
+        if c2 != 0:
+            return c2
+        val c3 = self._3 <=> other._3
+        if c3 != 0:
+            return c3
+        val c4 = self._4 <=> other._4
+        if c4 != 0:
+            return c4
+        return self._5 <=> other._5
+
+    fn hash(self) -> Int:
+        return hash(self._0, self._1, self._2, self._3, self._4, self._5)
+
+    fn to_string(self) -> String:
+        return f"({__repr(self._0)}, {__repr(self._1)}, {__repr(self._2)}, {__repr(self._3)}, {__repr(self._4)}, {__repr(self._5)})"
+# Something that gives values one at a time. `for x in it` calls `next()`
+# until it returns `null`, so any type with a `next` like this one can be
+# looped over. Saying `struct Lines(Iterator[String]):` also gives it the
+# methods below (`map`, `filter`, `to_list`...), unless it has its own.
+#
+#     struct Countdown(Iterator[Int]):
+#         var left: Int
+#
+#         fn next(self) -> Int?:
+#             if self.left == 0:
+#                 return null
+#             self.left -= 1
+#             return self.left + 1
+#
+#     for n in Countdown(3):
+#         print(n)                          # 3, 2, 1
+#     print(Countdown(5).filter(fn(n) -> n % 2 == 1).to_list())   # [5, 3, 1]
+interface Iterator[T]:
+    # The next value, or `null` when there are no more.
+    fn next(self) -> T?
+
+    # The values, changed by `f`: a new iterator, computed as it's read.
+    fn map[U](self, f: fn(T) -> U) -> Mapped[T, U, Self]:
+        return Mapped(self, f)
+
+    # The values for which `keep` is true: a new iterator, computed as it's read.
+    fn filter(self, keep: fn(T) -> Bool) -> Filtered[T, Self]:
+        return Filtered(self, keep)
+
+    # At most the first `n` values.
+    fn take(self, n: Int) -> Taken[T, Self]:
+        return Taken(self, n)
+
+    # Each value with its position: `(0, a)`, `(1, b)`...
+    fn enumerate(self) -> Enumerated[T, Self]:
+        return Enumerated(self, 0)
+
+    # Every value left, in a list.
+    fn to_list(self) -> List[T]:
+        val out: List[T] = []
+        for x in self:
+            out.push(x)
+        return out
+
+    # How many values are left (reading them all).
+    fn count(self) -> Int:
+        var n = 0
+        for _ in self:
+            n += 1
+        return n
+
+    # Combine the values into one, starting from `initial`: `f(acc, x)` gives the next `acc`.
+    fn fold[A](self, initial: A, f: fn(A, T) -> A) -> A:
+        var acc = initial
+        for x in self:
+            acc = f(acc, x)
+        return acc
+
+    # Is `f` true for some value? Stops at the first one.
+    fn any(self, f: fn(T) -> Bool) -> Bool:
+        for x in self:
+            if f(x):
+                return true
+        return false
+
+    # Is `f` true for every value? Stops at the first that fails.
+    fn all(self, f: fn(T) -> Bool) -> Bool:
+        for x in self:
+            if not f(x):
+                return false
+        return true
+
+    # The first value for which `f` is true, or `null`.
+    fn find(self, f: fn(T) -> Bool) -> T?:
+        for x in self:
+            if f(x):
+                return x
+        return null
+
+# What `it.map(f)` gives.
+struct Mapped[T, U, I: Iterator[T]](Iterator[U]):
+    _source: I
+    _f: fn(T) -> U
+
+    fn next(self) -> U?:
+        val x = self._source.next() ?: return null
+        return self._f(x)
+
+# What `it.filter(keep)` gives.
+struct Filtered[T, I: Iterator[T]](Iterator[T]):
+    _source: I
+    _keep: fn(T) -> Bool
+
+    fn next(self) -> T?:
+        while true:
+            val x = self._source.next() ?: return null
+            if self._keep(x):
+                return x
+        return null
+
+# What `it.take(n)` gives.
+struct Taken[T, I: Iterator[T]](Iterator[T]):
+    _source: I
+    var _left: Int
+
+    fn next(self) -> T?:
+        if self._left <= 0:
+            return null
+        self._left -= 1
+        return self._source.next()
+
+# What `it.enumerate()` gives.
+struct Enumerated[T, I: Iterator[T]](Iterator[(Int, T)]):
+    _source: I
+    var _at: Int
+
+    fn next(self) -> (Int, T)?:
+        val x = self._source.next() ?: return null
+        self._at += 1
+        return (self._at - 1, x)

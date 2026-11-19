@@ -1,0 +1,7 @@
+# expect-error: the cases of this `match` give different types: `String` and `Int`
+fn main():
+    val x = 3
+    val a = match x:
+        case 1: "one"
+        case _: 2
+    print(a)

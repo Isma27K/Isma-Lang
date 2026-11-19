@@ -50,6 +50,9 @@ pub fn generate(prog: &Program, sources: &SourceMap, target_triple: Option<&str>
         closure_classes: Vec::new(),
         closures_done: 0,
         vtables: Vec::new(),
+        type_tags: Vec::new(),
+        box_finders: Vec::new(),
+        box_finders_done: 0,
     };
     let mut funcs = String::new();
     for f in prog.funcs.iter().filter(|f| !f.generic) {
@@ -442,6 +445,12 @@ struct Codegen<'a> {
     closures_done: usize,
     /// Boxes whose method table (a global) has been emitted.
     vtables: Vec<StructId>,
+    /// Types whose tag (a global telling a box's contents apart) is emitted.
+    type_tags: Vec<String>,
+    /// Types matched inside interface values (`case Circle`), each with a
+    /// function finding the box that holds one, and how many are emitted.
+    box_finders: Vec<Type>,
+    box_finders_done: usize,
 }
 
 impl<'a> Codegen<'a> {
@@ -1391,6 +1400,26 @@ impl<'a> Codegen<'a> {
                     self.emit(format!("store {} {v}, ptr {fp}{md}", llty(vty)));
                 }
                 p
+            }
+            Rvalue::IsType(v, t) => {
+                let val = self.operand(&Operand::Var(*v));
+                let finder = self.box_finder(t);
+                let b = self.fresh();
+                self.emit(format!("{b} = call ptr {finder}(ptr {val})"));
+                let r = self.fresh();
+                self.emit(format!("{r} = icmp ne ptr {b}, null"));
+                r
+            }
+            Rvalue::Unbox(v, t) => {
+                let val = self.operand(&Operand::Var(*v));
+                let finder = self.box_finder(t);
+                let b = self.fresh();
+                self.emit(format!("{b} = call ptr {finder}(ptr {val})"));
+                let vp = self.fresh();
+                self.emit(format!("{vp} = getelementptr inbounds i8, ptr {b}, i64 24"));
+                let r = self.fresh();
+                self.emit(format!("{r} = load {}, ptr {vp}", llty(t)));
+                r
             }
             Rvalue::Tag(v) => {
                 let val = self.operand(&Operand::Var(*v));

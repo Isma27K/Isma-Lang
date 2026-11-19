@@ -197,7 +197,8 @@ fn main():
 
 - **Parameter types come from where a lambda is used.** `apply` takes an `fn(Int) -> Int`, so `x` is an `Int`. Where nothing says, write them: `val f = fn(x: Int) -> x * 2`.
 - **One line, or a block.** A one-line lambda returns its expression. A longer one gets a block, with its return type if it returns something (`fn(x: Int) -> Int:`), and must end its line, as after `val f =`. Inside parentheses, use one-line lambdas, or define the function first.
-- **Captures are copies.** A lambda keeps the values it uses from around it as they are when it's created, so it can only capture names that never change: `val`s, parameters and loop variables (each iteration of a loop captures its own). Capturing a `var` is an error: copy it into a `val` first. Lists, maps and structs are shared as always, so a lambda can still change what's in them.
+- **`val`s are copied, `var`s are shared.** A lambda keeps the `val`s, parameters and loop variables it uses as they are when it's created (each iteration of a loop captures its own). A `var` it captures is shared with the code around it: each sees what the other writes, even after the function that declared it returned (the variable lives in a small cell then). A `var` that a lambda assigns can't be smart-cast. Lists, maps and structs are shared as always.
+- **Methods are values too:** `users.add` remembers `users`; `User.describe` takes the `User` first; `App.new` is a static method. A generic method can't be a value yet.
 - **Named functions are values too**, including generic ones (`max[Int]`, or picked by the type expected: `val pick: fn(Int, Int) -> Int = max`) and module functions (`xs.map(math.sqrt)`).
 - Calls go by position (`f(1, 2)`): a function type doesn't name its parameters. Functions can't be compared with `==` or printed.
 - A lambda that captures nothing is a constant and allocates nothing. One that captures is a small reference-counted object, and cycles through closures (a node whose callback captures the node) are collected like any other.
@@ -251,6 +252,10 @@ for i, x in my_list: # the index too: 0, 1, 2...
     ...
 for k, v in my_map:  # a map's keys and values, in insertion order
     ...
+for (a, b) in pairs: # each tuple, taken apart
+    ...
+for x in countdown:  # your own type, through its `next()`: see Iterators
+    ...
 ```
 
 `x in xs` and `x not in xs` test membership: a key of a map, an element of a list (compared with `==`), or a substring of a string.
@@ -272,7 +277,24 @@ acc.deposit(50)
 acc.owner = "bob"                    # error: cannot assign to immutable field `owner`
 ```
 
-Methods take `self` as their first parameter.
+Methods take `self` as their first parameter. A method without `self` is a **static method**, called on the type:
+
+```python
+struct Config:
+    host: String = "localhost"     # a default value
+    port: Int = 8080
+    tags: List[String] = []        # computed again for each new value
+    name: String
+
+    fn local(name: String) -> Config:      # static: no `self`
+        return Config(name=name)
+
+val c = Config.local("api")         # host "localhost", port 8080
+val d = Config(name="admin", port=9000)
+```
+
+- **Default values** let construction leave a field out (give the others by name). Each default is computed again for every value that needs it, so each `Config` gets its own list. Generic structs can have them: `items: List[T] = []`.
+- **Static methods** work on enums and generic types too: `Color.parse("red")`, `Stack.empty()` or `Stack[Int].empty()`.
 
 ## Enums and `match`
 
@@ -340,10 +362,32 @@ match command:
 | `Point(x, 0)` | a struct, field by field |
 | `0`, `-1`, `"quit"`, `true` | that exact value |
 | `null` | `null`. Any other pattern on a `T?` matches only non-null values |
+| `(x, 0)` | a [tuple](#tuples), element by element |
+| `Circle(r)`, `Circle as c`, `Int as n` on an interface value | the type of the value inside it ([see below](#which-type-is-inside)) |
 | `p \| q` | `p` or `q` (both must bind the same names) |
 | `p as name` | `p`, and binds the whole value to `name` |
 
 Floats can't be patterns: bind the value and use a guard, as in `case x if x > 0.5:`.
+
+### `match` as a value
+
+Where a value is expected (after `val x =`, `return`, `=`), a `match` gives the value of the case that runs: its expression, or the last line of its block. A case can also leave with `return`, `break`, `continue` or a panic.
+
+```python
+val label = match status:
+    case 200: "ok"
+    case 404: "not found"
+    case code if code >= 500:
+        log(code)
+        "server error"
+    case _: "other"
+
+val port = match text.to_int_or_null():
+    case null: return Err("not a number")
+    case n: n
+```
+
+The cases agree on one type (`Int` and `null` make `Int?`), or each is checked against the type expected. Like a block lambda, it must end its line.
 
 ### Exhaustiveness
 
@@ -622,6 +666,51 @@ interface Solid(Shape):
 
 A `Solid` value can be used where a `Shape` is expected.
 
+### Default methods
+
+An interface method with a body is a **default method**: every type that fits gets it, unless it has its own method of that name. Inside, `self` is a `Self`, the type it runs for.
+
+```python
+interface Shape:
+    fn area(self) -> Float
+    fn name(self) -> String
+
+    fn describe(self) -> String:
+        return f"{self.name()} of area {self.area()}"
+
+struct Circle(Shape):           # saying it fits gives it `describe` as a method
+    ...
+
+print(Circle(1.0).describe())
+```
+
+A type gets the defaults of the interfaces it says it fits as methods of its own; through a bound or an interface value, every type that fits gets them. Its own method wins, also through an interface value, except for a default with type parameters of its own (`map[U]`), which always runs the interface's code there.
+
+### Generic interfaces
+
+```python
+interface Source[T]:
+    fn next(self) -> T?
+
+fn total[S: Source[Int]](s: S) -> Int: ...
+fn first[T, S: Source[T]](s: S) -> T?:     # `T` comes from how the type fits `Source[T]`
+    return s.next()
+```
+
+### Which type is inside
+
+`match` can test which type an interface value holds, and take it apart:
+
+```python
+fn describe(s: Shape) -> String:
+    return match s:
+        case Circle(r): f"circle {r}"
+        case Square as sq: f"square {sq.side}"
+        case _: "something else"           # needed: any type that fits could be inside
+```
+
+Built-in types (`case Int as n:`) and enum variants work too; generic types and other interfaces can't be tested for.
+
 ### Built-in types
 
 Built-in types fit interfaces whose methods take no parameters, when they have those methods. `Int`, `Float`, `Bool`, `String` and enums without data all have `to_string`:
@@ -638,6 +727,27 @@ for t in things:
 ### What it costs
 
 A bound costs nothing. An interface value is a small box holding the value and a pointer to the table of its type's methods: making one is an allocation, and a call goes through the table (a few nanoseconds, like a virtual call in Java or Go). In a hot loop over values of one type, a bound is faster.
+
+## Iterators
+
+`for x in value` works on any value whose type has `fn next(self) -> T?` (the loop calls it until `null`), or `fn iter(self)` giving such an iterator.
+
+```python
+struct Countdown(Iterator[Int]):
+    var left: Int
+
+    fn next(self) -> Int?:
+        if self.left == 0:
+            return null
+        self.left -= 1
+        return self.left + 1
+
+for n in Countdown(3):
+    print(n)                                                    # 3, 2, 1
+print(Countdown(6).filter(fn(n) -> n % 2 == 0).to_list())      # [6, 4, 2]
+```
+
+Saying `(Iterator[Int])` gives the prelude's default methods: lazy `map`, `filter`, `take`, `enumerate` (pairs `(i, x)`), and `to_list`, `count`, `fold`, `any`, `all`, `find`. A `for` loop over an iterator is a direct call per value and allocates nothing; each adapter is one object for the whole chain. An iterator of `T?` stops at its first `null`.
 
 ## Lists
 
@@ -732,6 +842,23 @@ for word in text.split():
 
   `Float` keys are refused (`0.1 + 0.2 != 0.3`, and NaN isn't equal to itself), and so are nullable keys and lists or maps as keys.
 - **Speed.** Maps are hash tables in the runtime, the same design as Python's dicts: entries are kept in an array, in order, with an index of open-addressing slots to find them. Keys and values are stored inline (an `Int` value is 8 bytes, no boxing), lookups with `Int` and `String` keys don't call back into your code, and an update right after a lookup of the same key (`m[k] = m.get(k, 0) + 1`, `m[k] += 1`) doesn't search again.
+
+## Tuples
+
+```python
+fn divmod(a: Int, b: Int) -> (Int, Int):
+    return (a / b, a % b)
+
+val (q, r) = divmod(17, 5)            # take it apart (`_` skips one; `var` works too)
+val t = (1, "one")
+print(f"{t.0 + 1} {t.1}")             # elements by position
+for (name, n) in [("a", 1), ("b", 2)]: ...
+val grid: Map[(Int, Int), String] = {(0, 0): "start"}
+match pair:
+    case (0, y): ...
+```
+
+A tuple has two to six elements and can't be changed. Tuples compare element by element (`==`, `<`, `<=>`), print as `(1, "a")`, and are map keys when their elements can be. Each is a small immutable object (one allocation), like a struct without a name.
 
 ## Strings and f-strings
 
@@ -1069,9 +1196,10 @@ Panics cover:
 - **No negative indexing.** `xs[-1]` panics.
 - **Operators look at the left operand.** `2.0 * v` can't use `Vec2`'s `fn *`; write `v * 2.0`.
 - **`==` from `fn ==` needs non-null values.** Check for `null` first (a smart cast then does the rest).
-- **`match` is a statement.** It doesn't produce a value; assign or `return` inside its cases.
-- **Interfaces can't be generic** (`interface Source[T]`), their methods have no default bodies, and there's no `match` on which type is inside an interface value.
+- **Interfaces can't ask for static methods or operators,** `Self` only exists in default methods, and a `match` can't test for a generic type or another interface inside an interface value.
 - **Built-in types only fit interface methods without parameters** (`to_string`, `len`...).
-- **No sets or tuples yet.** Use a `Map[K, Bool]` for a set, and a struct for a pair.
+- **No sets yet.** Use a `Map[K, Bool]` for a set.
+- **A tuple is allocated,** like a struct, and has at most six elements.
+- **An iterator of a nullable type ends at its first `null`.**
 - **`sort()` only sorts lists of `Int`, `Float` and `String`.** For anything else, sort by a key: `people.sort_by(fn(p) -> p.name)`.
-- **Lambdas can't capture `var`s,** and a lambda with a block body can't be written inside parentheses. See [lambdas](#lambdas-and-function-values).
+- **A lambda with a block body, or a `match` used as a value, can't be written inside parentheses:** both must end their line. A generic method can't be used as a value. See [lambdas](#lambdas-and-function-values).

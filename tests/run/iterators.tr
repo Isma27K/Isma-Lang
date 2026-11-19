@@ -1,0 +1,67 @@
+# Iterators for your own types: `for` over `next()` (or `iter()`), and the
+# prelude's `Iterator[T]` default methods (lazy `map`/`filter`/`take`...).
+
+struct Countdown(Iterator[Int]):
+    var left: Int
+
+    fn next(self) -> Int?:
+        if self.left == 0:
+            return null
+        self.left -= 1
+        return self.left + 1
+
+struct Bag:
+    items: List[String]
+    fn iter(self) -> BagIter:
+        return BagIter(self, 0)
+
+struct BagIter:
+    bag: Bag
+    var at: Int
+    fn next(self) -> String?:
+        if self.at >= self.bag.items.len():
+            return null
+        self.at += 1
+        return self.bag.items[self.at - 1]
+
+fn main():
+    for n in Countdown(3):
+        print(n)
+    print(Countdown(5).filter(fn(n) -> n % 2 == 1).to_list())
+    print(Countdown(4).map(fn(n) -> n * 10).map(fn(n) -> f"<{n}>").to_list())
+    for i, (pos, n) in Countdown(3).enumerate():
+        print(f"{i} {pos} {n}")
+    val b = Bag(["x", "y"])
+    for s in b:
+        print(s)
+    for i, s in b:
+        print(f"{i}:{s}")
+    print(Countdown(10).take(3).to_list())
+    print(Countdown(10).fold(0, fn(a, n) -> a + n))
+    print(Countdown(4).count())
+    print(Countdown(4).find(fn(n) -> n < 3))
+    val it: Iterator[Int] = Countdown(3)
+    print(it.map(fn(n) -> n + 1).to_list())
+    print(sum_all(Counter.make()))
+    for x in Counter():
+        print(x)
+
+fn sum_all[I: Iterator[Int]](it: I) -> Int:
+    var s = 0
+    for x in it:
+        s += x
+    return s
+
+struct Counter:
+    var n: Int = 0
+    step: Int = 1
+
+    fn make() -> Counter:
+        return Counter(step=2)
+
+    fn next(self) -> Int?:
+        self.n += self.step
+        if self.n > 6:
+            return null
+        return self.n
+

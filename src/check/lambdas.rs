@@ -2,11 +2,13 @@
 //! capture, named functions used as values, and calls through function values.
 //!
 //! A function value is a closure: the code to run, plus the values a lambda
-//! captured from the code around it. Captures are copies made when the
-//! lambda is created, so a lambda may only capture names that can't change
-//! afterwards (`val`s, parameters, loop variables): capturing a `var` is an
-//! error rather than a silently stale copy. Lists and structs are shared, as
-//! everywhere else, so a lambda can still change their contents.
+//! captured from the code around it. A `val`, parameter or loop variable is
+//! copied in when the lambda is created (it can't change). A `var` is shared:
+//! the first time a lambda captures one, the variable moves into a *cell*, a
+//! small struct with one mutable field, and the function and every lambda
+//! using it read and write that field (`apply_cells` rewrites the function's
+//! own uses once its body is checked). Lists and structs are shared, as
+//! everywhere else, so a lambda can change their contents too.
 //!
 //! Each lambda's body becomes a function of its own (closure code) whose
 //! first parameter is the closure, a struct with one immutable field per
@@ -27,6 +29,8 @@ pub(super) struct FnState {
     loop_depth: usize,
     ret_ty: Type,
     in_lambda_expr: usize,
+    cells: HashMap<LocalId, StructId>,
+    cell_assigned: HashMap<LocalId, Span>,
 }
 
 impl Default for FnState {
@@ -39,6 +43,8 @@ impl Default for FnState {
             loop_depth: 0,
             ret_ty: Type::Unit,
             in_lambda_expr: 0,
+            cells: HashMap::new(),
+            cell_assigned: HashMap::new(),
         }
     }
 }
@@ -51,8 +57,9 @@ pub(super) struct LambdaFrame {
     env: LocalId,
     sid: StructId,
     /// Captured names, in field order, each with how the code around the
-    /// lambda reads it (evaluated when the lambda is created).
-    captures: Vec<(String, TExpr)>,
+    /// lambda reads it (evaluated when the lambda is created), and for a
+    /// `var`, its cell's struct (the capture is the cell).
+    captures: Vec<(String, TExpr, Option<StructId>)>,
 }
 
 impl Checker {
@@ -75,6 +82,8 @@ impl Checker {
         std::mem::swap(&mut self.loop_depth, &mut s.loop_depth);
         std::mem::swap(&mut self.ret_ty, &mut s.ret_ty);
         std::mem::swap(&mut self.in_lambda_expr, &mut s.in_lambda_expr);
+        std::mem::swap(&mut self.cells, &mut s.cells);
+        std::mem::swap(&mut self.cell_assigned, &mut s.cell_assigned);
     }
 
     /// A struct holding one lambda's captured values (fields are added as
@@ -105,6 +114,7 @@ impl Checker {
             type_args: Vec::new(),
             instance: true,
             iface: false,
+            inherited: Vec::new(),
         });
         id
     }
@@ -125,7 +135,7 @@ impl Checker {
             instance: None,
         });
         let signature = self.tn(ty);
-        self.ide.functions.push(FnSymbol { name: tf.name.clone(), signature, name_span: span, full: span, owner: None, ns: self.ns, doc: None, instance: true });
+        self.ide.functions.push(FnSymbol { name: tf.name.clone(), signature, name_span: span, full: span, owner: None, ns: self.ns, doc: None, instance: true, is_static: false });
         self.record_calls(&tf.body, if tf.generic { self.cur_generic } else { None });
         if !tf.generic {
             self.lambda_funcs.push((fid, tf));
@@ -251,6 +261,8 @@ impl Checker {
                 (body, ret)
             }
         };
+        let mut body = body;
+        self.apply_cells(&mut body);
         self.lint_locals();
         let frame = self.lambda_stack.pop().expect("lambda frame");
         let mut inner = frame.outer;
@@ -276,7 +288,7 @@ impl Checker {
             is_drop: false,
         };
         let func = self.add_closure_code(tf, lam.head, &fty);
-        let captures: Vec<TExpr> = frame.captures.into_iter().map(|(_, e)| e).collect();
+        let captures: Vec<TExpr> = frame.captures.into_iter().map(|(_, e, _)| e).collect();
         let sid = (!captures.is_empty()).then_some(sid);
         Self::mk(TExprKind::Closure { func, sid, captures }, fty, span)
     }
@@ -285,61 +297,143 @@ impl Checker {
 
     /// Is `name` a variable of the code around the lambda being checked?
     pub(super) fn is_outer_local(&self, name: &str) -> bool {
-        self.lambda_stack.iter().any(|f| f.captures.iter().any(|(n, _)| n == name) || f.outer.scopes.iter().any(|s| s.contains_key(name)))
+        self.lambda_stack.iter().any(|f| f.captures.iter().any(|(n, ..)| n == name) || f.outer.scopes.iter().any(|s| s.contains_key(name)))
     }
 
     /// `name` isn't a local of the lambda being checked: if it belongs to the
-    /// code around it, capture it.
+    /// code around it, capture it, and read it (from its cell, for a `var`).
     pub(super) fn capture(&mut self, name: &str, span: Span) -> Option<TExpr> {
         let k = self.lambda_stack.len().checked_sub(1)?;
-        self.capture_into(k, name, span)
+        let (e, cell) = self.capture_into(k, name, span)?;
+        Some(match cell {
+            Some(c) => {
+                let ty = self.structs[c].fields[0].ty.clone();
+                Self::mk(TExprKind::Field(Box::new(e), c, 0), ty, span)
+            }
+            None => e,
+        })
+    }
+
+    /// `name = ...` inside a lambda, for a `name` from around it: the place
+    /// to assign (the field of its cell), or `None` after an error.
+    pub(super) fn captured_place(&mut self, name: &str, span: Span) -> Option<(Place, Type)> {
+        let k = self.lambda_stack.len().checked_sub(1)?;
+        let (e, cell) = self.capture_into(k, name, span)?;
+        let Some(c) = cell else {
+            if !e.ty.is_error() {
+                let decl = self.outer_decl(name);
+                let mut d = Diagnostic::error(format!("cannot assign twice to immutable variable `{name}`"), span).with_primary("assigned inside a lambda");
+                if let Some(decl) = decl {
+                    d = d.with_label(decl, format!("`{name}` is declared with `val` here"));
+                }
+                self.err(d.with_help(format!("make it mutable with `var {name}`: the lambda then shares it")));
+            }
+            return None;
+        };
+        self.mark_cell_assigned(name, span);
+        let ty = self.structs[c].fields[0].ty.clone();
+        Some((Place::Field { obj: e, sid: c, idx: 0 }, ty))
+    }
+
+    /// Where `name`, a variable of the code around the lambdas, is declared.
+    fn outer_decl(&self, name: &str) -> Option<Span> {
+        self.lambda_stack.iter().rev().find_map(|f| f.outer.scopes.iter().rev().find_map(|s| s.get(name)).map(|b| b.span))
+    }
+
+    /// A lambda assigns captured `var` `name`: tell the code that owns it.
+    fn mark_cell_assigned(&mut self, name: &str, span: Span) {
+        for f in self.lambda_stack.iter_mut().rev() {
+            if let Some(b) = f.outer.scopes.iter().rev().find_map(|s| s.get(name)) {
+                let id = b.id;
+                f.outer.cell_assigned.entry(id).or_insert(span);
+                f.outer.local_meta[id].reassigned = true;
+                return;
+            }
+        }
     }
 
     /// Read `name` inside the body of lambda `k` (of `lambda_stack`), from the
     /// code around it, capturing it there (and in enclosing lambdas, if it
-    /// comes from further out).
-    fn capture_into(&mut self, k: usize, name: &str, span: Span) -> Option<TExpr> {
+    /// comes from further out). For a `var`, the capture is its cell (also
+    /// returned); otherwise it's the value.
+    fn capture_into(&mut self, k: usize, name: &str, span: Span) -> Option<(TExpr, Option<StructId>)> {
         let frame = &self.lambda_stack[k];
-        if let Some(i) = frame.captures.iter().position(|(n, _)| n == name) {
-            let ty = frame.captures[i].1.ty.clone();
+        if let Some(i) = frame.captures.iter().position(|(n, ..)| n == name) {
+            let (ty, cell) = (frame.captures[i].1.ty.clone(), frame.captures[i].2);
             let (env, sid) = (frame.env, frame.sid);
-            return Some(self.narrow(Self::mk(TExprKind::Field(Box::new(Self::mk(TExprKind::Local(env), Type::Struct(sid), span)), sid, i), ty, span)));
+            let field = Self::mk(TExprKind::Field(Box::new(Self::mk(TExprKind::Local(env), Type::Struct(sid), span)), sid, i), ty, span);
+            return Some((if cell.is_some() { field } else { self.narrow(field) }, cell));
         }
         // Look it up in the code around lambda `k`, with that code's state in place.
         let mut outer = std::mem::take(&mut self.lambda_stack[k].outer);
         self.swap_state(&mut outer);
         let found = self.lookup(name).map(|b| (b.id, b.span, b.mutable));
         let value = match found {
-            Some((id, decl, mutable)) => {
-                let e = self.read_local(id, decl, span);
-                if mutable {
-                    self.err(
-                        Diagnostic::error(format!("a lambda can't capture `{name}`, a `var`"), span)
-                            .with_primary("captured here")
-                            .with_label(decl, "declared with `var` here")
-                            .with_note(format!("a lambda keeps a copy of each value it uses, so it would never see later changes to `{name}`"))
-                            .with_help(format!("copy it into a `val` before the lambda (`val {name}_now = {name}`), or keep it in a list or struct: the lambda shares those")),
-                    );
-                    Some(Self::error_expr(span))
-                } else {
-                    Some(e)
-                }
+            Some((id, decl, true)) => {
+                // A `var`: shared through its cell.
+                self.local_use(id, decl, span, false);
+                self.local_meta[id].used = true;
+                let ty = self.locals[id].ty.clone();
+                let cell = match self.cells.get(&id) {
+                    Some(c) => *c,
+                    None => {
+                        let c = self.cell_struct(name, &ty, decl);
+                        self.cells.insert(id, c);
+                        c
+                    }
+                };
+                Some((Self::mk(TExprKind::Local(id), Type::Struct(cell), span), Some(cell)))
             }
+            Some((id, decl, false)) => Some((self.read_local(id, decl, span), None)),
             None if k > 0 => self.capture_into(k - 1, name, span),
             None => None,
         };
         self.swap_state(&mut outer);
         self.lambda_stack[k].outer = outer;
-        let value = value?;
+        let (value, cell) = value?;
         if value.ty.is_error() {
-            return Some(value);
+            return Some((value, None));
         }
         let frame = &mut self.lambda_stack[k];
         let i = frame.captures.len();
         let (env, sid, ty) = (frame.env, frame.sid, value.ty.clone());
-        frame.captures.push((name.to_string(), value));
+        frame.captures.push((name.to_string(), value, cell));
         self.structs[sid].fields.push(TField { name: name.to_string(), ty: ty.clone(), mutable: false });
-        Some(self.narrow(Self::mk(TExprKind::Field(Box::new(Self::mk(TExprKind::Local(env), Type::Struct(sid), span)), sid, i), ty, span)))
+        let field = Self::mk(TExprKind::Field(Box::new(Self::mk(TExprKind::Local(env), Type::Struct(sid), span)), sid, i), ty, span);
+        Some((if cell.is_some() { field } else { self.narrow(field) }, cell))
+    }
+
+    /// The cell holding `var` `name` (of type `ty`) once a lambda captures it.
+    fn cell_struct(&mut self, name: &str, ty: &Type, span: Span) -> StructId {
+        let generic = self.in_template;
+        let c = self.closure_struct(span, generic);
+        let shown = format!("<var {name}>");
+        self.structs[c].name = shown.clone();
+        self.ide.structs[c].name = shown;
+        self.structs[c].fields.push(TField { name: "value".into(), ty: ty.clone(), mutable: true });
+        c
+    }
+
+    /// Once a function's (or lambda's) body is checked: its `var`s that
+    /// lambdas captured live in cells, so their declarations make the cell,
+    /// and every other use reads or writes the cell's field.
+    pub(super) fn apply_cells(&mut self, body: &mut [TStmt]) {
+        if self.cells.is_empty() {
+            return;
+        }
+        let cells = self.cells.clone();
+        let mut reported = HashSet::new();
+        let mut cx = CellRewrite { cells: &cells, assigned: &self.cell_assigned, errors: Vec::new(), reported: &mut reported, locals: &self.locals };
+        for s in body.iter_mut() {
+            cx.stmt(s);
+        }
+        let errors = std::mem::take(&mut cx.errors);
+        for d in errors {
+            self.err(d);
+        }
+        for (&id, &c) in &cells {
+            self.locals[id].ty = Type::Struct(c);
+        }
     }
 
     // ---------- named functions as values ----------
@@ -396,6 +490,93 @@ impl Checker {
         let ty = Type::Func(self.funcs[fid].params.iter().map(|(_, t)| t.clone()).collect(), Box::new(self.funcs[fid].ret.clone()));
         let func = self.fn_wrapper(fid, span);
         Self::mk(TExprKind::Closure { func, sid: None, captures: Vec::new() }, ty, span)
+    }
+
+    /// `users.list` (no call): method `name` of `recv` (of struct or enum
+    /// `sid`), as a function value that remembers `recv`.
+    pub(super) fn method_value(&mut self, recv: TExpr, sid: StructId, name: &Ident, span: Span) -> TExpr {
+        let tname = self.structs[sid].name.clone();
+        if is_private(&name.name) && self.struct_ns[sid] != self.ns {
+            self.err(Diagnostic::error(format!("method `{}` of `{tname}` is private", name.name), name.span));
+            return Self::error_expr(span);
+        }
+        let Some(fid) = self.method(sid, &name.name) else { return Self::error_expr(span) };
+        if self.structs[sid].drop == Some(fid) || is_operator_name(&name.name) {
+            self.err(Diagnostic::error(format!("`{}` can't be used as a value", name.name), name.span));
+            return Self::error_expr(span);
+        }
+        self.fn_use_hover(fid, name.span);
+        if let Some(&p) = self.funcs[fid].tparams.first() {
+            let (pn, m) = (self.type_params[p].name.clone(), name.name.clone());
+            self.err(
+                Diagnostic::error(format!("method `{m}` is generic, so it can't be used as a value"), name.span)
+                    .with_primary(format!("which type is `{pn}`?"))
+                    .with_help(format!("wrap it in a lambda that says: `fn(x) -> value.{m}(x)`")),
+            );
+            return Self::error_expr(span);
+        }
+        let params: Vec<Type> = self.funcs[fid].params[1..].iter().map(|(_, t)| t.clone()).collect();
+        let ret = self.funcs[fid].ret.clone();
+        let (fname, fsym) = (format!("{}.<bound>", self.funcs[fid].name), format!("{}.bound", self.funcs[fid].symbol));
+        self.bound_value(recv, (fid, usize::MAX), params, ret, fname, fsym, span, move |recv, mut args| {
+            args.insert(0, recv);
+            TExprKind::Call(fid, args)
+        })
+    }
+
+    /// `shape.area` (no call) on an interface value: the method in its table, as a function value.
+    pub(super) fn iface_method_value(&mut self, recv: TExpr, iface: StructId, name: &Ident, span: Span) -> TExpr {
+        let Some((slot, decl)) = self.iface_slot(iface, &name.name) else { return Self::error_expr(span) };
+        let code = self.ide.functions[decl].signature.clone();
+        self.hover(name.span, code, Some(format!("method of interface `{}`", self.structs[iface].name)));
+        let params: Vec<Type> = self.funcs[decl].params[1..].iter().map(|(_, t)| t.clone()).collect();
+        let ret = self.funcs[decl].ret.clone();
+        let (fname, fsym) = (format!("{}.<bound>", self.funcs[decl].name), format!("tarn_iface.{iface}.{slot}.bound"));
+        self.bound_value(recv, (iface, slot), params, ret, fname, fsym, span, move |recv, args| TExprKind::CallMethod(Box::new(recv), slot, args))
+    }
+
+    /// A function value that calls something (`call`, given the receiver and
+    /// the arguments) on `recv`, which it captures. Its code is made once per
+    /// `key` (outside generic code as written).
+    #[allow(clippy::too_many_arguments)]
+    fn bound_value(&mut self, recv: TExpr, key: (usize, usize), params: Vec<Type>, ret: Type, name: String, symbol: String, span: Span, call: impl Fn(TExpr, Vec<TExpr>) -> TExprKind) -> TExpr {
+        let fty = Type::Func(params.clone(), Box::new(ret.clone()));
+        let recv_ty = recv.ty.clone();
+        let cached = if self.in_template { None } else { self.bound_methods.get(&key).copied() };
+        let (func, sid) = match cached {
+            Some(k) => k,
+            None => {
+                let generic = self.in_template;
+                let sid = self.closure_struct(span, generic);
+                self.structs[sid].fields.push(TField { name: "self".into(), ty: recv_ty.clone(), mutable: false });
+                self.structs[sid].closure = Some(fty.clone());
+                let mut locals = vec![TLocal { name: "_env".into(), ty: Type::Struct(sid) }];
+                locals.extend(params.iter().enumerate().map(|(i, t)| TLocal { name: format!("_arg{i}"), ty: t.clone() }));
+                let me = Self::mk(TExprKind::Field(Box::new(Self::mk(TExprKind::Local(0), Type::Struct(sid), span)), sid, 0), recv_ty.clone(), span);
+                let args: Vec<TExpr> = params.iter().enumerate().map(|(i, t)| Self::mk(TExprKind::Local(i + 1), t.clone(), span)).collect();
+                let c = Self::mk(call(me, args), ret.clone(), span);
+                let body = if ret == Type::Unit { vec![TStmt::Expr(c)] } else { vec![TStmt::Return(Some(c))] };
+                let tf = TFunc {
+                    name,
+                    symbol,
+                    params: (0..=params.len()).collect(),
+                    ret,
+                    locals,
+                    body,
+                    exported: false,
+                    track_caller: false,
+                    generic,
+                    closure: true,
+                    is_drop: false,
+                };
+                let func = self.add_closure_code(tf, span, &fty);
+                if !generic {
+                    self.bound_methods.insert(key, (func, sid));
+                }
+                (func, sid)
+            }
+        };
+        Self::mk(TExprKind::Closure { func, sid: Some(sid), captures: vec![recv] }, fty, span)
     }
 
     /// The closure code that calls function `fid` (made once per function).
@@ -491,5 +672,183 @@ impl Checker {
             out.push(self.coerce(t, p, None));
         }
         Self::mk(TExprKind::CallValue(Box::new(f), out), ret, span)
+    }
+}
+
+/// Rewrites a function body for its captured `var`s (see `apply_cells`).
+struct CellRewrite<'a> {
+    cells: &'a HashMap<LocalId, StructId>,
+    assigned: &'a HashMap<LocalId, Span>,
+    errors: Vec<Diagnostic>,
+    reported: &'a mut HashSet<LocalId>,
+    locals: &'a [TLocal],
+}
+
+impl CellRewrite<'_> {
+    fn cell_ref(id: LocalId, c: StructId, span: Span) -> TExpr {
+        TExpr { kind: TExprKind::Local(id), ty: Type::Struct(c), span }
+    }
+
+    fn stmts(&mut self, stmts: &mut [TStmt]) {
+        for s in stmts {
+            self.stmt(s);
+        }
+    }
+
+    fn stmt(&mut self, s: &mut TStmt) {
+        match s {
+            TStmt::Let(id, e) => {
+                self.expr(e);
+                if let Some(&c) = self.cells.get(id) {
+                    let span = e.span;
+                    let v = std::mem::replace(e, TExpr { kind: TExprKind::Int(0), ty: Type::Unit, span });
+                    *e = TExpr { kind: TExprKind::StructNew(c, vec![v]), ty: Type::Struct(c), span };
+                }
+            }
+            TStmt::Assign { place, value, .. } => {
+                match place {
+                    Place::Local(id) => {
+                        if let Some(&c) = self.cells.get(id) {
+                            *place = Place::Field { obj: Self::cell_ref(*id, c, value.span), sid: c, idx: 0 };
+                        }
+                    }
+                    Place::Field { obj, .. } => self.expr(obj),
+                    Place::Index { list: a, index: b, .. } | Place::Custom { obj: a, index: b, .. } | Place::MapEntry { map: a, key: b, .. } => {
+                        self.expr(a);
+                        self.expr(b);
+                    }
+                }
+                self.expr(value);
+            }
+            TStmt::Expr(e) | TStmt::Return(Some(e)) => self.expr(e),
+            TStmt::If { branches, else_block } => {
+                for (c, b) in branches {
+                    self.expr(c);
+                    self.stmts(b);
+                }
+                if let Some(b) = else_block {
+                    self.stmts(b);
+                }
+            }
+            TStmt::While { cond, body } => {
+                self.expr(cond);
+                self.stmts(body);
+            }
+            TStmt::ForRange { start, end, body, .. } => {
+                self.expr(start);
+                self.expr(end);
+                self.stmts(body);
+            }
+            TStmt::ForList { list, body, .. } | TStmt::ForMap { map: list, body, .. } => {
+                self.expr(list);
+                self.stmts(body);
+            }
+            TStmt::Match { scrutinee, arms } => {
+                self.expr(scrutinee);
+                self.arms(arms);
+            }
+            TStmt::Break | TStmt::Continue | TStmt::Return(None) => {}
+        }
+    }
+
+    fn arms(&mut self, arms: &mut [TArm]) {
+        for a in arms {
+            if let Some(g) = &mut a.guard {
+                self.expr(g);
+            }
+            self.stmts(&mut a.body);
+            if let Some(v) = &mut a.value {
+                self.expr(v);
+            }
+        }
+    }
+
+    fn exprs(&mut self, es: &mut [TExpr]) {
+        for e in es {
+            self.expr(e);
+        }
+    }
+
+    fn expr(&mut self, e: &mut TExpr) {
+        match &mut e.kind {
+            TExprKind::Local(id) => {
+                if let Some(&c) = self.cells.get(id)
+                    && e.ty != Type::Struct(c)
+                {
+                    let r = Self::cell_ref(*id, c, e.span);
+                    e.kind = TExprKind::Field(Box::new(r), c, 0);
+                }
+            }
+            // A smart cast of a `var` that a lambda can change isn't safe.
+            TExprKind::Unwrap(x) => {
+                if let TExprKind::Local(id) = x.kind
+                    && let Some(&at) = self.assigned.get(&id)
+                    && self.reported.insert(id)
+                {
+                    let name = self.locals[id].name.clone();
+                    self.errors.push(
+                        Diagnostic::error(format!("`{name}` can't be smart-cast: a lambda can change it"), x.span)
+                            .with_primary(format!("`{name}` was checked for `null`, but it's shared with a lambda"))
+                            .with_label(at, "the lambda assigns it here")
+                            .with_note("the lambda could run between the check and this use, so the check proves nothing")
+                            .with_help(format!("copy it into a `val` first (`val {name}_now = {name}`) and check and use that")),
+                    );
+                }
+                self.expr(x);
+            }
+            TExprKind::Int(_) | TExprKind::Float(_) | TExprKind::Bool(_) | TExprKind::Str(_) | TExprKind::Null => {}
+            TExprKind::Call(_, args) | TExprKind::Builtin(_, args) | TExprKind::StructNew(_, args) | TExprKind::EnumNew(_, _, args) | TExprKind::ListLit(args) | TExprKind::FString(args) => {
+                self.exprs(args)
+            }
+            TExprKind::Binary(_, a, b) | TExprKind::And(a, b) | TExprKind::Or(a, b) | TExprKind::Index(a, b) | TExprKind::Elvis(a, b) | TExprKind::Let(_, a, b) => {
+                self.expr(a);
+                self.expr(b);
+            }
+            TExprKind::Neg(x) | TExprKind::Not(x) | TExprKind::Field(x, ..) | TExprKind::IsNull(x) | TExprKind::Wrap(x) | TExprKind::NotNull(x) | TExprKind::Boxed(_, x) => {
+                self.expr(x)
+            }
+            TExprKind::MapLit(entries) => {
+                for (k, v) in entries {
+                    self.expr(k);
+                    self.expr(v);
+                }
+            }
+            TExprKind::ListFind { list, value, test, .. } => {
+                self.expr(list);
+                self.expr(value);
+                self.expr(test);
+            }
+            TExprKind::ListFormat { list, each, .. } => {
+                self.expr(list);
+                self.expr(each);
+            }
+            TExprKind::MapFormat { map, key_str, value_str, .. } => {
+                self.expr(map);
+                self.expr(key_str);
+                self.expr(value_str);
+            }
+            TExprKind::Try { value, on_err, .. } => {
+                self.expr(value);
+                self.expr(on_err);
+            }
+            TExprKind::SafeCall { recv, body, .. } => {
+                self.expr(recv);
+                self.expr(body);
+            }
+            TExprKind::Jump(s) => self.stmt(s),
+            TExprKind::Closure { captures, .. } => self.exprs(captures),
+            TExprKind::CallValue(f, args) | TExprKind::CallMethod(f, _, args) => {
+                self.expr(f);
+                self.exprs(args);
+            }
+            TExprKind::Block(stmts, v) => {
+                self.stmts(stmts);
+                self.expr(v);
+            }
+            TExprKind::Match(x, arms) => {
+                self.expr(x);
+                self.arms(arms);
+            }
+        }
     }
 }

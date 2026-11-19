@@ -1,0 +1,18 @@
+# expect-error: `Sq.describe` returns `Int`, not `String`
+interface Shape:
+    fn area(self) -> Float
+
+    fn describe(self) -> String:
+        return f"area {self.area()}"
+
+struct Sq(Shape):
+    s: Float
+
+    fn area(self) -> Float:
+        return self.s
+
+    fn describe(self) -> Int:
+        return 1
+
+fn main():
+    pass

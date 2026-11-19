@@ -241,6 +241,18 @@ fn calls_in_expr(e: &TExpr, out: &mut Vec<(FuncId, Span)>) {
             calls_in(stmts, out);
             calls_in_expr(e, out);
         }
+        TExprKind::Match(x, arms) => {
+            calls_in_expr(x, out);
+            for a in arms {
+                if let Some(g) = &a.guard {
+                    calls_in_expr(g, out);
+                }
+                calls_in(&a.body, out);
+                if let Some(v) = &a.value {
+                    calls_in_expr(v, out);
+                }
+            }
+        }
         TExprKind::Int(_) | TExprKind::Float(_) | TExprKind::Bool(_) | TExprKind::Str(_) | TExprKind::Local(_) | TExprKind::Null => {}
     }
 }
@@ -388,7 +400,7 @@ impl Checker {
             Type::List(e) | Type::Nullable(e) => 1 + self.type_depth(e),
             Type::Map(k, v) => 1 + self.type_depth(k).max(self.type_depth(v)),
             Type::Func(ps, r) => 1 + ps.iter().chain([&**r]).map(|t| self.type_depth(t)).max().unwrap_or(0),
-            Type::Struct(id) | Type::Enum(id, _) => 1 + self.struct_args[*id].iter().map(|a| self.type_depth(a)).max().unwrap_or(0),
+            Type::Struct(id) | Type::Enum(id, _) | Type::Iface(id) => 1 + self.struct_args[*id].iter().map(|a| self.type_depth(a)).max().unwrap_or(0),
             _ => 1,
         }
     }
@@ -412,7 +424,7 @@ impl Checker {
             Type::List(e) | Type::Nullable(e) => self.mentions(e, p),
             Type::Map(k, v) => self.mentions(k, p) || self.mentions(v, p),
             Type::Func(ps, r) => ps.iter().any(|t| self.mentions(t, p)) || self.mentions(r, p),
-            Type::Struct(id) | Type::Enum(id, _) => self.struct_has_param[*id] && self.struct_args[*id].iter().any(|a| self.mentions(a, p)),
+            Type::Struct(id) | Type::Enum(id, _) | Type::Iface(id) => self.struct_has_param[*id] && self.struct_args[*id].iter().any(|a| self.mentions(a, p)),
             _ => false,
         }
     }
@@ -429,7 +441,7 @@ impl Checker {
             }
             // `T?` with `T` = `Int?` is `Int?`.
             Type::Nullable(e) => self.subst(e, map).nullable(),
-            Type::Struct(id) | Type::Enum(id, _) if self.struct_has_param[*id] => {
+            Type::Struct(id) | Type::Enum(id, _) | Type::Iface(id) if self.struct_has_param[*id] => {
                 let origin = self.struct_origin[*id];
                 let args: Vec<Type> = self.struct_args[*id].clone().iter().map(|a| self.subst(a, map)).collect();
                 match self.struct_instance(origin, args) {
@@ -467,12 +479,15 @@ impl Checker {
         let id = self.structs.len();
         let base = self.ide.structs[origin].name.clone();
         let shown: Vec<String> = args.iter().map(|a| self.tn(a)).collect();
-        let name = format!("{base}[{}]", shown.join(", "));
+        // A tuple is named by its elements: `(Int, String)`.
+        let name = if base.starts_with('(') { format!("({})", shown.join(", ")) } else { format!("{base}[{}]", shown.join(", ")) };
         let has_param = args.iter().any(|a| a.has_param(&self.struct_has_param));
         let variants = self.structs[origin].variants.as_ref().map(|_| Vec::new());
         self.structs.push(TStruct { name: name.clone(), fields: Vec::new(), variants, generic: has_param, closure: None, vtable: Vec::new(), drop: None });
+        let is_iface = matches!(self.def_types[origin], Type::Iface(_));
         self.def_types.push(match self.def_types[origin] {
             Type::Enum(_, boxed) => Type::Enum(id, boxed),
+            Type::Iface(_) => Type::Iface(id),
             _ => Type::Struct(id),
         });
         self.struct_spans.push(self.struct_spans[origin]);
@@ -496,6 +511,10 @@ impl Checker {
             self.fill_instance(id);
         } else {
             self.pending_fields.push(id);
+        }
+        // An interface's instance (`Source[Int]`) gets its methods for these types.
+        if is_iface && self.sigs_ready {
+            self.fill_iface_instance(id);
         }
         Some(id)
     }
@@ -568,7 +587,7 @@ impl Checker {
         }
         let id = self.funcs.len();
         let mut sym = self.ide.functions[decl].clone();
-        let is_method = sym.owner.is_some();
+        let is_method = sym.owner.is_some() && !sym.is_static;
         sym.signature = self.signature(&sym.name, &tparams, &params, &ret, is_method);
         sym.instance = true;
         self.ide.functions.push(sym);
@@ -589,7 +608,9 @@ impl Checker {
             return decl;
         }
         let mut args = self.struct_args[sid].clone();
-        args.extend(self.funcs[decl].tparams.iter().map(|p| Type::Param(*p)));
+        // (A static method's `tparams` start with the type's own parameters.)
+        let outer = &self.struct_params[self.struct_origin[sid]];
+        args.extend(self.funcs[decl].tparams.iter().filter(|p| !outer.contains(p)).map(|p| Type::Param(*p)));
         self.fn_instance(decl, args)
     }
 
@@ -623,7 +644,8 @@ impl Checker {
     /// Which parameter each argument of a call goes to. Misplaced, unknown and
     /// repeated arguments are reported (and checked, for editor support);
     /// `ok` is false then, or when the count is wrong.
-    fn arg_slots<'a>(&mut self, what: &str, params: &[(String, Type)], args: &'a [Arg], span: Span) -> (Vec<(usize, &'a Arg)>, bool) {
+    /// `optional`: per parameter, may it be left out (a field with a default value)?
+    fn arg_slots<'a>(&mut self, what: &str, params: &[(String, Type)], optional: &[bool], args: &'a [Arg], span: Span) -> (Vec<(usize, &'a Arg)>, bool) {
         let mut taken = vec![false; params.len()];
         let mut slots = Vec::new();
         let mut ok = true;
@@ -670,20 +692,26 @@ impl Checker {
             taken[idx] = true;
             slots.push((idx, a));
         }
+        let needed = |i: usize| !optional.get(i).copied().unwrap_or(false);
         if args.len() > params.len() {
             self.err(
                 Diagnostic::error(format!("{what} takes {} argument(s) but {} were given", params.len(), args.len()), span)
                     .with_primary(format!("expected {} argument(s)", params.len())),
             );
             ok = false;
-        } else if taken.iter().any(|t| !t) && ok {
-            let missing: Vec<String> = params.iter().zip(&taken).filter(|(_, t)| !**t).map(|((n, t), _)| format!("`{n}: {}`", self.tn(t))).collect();
+        } else if taken.iter().enumerate().any(|(i, t)| !t && needed(i)) && ok {
+            let missing: Vec<String> =
+                params.iter().zip(&taken).enumerate().filter(|(i, (_, t))| !**t && needed(*i)).map(|(_, ((n, t), _))| format!("`{n}: {}`", self.tn(t))).collect();
             self.err(
                 Diagnostic::error(format!("{what} is missing argument(s): {}", missing.join(", ")), span)
-                    .with_primary(format!("expected {} argument(s), found {}", params.len(), args.len())),
+                    .with_primary(if optional.iter().any(|o| *o) {
+                        "fields without a default value need one".to_string()
+                    } else {
+                        format!("expected {} argument(s), found {}", params.len(), args.len())
+                    }),
             );
             ok = false;
-        } else if taken.iter().any(|t| !t) {
+        } else if taken.iter().enumerate().any(|(i, t)| !t && needed(i)) {
             ok = false;
         }
         (slots, ok)
@@ -734,7 +762,7 @@ impl Checker {
                 }
                 self.unify(pr, ar, tparams, bound, weak);
             }
-            (Type::Struct(ps) | Type::Enum(ps, _), Type::Struct(asid) | Type::Enum(asid, _))
+            (Type::Struct(ps) | Type::Enum(ps, _) | Type::Iface(ps), Type::Struct(asid) | Type::Enum(asid, _) | Type::Iface(asid))
                 if self.struct_has_param[*ps] && self.struct_origin[*ps] == self.struct_origin[*asid] =>
             {
                 for (p, a) in self.struct_args[*ps].iter().zip(&self.struct_args[*asid]) {
@@ -791,6 +819,25 @@ impl Checker {
         expected: Option<&Type>,
         span: Span,
     ) -> Option<(Vec<TExpr>, Vec<Type>)> {
+        let (out, bound) = self.infer_args_with(what, tparams, params, &[], ret, args, explicit, expected, span)?;
+        Some((out.into_iter().map(|t| t.expect("every parameter is required")).collect(), bound))
+    }
+
+    /// `infer_args` where the parameters marked `optional` may be left out:
+    /// those come back as `None`.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn infer_args_with(
+        &mut self,
+        what: &str,
+        tparams: &[ParamId],
+        params: &[(String, Type)],
+        optional: &[bool],
+        ret: &Type,
+        args: &[Arg],
+        explicit: Option<&[TypeExpr]>,
+        expected: Option<&Type>,
+        span: Span,
+    ) -> Option<(Vec<Option<TExpr>>, Vec<Type>)> {
         let mut bound: Vec<Option<Type>> = vec![None; tparams.len()];
         if let Some(ex) = explicit {
             let tys: Vec<Type> = ex.iter().map(|t| self.resolve_type(t)).collect();
@@ -812,7 +859,7 @@ impl Checker {
                 *b = Some(t);
             }
         }
-        let (slots, ok) = self.arg_slots(what, params, args, span);
+        let (slots, ok) = self.arg_slots(what, params, optional, args, span);
         // `[]`, `null` and `Tree.Leaf` need to know their type: they wait for the others.
         // So do list and map literals when an interface type is expected
         // (`val g: Gallery[Shape] = Gallery([Circle(1.0)])` makes a `List[Shape]`).
@@ -859,6 +906,9 @@ impl Checker {
         if !ok {
             return None;
         }
+        if bound.iter().any(Option::is_none) {
+            self.infer_from_bounds(tparams, &mut bound);
+        }
         if let Some(i) = bound.iter().position(|b| b.is_none()) {
             let name = self.type_params[tparams[i]].name.clone();
             let mut d = Diagnostic::error(format!("cannot infer the type `{name}` for {what}"), span).with_primary(format!("which type is `{name}` here?"));
@@ -873,15 +923,53 @@ impl Checker {
         let map: Vec<(ParamId, Type)> = tparams.iter().copied().zip(bound.iter().cloned()).collect();
         let mut out = Vec::new();
         for (i, t) in checked.into_iter().enumerate() {
-            let t = t.unwrap();
+            let Some(t) = t else {
+                out.push(None);
+                continue;
+            };
             if tparams.is_empty() {
-                out.push(t);
+                out.push(Some(t));
             } else {
                 let pt = self.subst(&params[i].1, &map);
-                out.push(self.coerce(t, &pt, None));
+                out.push(Some(self.coerce(t, &pt, None)));
             }
         }
         Some((out, bound))
+    }
+
+    /// `fn first[T, S: Source[T]](s: S)` called with a `Counter`: the type
+    /// parameters a bound mentions (`T`) come from how the type found for
+    /// the bounded one (`S`) fits it (`Counter.next` returns an `Int?`).
+    fn infer_from_bounds(&mut self, tparams: &[ParamId], bound: &mut [Option<Type>]) {
+        loop {
+            let before = bound.iter().filter(|b| b.is_some()).count();
+            for (k, &p) in tparams.iter().enumerate() {
+                let Some(t) = bound[k].clone() else { continue };
+                for (b, _) in self.type_params[p].bounds.clone() {
+                    let open = tparams.iter().zip(bound.iter()).any(|(q, bq)| bq.is_none() && self.mentions(&Type::Iface(b), *q));
+                    if !open {
+                        continue;
+                    }
+                    for (name, want) in self.ifaces.get(&b).map(|i| i.methods.clone()).unwrap_or_default() {
+                        let found = match &t {
+                            Type::Struct(sid) | Type::Enum(sid, _) => self.method(*sid, &name),
+                            Type::Iface(j) => self.iface_slot(*j, &name).map(|(_, f)| f),
+                            _ => None,
+                        };
+                        let Some(found) = found else { continue };
+                        let (wp, fp) = (self.funcs[want].params.clone(), self.funcs[found].params.clone());
+                        for ((_, a), (_, f)) in wp.iter().skip(1).zip(fp.iter().skip(1)) {
+                            self.unify(a, f, tparams, bound, true);
+                        }
+                        let (wr, fr) = (self.funcs[want].ret.clone(), self.funcs[found].ret.clone());
+                        self.unify(&wr, &fr, tparams, bound, true);
+                    }
+                }
+            }
+            if bound.iter().filter(|b| b.is_some()).count() == before {
+                break;
+            }
+        }
     }
 
     /// A call of function `fid` (a method when `recv` is the receiver):
@@ -1109,7 +1197,8 @@ impl Checker {
                 let tps = self.funcs[decl].type_params.clone();
                 for nu in self.needs.get(&decl).cloned().unwrap_or_default() {
                     let Some(k) = tps.iter().position(|p| *p == nu.param) else { continue };
-                    let Ok(residual) = self.satisfies(&args[k], nu.need, 0) else { continue };
+                    let need = self.need_for(nu.need, &tps, &args);
+                    let Ok(residual) = self.satisfies(&args[k], need, 0) else { continue };
                     for (q, m) in residual {
                         let list = self.needs.entry(g).or_default();
                         if !list.iter().any(|n| n.param == q && n.need == m) {
@@ -1208,6 +1297,21 @@ impl Checker {
         }
     }
 
+    /// `need` of generic code over `tps`, used with types `args`: a bound like
+    /// `S: Source[T]` mentions other type parameters, which get their types too.
+    pub(super) fn need_for(&mut self, need: Need, tps: &[ParamId], args: &[Type]) -> Need {
+        match need {
+            Need::Iface(i) if self.struct_has_param[i] => {
+                let map: Vec<(ParamId, Type)> = tps.iter().copied().zip(args.iter().cloned()).collect();
+                match self.subst(&Type::Iface(i), &map) {
+                    Type::Iface(j) => Need::Iface(j),
+                    _ => need,
+                }
+            }
+            _ => need,
+        }
+    }
+
     /// What calling `fid` needs: nothing for ordinary functions; for a method
     /// of a generic type (or other copy of generic code), what its code needs
     /// from its type arguments, which may be type parameters themselves.
@@ -1217,7 +1321,8 @@ impl Checker {
         let mut out = Vec::new();
         for nu in self.needs.get(&decl).cloned().unwrap_or_default() {
             let Some(k) = tps.iter().position(|p| *p == nu.param) else { continue };
-            match self.satisfies(&args[k], nu.need, depth + 1) {
+            let need = self.need_for(nu.need, &tps, &args);
+            match self.satisfies(&args[k], need, depth + 1) {
                 Ok(r) => out.extend(r),
                 Err(mut f) => {
                     let p = self.type_params[nu.param].name.clone();
@@ -1240,7 +1345,8 @@ impl Checker {
             let tps = self.funcs[decl].type_params.clone();
             for nu in self.needs.get(&decl).cloned().unwrap_or_default() {
                 let Some(k) = tps.iter().position(|p| *p == nu.param) else { continue };
-                let Err(fail) = self.satisfies(&args[k], nu.need, 0) else { continue };
+                let need = self.need_for(nu.need, &tps, &args);
+                let Err(fail) = self.satisfies(&args[k], need, 0) else { continue };
                 if !reported.insert((span, decl)) {
                     break;
                 }

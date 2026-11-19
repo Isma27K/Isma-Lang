@@ -142,7 +142,7 @@ pub fn rt_index(name: &str) -> Option<usize> {
 
 /// A standard-library module may call `name` (`__fs_read`, `__url_encode`...).
 pub fn is_intrinsic(name: &str) -> bool {
-    INTRINSICS.iter().any(|(n, _, _)| *n == name) || name.strip_prefix("__").is_some_and(|n| rt_index(n).is_some())
+    name == "__repr" || INTRINSICS.iter().any(|(n, _, _)| *n == name) || name.strip_prefix("__").is_some_and(|n| rt_index(n).is_some())
 }
 
 /// The type written `s` in the tables above.

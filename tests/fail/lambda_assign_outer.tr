@@ -1,4 +1,4 @@
-# expect-error: a lambda can't assign to `n`, a variable from outside it
+# expect-error: cannot assign twice to immutable variable `n`
 fn main():
     val n = 1
     val f = fn():

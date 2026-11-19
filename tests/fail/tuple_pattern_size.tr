@@ -1,0 +1,7 @@
+# expect-error: this pattern is a tuple of 3 elements
+fn main():
+    match (1, 2):
+        case (a, b, c):
+            print(a)
+        case _:
+            pass

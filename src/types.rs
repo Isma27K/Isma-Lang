@@ -110,7 +110,7 @@ impl Type {
             Type::List(t) | Type::Nullable(t) => t.has_param(generic),
             Type::Map(k, v) => k.has_param(generic) || v.has_param(generic),
             Type::Func(ps, r) => ps.iter().any(|p| p.has_param(generic)) || r.has_param(generic),
-            Type::Struct(id) | Type::Enum(id, _) => generic.get(*id).copied().unwrap_or(false),
+            Type::Struct(id) | Type::Enum(id, _) | Type::Iface(id) => generic.get(*id).copied().unwrap_or(false),
             _ => false,
         }
     }

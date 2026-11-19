@@ -1,0 +1,7 @@
+# expect-error: cannot iterate over a value of type `Point`
+struct Point:
+    x: Int
+
+fn main():
+    for p in Point(1):
+        print(p)
