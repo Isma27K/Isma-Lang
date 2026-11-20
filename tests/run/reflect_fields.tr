@@ -1,0 +1,68 @@
+# Compile-time reflection: `fields(T)`, `comptime for`, `f.get(x)`,
+# `type_name(T)`, and descriptors reaching run time.
+
+struct Point:
+    x: Int
+    y: Int
+
+struct User:
+    id: Int
+    name: String
+    email: String? = null
+    var visits: Int = 0
+
+struct Box[T]:
+    value: T
+    label: String
+
+# Every field as `name=value`, for any struct.
+fn describe[T](value: T) -> String:
+    val parts: List[String] = []
+    comptime for f in fields(T):
+        parts.push(f"{f.name}={f.get(value)}")
+    return f"{type_name(T)}({parts.join(", ")})"
+
+# The sum of a struct's `Int` fields (the others are skipped while compiling).
+fn int_total[T](value: T) -> Int:
+    var total = 0
+    comptime for f in fields(T):
+        comptime if f.type_name == "Int":
+            total += f.get(value)
+    return total
+
+# Up to the first field that is a `String`.
+fn before_text[T]() -> List[String]:
+    val out: List[String] = []
+    comptime for i, f in fields(T):
+        comptime if f.type_name == "String":
+            break
+        out.push(f"{i}:{f.name}")
+    return out
+
+# Any value made of numbers and strings, built field by field.
+fn zero[T]() -> T:
+    comptime match T:
+        case Int:
+            return 0
+        case String:
+            return ""
+        case _:
+            return T(zero() for f in fields(T))
+
+fn main():
+    print(describe(Point(x = 1, y = 2)))
+    print(describe(User(id = 7, name = "Ada")))
+    print(describe(Box(value = [1, 2], label = "list")))
+    print(describe((1, "a", true)))
+    print(int_total(User(id = 7, name = "Ada", visits = 3)))
+    print(before_text[User]())
+    # At run time, the fields are plain values.
+    for f in fields(User):
+        print(f"{f.name}: {f.type_name} (var: {f.mutable}, default: {f.has_default})")
+    print(fields(Point).len())
+    print(type_name(Map[String, List[Int?]]))
+    print(type_name(Box[Point]))
+    print(describe(zero[Point]()))
+    print(describe(zero[Box[Int]]()))
+    val b = Box[Int](7 for f in fields(Box[Int]) if f.name == "value", label = "seven")
+    print(describe(b))

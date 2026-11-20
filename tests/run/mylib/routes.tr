@@ -1,0 +1,7 @@
+# Attributes a library declares, for the `attributes.tr` test.
+
+# A `GET` route.
+attribute get(path: String)
+attribute post(path: String)
+# A parameter taken from the query string.
+attribute query

@@ -1,0 +1,9 @@
+# expect-error: mismatched types: expected `String`, found `Int`
+attribute get(path: String)
+
+@get(5)
+fn a():
+    pass
+
+fn main():
+    a()

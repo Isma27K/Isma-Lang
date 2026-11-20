@@ -1,0 +1,4 @@
+# expect-error: `inc` is only known while compiling: it's a function
+fn main():
+    comptime val inc = fn(x: Int) -> x + 1
+    print(inc(2))

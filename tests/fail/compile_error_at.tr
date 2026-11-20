@@ -1,0 +1,15 @@
+# expect-error: `show` has no parameter `slug`
+attribute get(path: String)
+
+fn route[H: Function](h: H) -> String:
+    comptime val r = attribute(H, get)!!
+    comptime if r.path.contains("{slug}") and not params(H).any(fn(p) -> p.name == "slug"):
+        compile_error(f"`{type_name(H)}` has no parameter `slug`", at = r)
+    return r.path
+
+@get("/posts/{slug}")
+fn show(id: Int) -> String:
+    return f"{id}"
+
+fn main():
+    print(route(show))

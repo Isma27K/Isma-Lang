@@ -125,6 +125,8 @@ pub struct StructSymbol {
     pub instance: bool,
     /// An interface (its `methods` are the ones it asks for).
     pub iface: bool,
+    /// An attribute (`attribute get(path: String)`): its `fields` are its arguments.
+    pub attribute: bool,
     /// Default methods it gets from the interfaces it says it fits (and
     /// doesn't replace): function ids of their declarations.
     pub inherited: Vec<usize>,
@@ -209,6 +211,15 @@ impl IdeInfo {
                 }
                 if matches!(t, Type::Enum(_, false)) && !out.iter().any(|m| m.name == "to_string") {
                     out.push(method("to_string", "fn to_string() -> String".into(), "The variant's name.", false));
+                }
+                // What compile-time code can ask a field or parameter (built into the checker).
+                let prelude = self.modules.iter().any(|m| m.ns == s.ns && m.name == crate::stdlib::PRELUDE);
+                if prelude && (s.name == "Field" || s.name == "Parameter") {
+                    if s.name == "Field" {
+                        out.push(method("get", "fn get(value: T) -> F".into(), "The value of this field in `value` (a `T`), with the field's own type. `f` must be known while compiling: use it in `comptime for f in fields(T)`.", true));
+                    }
+                    out.push(method("attribute", "fn attribute(a) -> a?".into(), "Attribute `@a(...)` written on it, or `null`.", true));
+                    out.push(method("has", "fn has(a) -> Bool".into(), "Does it have attribute `@a`?", true));
                 }
                 out
             }
@@ -471,15 +482,26 @@ pub fn builtin_function(name: &str) -> Option<(&'static str, &'static str)> {
             "fn hash(values...) -> Int",
             "A hash of one or more values, mixed into one `Int`: `return hash(self.x, self.y)` in a `fn hash(self) -> Int` lets a type be a map key.",
         ),
+        "fields" => (
+            "fn fields(T) -> List[Field]",
+            "The fields of struct `T`, in order, worked out while compiling. Loop over them with `comptime for f in fields(T):` to read each one with `f.get(value)`.",
+        ),
+        "params" => ("fn params(H) -> List[Parameter]", "The parameters of function `H` (its name, or a type parameter bounded by `Function`), worked out while compiling."),
+        "attribute" => ("fn attribute(X, a) -> a?", "Attribute `@a(...)` written on type or function `X`, or `null`, worked out while compiling."),
+        "type_name" => ("fn type_name(T) -> String", "The name of type `T` as Tarn writes it (`List[Int]`, `User`), or the name of function `H`."),
+        "compile_error" => (
+            "fn compile_error(message: String, at = x)",
+            "Stop compiling with an error. In code compiled only in some cases (the branch a `comptime if` picks), it's reported when that code is compiled; in compile-time code, when it runs. `at` points the error at an attribute, field or parameter.",
+        ),
         _ => return None,
     })
 }
 
-pub const BUILTIN_FUNCTIONS: &[&str] = &["print", "input", "args", "panic", "assert", "sqrt", "exit", "hash", "spawn"];
+pub const BUILTIN_FUNCTIONS: &[&str] = &["print", "input", "args", "panic", "assert", "sqrt", "exit", "hash", "spawn", "fields", "params", "attribute", "type_name", "compile_error"];
 
 pub const KEYWORDS: &[&str] = &[
     "fn", "val", "var", "if", "elif", "else", "while", "for", "in", "break", "continue", "return", "pass", "struct", "enum",
-    "match", "case", "import", "true", "false", "and", "or", "not", "null",
+    "match", "case", "import", "true", "false", "and", "or", "not", "null", "comptime",
 ];
 
 pub const BUILTIN_TYPES: &[(&str, &str)] = &[

@@ -180,6 +180,8 @@ fn calls_in(stmts: &[TStmt], out: &mut Vec<(FuncId, Span)>) {
                     calls_in(&a.body, out);
                 }
             }
+            TStmt::Block(b) => calls_in(b, out),
+            TStmt::Unrolled(iters) => iters.iter().for_each(|b| calls_in(b, out)),
             TStmt::Break | TStmt::Continue | TStmt::Return(None) => {}
         }
     }
@@ -241,7 +243,7 @@ fn calls_in_expr(e: &TExpr, out: &mut Vec<(FuncId, Span)>) {
             calls_in(stmts, out);
             calls_in_expr(e, out);
         }
-        TExprKind::Sync(_, _, args) => args.iter().for_each(|a| calls_in_expr(a, out)),
+        TExprKind::Sync(_, _, args) | TExprKind::Meta(_, args) => args.iter().for_each(|a| calls_in_expr(a, out)),
         TExprKind::Match(x, arms) => {
             calls_in_expr(x, out);
             for a in arms {
@@ -488,7 +490,10 @@ impl Checker {
         let name = if base.starts_with('(') { format!("({})", shown.join(", ")) } else { format!("{base}[{}]", shown.join(", ")) };
         let has_param = args.iter().any(|a| a.has_param(&self.struct_has_param));
         let variants = self.structs[origin].variants.as_ref().map(|_| Vec::new());
-        self.structs.push(TStruct { name: name.clone(), fields: Vec::new(), variants, generic: has_param, closure: None, vtable: Vec::new(), drop: None });
+        // (One made while quietly checking generic code can have an unknown
+        // type argument: like a generic one, it's never compiled.)
+        let skipped = has_param || args.iter().any(Type::is_error);
+        self.structs.push(TStruct { name: name.clone(), fields: Vec::new(), variants, generic: skipped, closure: None, vtable: Vec::new(), drop: None });
         let is_iface = matches!(self.def_types[origin], Type::Iface(_));
         self.def_types.push(match self.def_types[origin] {
             Type::Enum(_, boxed) => Type::Enum(id, boxed),
@@ -627,7 +632,7 @@ impl Checker {
 
     /// Is `fid` a copy of generic code for concrete types (so it gets a body of its own)?
     pub(super) fn is_concrete_instance(&self, fid: FuncId) -> bool {
-        matches!(&self.funcs[fid].instance, Some((_, args)) if !args.iter().any(|a| a.has_param(&self.struct_has_param)))
+        matches!(&self.funcs[fid].instance, Some((_, args)) if !args.iter().any(|a| a.has_param(&self.struct_has_param) || a.is_error()))
     }
 
     /// Method `decl` of a generic type, as a method of `sid` (an instance of that type).
@@ -911,7 +916,12 @@ impl Checker {
                 }
                 let pat = params[idx].1.clone();
                 let known = self.known_type(&pat, tparams, &bound);
+                let item = match &pat {
+                    Type::Param(p) if self.ct.fn_item_params.contains(p) => self.fn_item_arg(&a.value),
+                    _ => None,
+                };
                 let t = match &a.value.kind {
+                    _ if item.is_some() => item.unwrap(),
                     // A lambda takes what's known of its type so far; what it returns can
                     // tell the rest (`map_all(xs, fn(x) -> x.to_string())` finds `U`).
                     ExprKind::Lambda(lam) if known.is_none() => {
@@ -940,6 +950,10 @@ impl Checker {
             self.infer_from_bounds(tparams, &mut bound);
         }
         if let Some(i) = bound.iter().position(|b| b.is_none()) {
+            // (An argument with an error already reported says nothing about the types.)
+            if checked.iter().flatten().any(|t| t.ty.is_error()) {
+                return None;
+            }
             let name = self.type_params[tparams[i]].name.clone();
             let mut d = Diagnostic::error(format!("cannot infer the type `{name}` for {what}"), span).with_primary(format!("which type is `{name}` here?"));
             if args.iter().any(|a| matches!(a.value.kind, ExprKind::Null)) {
@@ -1029,6 +1043,7 @@ impl Checker {
         let Some((targs, bound)) = inferred else {
             return fallback(&ret);
         };
+        self.check_fn_items(&tparams, &bound, what, span);
         // A function run while a Mutex is held can't share a `var` with the task holding it.
         if self.runs_while_locked(fid) {
             for a in &targs {
@@ -1060,17 +1075,22 @@ impl Checker {
         all.extend(recv);
         all.extend(targs);
         let ret = self.funcs[callee].ret.clone();
-        Self::mk(TExprKind::Call(callee, all), ret, span)
+        let call = Self::mk(TExprKind::Call(callee, all), ret, span);
+        self.comptime_call(call, name_span)
     }
 
     /// Build the copies of generic code that concrete code uses (and the
     /// ones those use, and so on), by checking each body again with the type
     /// parameters bound to concrete types.
-    pub(super) fn instantiate(&mut self, templates: &HashMap<FuncId, (&FnDecl, Option<StructId>, usize)>, out: &mut Vec<Option<TFunc>>) {
+    pub(super) fn instantiate(&mut self) {
         let mut built = 0;
         while let Some(fid) = self.queue.pop() {
             let (decl, args) = self.funcs[fid].instance.clone().unwrap();
-            let Some(&(ast, owner, ns)) = templates.get(&decl) else { continue };
+            let Some(ast) = self.ct.asts.get(&decl).copied() else { continue };
+            // (Compile-time code may have needed it already.)
+            if self.out.get(fid).is_some_and(Option::is_some) || self.ct.bodies.contains_key(&fid) {
+                continue;
+            }
             built += 1;
             if built > 50_000 || args.iter().any(|a| self.type_depth(a) > MAX_TYPE_DEPTH) {
                 if self.endless_fns.insert(decl) {
@@ -1083,7 +1103,18 @@ impl Checker {
                 }
                 return;
             }
-            self.ns = ns;
+            self.ns = ast.ns;
+            // SAFETY: see `comptime::AstFn`.
+            let decl_ast: &FnDecl = unsafe { &*ast.decl };
+            if !self.build_instance(fid, decl_ast, ast.owner) || self.error_count() > 0 {
+                return;
+            }
+        }
+    }
+
+    /// Build copy `fid` of generic code from its declaration's AST. False if it has errors.
+    pub(super) fn build_instance(&mut self, fid: FuncId, ast: &FnDecl, owner: Option<StructId>) -> bool {
+        {
             let marks = (
                 self.ide.hovers.len(),
                 self.ide.definitions.len(),
@@ -1093,7 +1124,9 @@ impl Checker {
                 self.pending_struct_hovers.len(),
             );
             let (ndiags, nobl) = (self.diags.len(), self.obligations.len());
+            self.ct.checking.push(fid);
             let tf = self.fn_body(ast, owner, fid);
+            self.ct.checking.pop();
             self.ide.hovers.truncate(marks.0);
             self.ide.definitions.truncate(marks.1);
             self.ide.expr_types.truncate(marks.2);
@@ -1102,22 +1135,61 @@ impl Checker {
             self.pending_struct_hovers.truncate(marks.5);
             // Warnings were reported on the generic code itself. Errors here
             // mean the generic checks missed something: show where.
-            let tps = self.funcs[decl].type_params.clone();
-            let shown: Vec<String> = tps.iter().zip(&args).map(|(p, t)| format!("`{}` = `{}`", self.type_params[*p].name, self.tn(t))).collect();
-            let note = format!("while compiling `{}` for {}", self.fn_display(decl), and_list(&shown));
-            let errors: Vec<Diagnostic> = self.diags.drain(ndiags..).filter(|d| d.is_error()).map(|d| d.with_note(note.clone())).collect();
+            let note = self.instance_note(fid);
+            // (And the copies that needed this one, up to the program's own code.)
+            let mut trail = Vec::new();
+            let mut at = fid;
+            for _ in 0..8 {
+                let Some(&(_, caller)) = self.ct.inst_origin.get(&at) else { break };
+                if caller == at || self.funcs[caller].instance.is_none() {
+                    break;
+                }
+                trail.push(self.instance_note(caller).replacen("while compiling", "needed by", 1));
+                at = caller;
+            }
+            // Where the program's own code needs this copy.
+            let site = self.cur_fn_site(fid);
+            let errors: Vec<Diagnostic> = self
+                .diags
+                .drain(ndiags..)
+                .filter(|d| d.is_error())
+                .map(|d| {
+                    let mut d = d.with_note(note.clone());
+                    for t in &trail {
+                        d = d.with_note(t.clone());
+                    }
+                    match site {
+                        Some(s) if s != d.span && !d.labels.iter().any(|(l, _)| *l == s) => d.with_label(s, "needed by this"),
+                        _ => d,
+                    }
+                })
+                .collect();
             let failed = !errors.is_empty();
             self.diags.extend(errors);
             self.record_calls(&tf.body, None);
             self.check_obligations(nobl);
-            put_func(out, fid, tf);
+            put_func(&mut self.out, fid, tf);
             for (lid, lf) in std::mem::take(&mut self.lambda_funcs) {
-                put_func(out, lid, lf);
+                put_func(&mut self.out, lid, lf);
             }
-            if failed || self.error_count() > 0 {
-                return;
-            }
+            !failed
         }
+    }
+
+    /// "while compiling `max` for `T` = `Int`", for copy `fid` of generic code.
+    pub(super) fn instance_note(&self, fid: FuncId) -> String {
+        let Some((decl, args)) = self.funcs[fid].instance.clone() else { return format!("while compiling `{}`", self.funcs[fid].name) };
+        let tps = self.funcs[decl].type_params.clone();
+        let shown: Vec<String> = tps.iter().zip(&args).map(|(p, t)| format!("`{}` = `{}`", self.type_params[*p].name, self.tn(t))).collect();
+        format!("while compiling `{}` for {}", self.fn_display(decl), and_list(&shown))
+    }
+
+    /// `user_site` for copy `fid`.
+    fn cur_fn_site(&mut self, fid: FuncId) -> Option<Span> {
+        let saved = self.cur_fn.replace(fid);
+        let s = self.user_site();
+        self.cur_fn = saved;
+        s
     }
 
     // ---------- needs ----------
@@ -1209,8 +1281,13 @@ impl Checker {
                 );
             }
             self.obligations.push(Obligation { fid, span, in_generic });
-            if in_generic.is_none() && self.is_concrete_instance(fid) && self.queued.insert(fid) {
-                self.queue.push(fid);
+            if in_generic.is_none() && self.is_concrete_instance(fid) {
+                if let Some(cur) = self.cur_fn {
+                    self.ct.inst_origin.entry(fid).or_insert((span, cur));
+                }
+                if self.queued.insert(fid) {
+                    self.queue.push(fid);
+                }
             }
         }
     }

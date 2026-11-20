@@ -333,6 +333,12 @@ impl Checker {
                     );
                     continue;
                 }
+                // `H: Function`: `H` stands for one particular named function.
+                if b.name.name == "Function" && b.module.is_none() && b.args.is_empty() && b.func.is_none() && !known(self) {
+                    self.ct.fn_item_params.insert(p);
+                    self.hover(b.span, "Function".into(), Some("A type parameter bounded by `Function` stands for one particular named function: the code can read its parameters (`params(H)`) and attributes (`attribute(H, a)`), and calls it directly.".into()));
+                    continue;
+                }
                 match self.resolve_type(b) {
                     Type::Iface(i) => {
                         if !bounds.iter().any(|(j, _)| *j == i) {

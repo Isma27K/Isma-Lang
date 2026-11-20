@@ -62,6 +62,8 @@ pub enum Tok {
     BangBang,
     /// `|` (alternatives in a `case` pattern)
     Pipe,
+    /// `@` (an attribute: `@get("/users/{id}")`)
+    At,
     Plus,
     Minus,
     Star,
@@ -153,6 +155,7 @@ impl fmt::Display for Tok {
             Tok::QuestionDot => "`?.`",
             Tok::BangBang => "`!!`",
             Tok::Pipe => "`|`",
+            Tok::At => "`@`",
             Tok::LParen => "`(`",
             Tok::RParen => "`)`",
             Tok::LBracket => "`[`",

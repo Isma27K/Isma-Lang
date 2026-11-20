@@ -11,14 +11,18 @@ use crate::span::Span;
 use crate::tast::*;
 use crate::types::*;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
+mod comptime;
 mod consts;
 mod generics;
 mod ifaces;
 mod lambdas;
 mod list_fns;
 mod maps;
+mod interp;
 mod iters;
+mod reflect;
 mod tasks;
 mod tuples;
 use consts::*;
@@ -392,6 +396,16 @@ pub struct Checker {
     /// The namespace of the prelude (`Result`, `Ok`, `Err`, `Unit`), whose
     /// types every file sees by their bare names.
     prelude_ns: Option<usize>,
+    // compile-time code (see `comptime.rs`, `reflect.rs`, `interp.rs`)
+    ct: comptime::CtState,
+    /// Checked bodies, by function id.
+    out: Vec<Option<TFunc>>,
+    /// Locals of the function being checked whose values are known while
+    /// compiling (`comptime val`, `comptime for`), and how often (and first
+    /// where) code that runs reads them; why the value can't reach run time.
+    ct_locals: HashMap<LocalId, interp::Value>,
+    ct_reads: HashMap<LocalId, (usize, Span)>,
+    ct_unkept: HashMap<LocalId, String>,
 }
 
 /// `Bytes`'s methods, for "no method" errors.
@@ -485,6 +499,11 @@ pub fn analyze(files: &[SourceFile]) -> Analysis {
         pending_bounds: Vec::new(),
         implements: Vec::new(),
         prelude_ns: files.iter().position(|f| f.kind == FileKind::Std && f.name == crate::stdlib::PRELUDE),
+        ct: Default::default(),
+        out: Vec::new(),
+        ct_locals: HashMap::new(),
+        ct_reads: HashMap::new(),
+        ct_unkept: HashMap::new(),
     };
     for (ns, f) in files.iter().enumerate().skip(1) {
         let doc = c.leading_comment(ns);
@@ -596,6 +615,10 @@ fn suggest<'a>(name: &str, candidates: impl Iterator<Item = &'a str>) -> Option<
 
 impl Checker {
     fn err(&mut self, d: Diagnostic) {
+        // (The copies of a `comptime for` body would repeat the same error.)
+        if self.diags.iter().rev().take(64).any(|x| x.span == d.span && x.message == d.message && x.is_error()) {
+            return;
+        }
         self.diags.push(d);
     }
 
@@ -617,6 +640,11 @@ impl Checker {
         while end > 0 {
             let prev_start = src[..end - 1].rfind('\n').map(|i| i + 1).unwrap_or(0);
             let line = src[prev_start..end - 1].trim();
+            // (Attributes sit between a declaration and its comment.)
+            if line.starts_with('@') && lines.is_empty() {
+                end = prev_start;
+                continue;
+            }
             if !line.starts_with('#') || line.starts_with("#!") {
                 break;
             }
@@ -775,6 +803,10 @@ impl Checker {
         let params = if s.instance { &s.type_args } else { &s.type_params };
         let title = if params.is_empty() || s.instance { s.name.clone() } else { format!("{}[{}]", s.name, params.join(", ")) };
         let method = |m: usize| replace_words(&self.ide.functions[m].signature, &s.type_params, if s.instance { &s.type_args } else { &s.type_params });
+        if s.attribute {
+            let fields: Vec<String> = s.fields.iter().map(|f| format!("{}: {}{}", f.name, f.ty, f.default.as_ref().map(|d| format!(" = {d}")).unwrap_or_default())).collect();
+            return if fields.is_empty() { format!("attribute {title}") } else { format!("attribute {title}({})", fields.join(", ")) };
+        }
         if s.iface {
             let mut out = format!("interface {title}:");
             for &m in &s.methods {
@@ -833,7 +865,8 @@ impl Checker {
         }
         for (span, sid) in std::mem::take(&mut self.pending_struct_hovers) {
             let code = self.struct_summary(sid);
-            self.hover(span, code, None);
+            let doc = self.ide.structs[self.struct_origin[sid]].doc.clone();
+            self.hover(span, code, doc);
         }
     }
 
@@ -859,6 +892,7 @@ impl Checker {
     /// Read local `id` (declared at `decl`) at `span`: marks it used, and
     /// applies a smart cast if one holds here.
     fn read_local(&mut self, id: LocalId, decl: Span, span: Span) -> TExpr {
+        self.ct_read(id, span);
         let ty = self.locals[id].ty.clone();
         let smart = ty.is_nullable() && self.is_smart_cast(&NullPath::local(id));
         self.local_use(id, decl, span, smart);
@@ -929,11 +963,15 @@ impl Checker {
                         (&e.name, end, Some(e.variants.iter().any(|v| !v.fields.is_empty())), &e.type_params[..], false)
                     }
                     Item::Interface(i) => (&i.name, Some(i.span.end), None, &i.type_params[..], true),
+                    Item::Attribute(a) => (&a.name, Some(a.span.end), None, &[][..], false),
                     _ => continue,
                 };
                 let name = &name_id.name;
+                let is_attr = matches!(item, Item::Attribute(_));
                 let what = if iface {
                     "interface"
+                } else if is_attr {
+                    "attribute"
                 } else if enum_boxed.is_some() {
                     "enum"
                 } else {
@@ -999,10 +1037,14 @@ impl Checker {
                     type_args: Vec::new(),
                     instance: false,
                     iface,
+                    attribute: is_attr,
                     inherited: Vec::new(),
                 });
                 self.field_spans.push(Vec::new());
                 self.pending_struct_hovers.push((name_id.span, id));
+                if is_attr {
+                    self.ct.attr_decls.insert(id);
+                }
             }
         }
 
@@ -1036,6 +1078,12 @@ impl Checker {
                 match item {
                     Item::Import(_) => {}
                     Item::Const(c) => self.declare_const(c, ns),
+                    Item::Attribute(a) => {
+                        let Some(&sid) = self.struct_index.get(&(ns, a.name.name.clone())) else { continue };
+                        if self.struct_spans[sid] == a.name.span {
+                            self.declare_attribute(sid, a, ns, &mut bodies);
+                        }
+                    }
                     Item::Interface(i) => {
                         let Some(&sid) = self.struct_index.get(&(ns, i.name.name.clone())) else { continue };
                         if self.struct_spans[sid] == i.name.span {
@@ -1049,6 +1097,7 @@ impl Checker {
                             continue; // duplicate definition already reported
                         }
                         self.type_env = self.struct_env(sid);
+                        self.collect_attrs(AttrTarget::Type(sid), &s.attrs, ns);
                         let mut seen: HashMap<&str, Span> = HashMap::new();
                         let mut fields = Vec::new();
                         let mut defaults: Vec<(usize, &FnDecl)> = Vec::new();
@@ -1083,6 +1132,7 @@ impl Checker {
                                 default,
                             });
                             self.field_spans[sid].push(f.name.span);
+                            self.collect_attrs(AttrTarget::Field(sid, fields.len()), &f.attrs, ns);
                             let kw = if f.mutable { "var" } else { "val" };
                             let sname = self.structs[sid].name.clone();
                             self.hover(f.name.span, format!("{kw} {}: {shown}", f.name.name), Some(format!("field of `{sname}`")));
@@ -1114,6 +1164,7 @@ impl Checker {
                             );
                         }
                         let ename = self.structs[sid].name.clone();
+                        self.collect_attrs(AttrTarget::Type(sid), &e.attrs, ns);
                         self.type_env = self.struct_env(sid);
                         let mut seen: HashMap<&str, Span> = HashMap::new();
                         let mut variants = Vec::new();
@@ -1196,6 +1247,7 @@ impl Checker {
                         }
                         let fid = self.declare_fn(f, None);
                         self.func_index.insert((ns, name.clone()), fid);
+                        self.collect_fn_attrs(f, fid, ns);
                         bodies.push((f, None, ns, fid));
                     }
                 }
@@ -1222,6 +1274,11 @@ impl Checker {
         self.resolve_name_imports(&mut pending, true);
         self.import_conflicts();
         self.eval_consts(units);
+        // Every function's AST, for compile-time code that needs a body before its turn.
+        for &(decl, owner, ns, fid) in &bodies {
+            self.ct.asts.insert(fid, comptime::AstFn { decl: decl as *const FnDecl, owner, ns });
+        }
+        self.check_attr_uses();
 
         // `main` checks. A file without `main` is fine here: it's a module.
         // (Building or running one is refused by the driver, see `crate::missing_main`.)
@@ -1235,22 +1292,24 @@ impl Checker {
 
         // Pass 3: bodies. Generic code is checked once, with its type
         // parameters as they are; what it needs from them is collected.
-        let mut out: Vec<Option<TFunc>> = Vec::new();
-        let mut templates: HashMap<FuncId, (&FnDecl, Option<StructId>, usize)> = HashMap::new();
         for &(decl, owner, ns, fid) in &bodies {
+            // (Compile-time code may have needed it already.)
+            if self.out.get(fid).is_some_and(Option::is_some) || self.ct.bodies.contains_key(&fid) {
+                continue;
+            }
             self.ns = ns;
             let generic = !self.funcs[fid].type_params.is_empty();
             self.cur_generic = generic.then_some(fid);
+            self.ct.checking.push(fid);
             let tf = self.fn_body(decl, owner, fid);
+            self.ct.checking.pop();
             self.cur_generic = None;
             self.record_calls(&tf.body, generic.then_some(fid));
-            if generic {
-                templates.insert(fid, (decl, owner, ns));
-            } else {
-                put_func(&mut out, fid, tf);
+            if !generic {
+                put_func(&mut self.out, fid, tf);
             }
             for (lid, lf) in std::mem::take(&mut self.lambda_funcs) {
-                put_func(&mut out, lid, lf);
+                put_func(&mut self.out, lid, lf);
             }
         }
         self.ns = 0;
@@ -1260,9 +1319,24 @@ impl Checker {
         self.check_obligations(0);
         self.generic_docs();
         if self.error_count() == 0 {
-            self.instantiate(&templates, &mut out);
+            self.instantiate();
         }
         self.ns = 0;
+        self.finish_attrs();
+        // The bodies the interpreter borrowed go back; compile-time-only code is never compiled to run.
+        for (fid, b) in std::mem::take(&mut self.ct.bodies) {
+            let tf = Rc::try_unwrap(b).expect("the interpreter keeps no bodies");
+            put_func(&mut self.out, fid, tf);
+        }
+        let only: Vec<FuncId> = self.funcs.iter().enumerate().filter(|(f, _)| self.ct.comptime_only.contains(f) || self.ct.comptime_fns.contains(&self.fn_decl_of(*f))).map(|(f, _)| f).collect();
+        for f in only {
+            if let Some(slot) = self.out.get_mut(f) {
+                *slot = None;
+            }
+        }
+        // (The ASTs belong to the caller: no pointer to them outlives this function.)
+        self.ct.asts.clear();
+        let mut out = std::mem::take(&mut self.out);
         // A cycle is freed by the cycle collector all at once: there's no
         // right order to run `drop`s in, so types with one can't be on a cycle.
         if self.error_count() == 0 {
@@ -1592,12 +1666,14 @@ impl Checker {
                 let fid = self.declare_fn(m, Some(sid));
                 self.statics.insert((sid, m.name.name.clone()), fid);
                 self.ide.structs[sid].methods.push(fid);
+                self.collect_fn_attrs(m, fid, ns);
                 bodies.push((m, Some(sid), ns, fid));
                 continue;
             }
             let fid = self.declare_fn(m, Some(sid));
             self.methods.insert((sid, m.name.name.clone()), fid);
             self.ide.structs[sid].methods.push(fid);
+            self.collect_fn_attrs(m, fid, ns);
             bodies.push((m, Some(sid), ns, fid));
             if m.name.name == "drop" {
                 self.declare_drop(sid, m, fid);
@@ -1892,9 +1968,21 @@ impl Checker {
             None => Type::Unit,
         };
         self.type_env.clear();
+        // (`fn columns[T]()` reading `fields(T)` uses `T` in its body: called as `columns[User]()`.)
+        let body_text = {
+            let span = Span { start: f.sig_span.end, end: fn_full_span(f).end };
+            self.ns_sources.iter().rev().find(|(b, _)| *b <= span.start).and_then(|(b, src)| src.get((span.start - b) as usize..(span.end - b) as usize)).unwrap_or("").to_string()
+        };
+        let in_body = |name: &str| {
+            body_text.match_indices(name).any(|(i, _)| {
+                let before = body_text[..i].chars().next_back();
+                let after = body_text[i + name.len()..].chars().next();
+                !before.is_some_and(|c| c.is_alphanumeric() || c == '_') && !after.is_some_and(|c| c.is_alphanumeric() || c == '_')
+            })
+        };
         for &p in &own {
             let valid = !RESERVED_TYPES.contains(&self.type_params[p].name.as_str());
-            if valid && !params.iter().any(|(_, t)| self.mentions(t, p)) && !self.mentions(&ret, p) {
+            if valid && !params.iter().any(|(_, t)| self.mentions(t, p)) && !self.mentions(&ret, p) && !in_body(&self.type_params[p].name) {
                 let name = self.type_params[p].name.clone();
                 self.diags.push(
                     Diagnostic::warning(format!("type parameter `{name}` is never used"), self.type_params[p].span)
@@ -1949,6 +2037,11 @@ impl Checker {
         }
         let instance = (!all.is_empty()).then(|| (id, all.iter().map(|p| Type::Param(*p)).collect()));
         self.funcs.push(FuncSig { name, symbol, params, ret, span: f.name.span, type_params: all, tparams: picked, instance });
+        let spans: Vec<Span> = has_self.then_some(f.self_param.unwrap_or(f.name.span)).into_iter().chain(f.params.iter().map(|p| p.name.span)).collect();
+        self.ct.param_spans.insert(id, spans);
+        if f.comptime {
+            self.ct.comptime_fns.insert(id);
+        }
         self.bound_needs(id);
         id
     }
@@ -2148,7 +2241,13 @@ impl Checker {
             self.scopes[0].insert(name.clone(), LocalBinding { id, mutable: false, span });
             params.push(id);
         }
+        let comptime = self.ct.comptime_fns.contains(&self.fn_decl_of(fid));
+        self.ct.mode += comptime as usize;
         let mut body = self.block(&f.body, false);
+        self.ct.mode -= comptime as usize;
+        self.ct_locals.clear();
+        self.ct_reads.clear();
+        self.ct_unkept.clear();
         self.apply_cells(&mut body);
         if self.ret_ty != Type::Unit && !self.ret_ty.is_error() && !block_diverges(&body) {
             let rt = self.tn(&self.ret_ty);
@@ -2504,6 +2603,7 @@ impl Checker {
         if new_scope {
             self.scopes.pop();
         }
+        self.drop_unread_ct_lets(&mut out);
         out
     }
 
@@ -2546,6 +2646,7 @@ impl Checker {
 
     fn stmt(&mut self, s: &Stmt) -> Option<TStmt> {
         Some(match &s.kind {
+            StmtKind::Comptime(c) => return self.comptime_stmt(c, s.span),
             StmtKind::Let { mutable, name, ty, value } => {
                 let declared = ty.as_ref().map(|t| self.resolve_type(t));
                 let mut v = self.expr(value, declared.as_ref());
@@ -4633,10 +4734,27 @@ impl Checker {
             }
             ExprKind::Elvis(l, r) => self.elvis(l, r, span, expected),
             ExprKind::Try(inner) => {
-                let t = self.expr(inner, None);
+                // `decode(x)?` where an `Int` is expected: `decode` gives a `Result[Int, E]`.
+                let hint = match (expected, self.result_sid(&self.ret_ty)) {
+                    (Some(want), Some(rid)) if !want.is_error() && self.in_lambda_expr == 0 => {
+                        let err = self.struct_args[rid][1].clone();
+                        let origin = self.struct_origin[rid];
+                        self.struct_instance(origin, vec![want.clone(), err]).map(|i| Type::Enum(i, true))
+                    }
+                    _ => None,
+                };
+                let t = self.expr(inner, hint.as_ref());
                 self.try_value(t, inner.span, span)
             }
             ExprKind::Lambda(lam) => self.lambda(lam, span, expected, &[]),
+            ExprKind::Spread { value, .. } => {
+                self.err(
+                    Diagnostic::error("a spread (`... for x in list`) only works as an argument", span)
+                        .with_note("it stands for one argument per element: `T(decode(f) for f in fields(T))` builds a struct, `h(arg(p) for p in params(H))` calls a function passed as `[H: Function]`"),
+                );
+                let _ = self.expr(value, None);
+                Self::error_expr(span)
+            }
             ExprKind::Jump(j) => {
                 if self.in_lambda_expr > 0 {
                     let kw = match j {
@@ -4762,6 +4880,24 @@ impl Checker {
                     Some(idx) => {
                         let ty = self.structs[sid].fields[idx].ty.clone();
                         self.field_use(sid, idx, field.span);
+                        // `f.name` of a `Field` known while compiling: the name itself.
+                        if self.ct.mode == 0
+                            && self.is_descriptor(&t.ty)
+                            && let TExprKind::Local(id) = t.kind
+                            && let Some(v) = self.ct_locals.get(&id).cloned()
+                        {
+                            let info = match v {
+                                interp::Value::Field(s, i) => Some(self.field_info(s, i)),
+                                interp::Value::Param(f, i) => Some(self.param_info(f, i)),
+                                _ => None,
+                            };
+                            if let Some(info) = info
+                                && let Ok(lit) = self.materialize(&info[idx], &ty, span)
+                            {
+                                self.unread(&t);
+                                return lit;
+                            }
+                        }
                         self.narrow(Self::mk(TExprKind::Field(Box::new(t), sid, idx), ty, span))
                     }
                     // `users.list`: a method, bound to this value.
@@ -5145,6 +5281,10 @@ impl Checker {
                     let f = self.expr(callee, None);
                     return self.call_value(f, args, span);
                 }
+                // `T(...)`: built from fields in each copy of the generic code.
+                if let Some(t) = self.type_env.iter().rev().find(|(p, _)| p == name).map(|(_, t)| t.clone()) {
+                    return self.param_construct(name, t, callee.span, args, explicit, expected, span);
+                }
                 if let Some(fid) = self.visible_func(name) {
                     let code = self.ide.functions[fid].signature.clone();
                     let fns = self.ide.functions[fid].ns;
@@ -5177,6 +5317,11 @@ impl Checker {
                 }
                 if self.ns_kinds[self.ns] == FileKind::Std && crate::stdlib::is_intrinsic(name) {
                     return self.intrinsic_call(name, args, span);
+                }
+                if explicit.is_none()
+                    && let Some(t) = self.reflect_call(name, callee.span, args, span)
+                {
+                    return t;
                 }
                 if BUILTINS.contains(&name.as_str()) {
                     if let Some((code, doc)) = builtin_function(name) {
@@ -5264,7 +5409,7 @@ impl Checker {
     fn construct(&mut self, sid: StructId, name: &str, name_span: Span, args: &[Arg], explicit: Option<&[TypeExpr]>, expected: Option<&Type>, span: Span) -> TExpr {
         self.pending_struct_hovers.push((name_span, sid));
         self.ide.definitions.push((name_span, self.struct_spans[sid]));
-        let sns = self.struct_ns[sid];
+        let sns = if self.ct.attr_decls.contains(&sid) { self.ns } else { self.struct_ns[sid] };
         let refuse = |c: &mut Checker, d: Diagnostic| {
             c.err(d);
             for a in args {
@@ -5288,8 +5433,10 @@ impl Checker {
                     .with_help(format!("build a variant, e.g. `{name}.{first}(...)`")),
             );
         }
+        let spread = args.iter().any(|a| matches!(a.value.kind, ExprKind::Spread { .. }));
         let private: Vec<String> = self.structs[sid].fields.iter().filter(|f| is_private(&f.name)).map(|f| format!("`{}`", f.name)).collect();
-        if sns != self.ns && (self.ns_kinds[sns] == FileKind::Std || !private.is_empty()) {
+        // (Built from its fields by reflection, a struct's private fields are given too.)
+        if sns != self.ns && (self.ns_kinds[sns] == FileKind::Std || !private.is_empty() && !spread) {
             let module = self.ns_names[sns].clone();
             let full = self.structs[sid].name.clone();
             let ctor_fns: Vec<String> = self
@@ -5314,6 +5461,21 @@ impl Checker {
                 d = d.with_help(format!("use {}", ctor_fns.join(", ")));
             }
             return refuse(self, d);
+        }
+        if spread {
+            // `Box[Int](... for f in fields(Box[Int]))`: the type arguments are written.
+            if let Some(ex) = explicit
+                && !self.struct_params[sid].is_empty()
+            {
+                let tys: Vec<Type> = ex.iter().map(|t| self.resolve_type(t)).collect();
+                if tys.len() == self.struct_params[sid].len()
+                    && !tys.iter().any(Type::is_error)
+                    && let Some(inst) = self.struct_instance(sid, tys)
+                {
+                    return self.spread_construct(inst, name, args, span);
+                }
+            }
+            return self.spread_construct(sid, name, args, span);
         }
         let params: Vec<(String, Type)> = self.structs[sid].fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect();
         let what = format!("struct `{name}`");
@@ -5590,6 +5752,9 @@ impl Checker {
 
     #[allow(clippy::too_many_arguments)]
     fn method_call(&mut self, recv: TExpr, method: &Ident, args: &[Arg], explicit: Option<&[TypeExpr]>, expected: Option<&Type>, span: Span) -> TExpr {
+        if explicit.is_none() && self.descriptor_method(&recv, method) {
+            return self.descriptor_call(recv, method, args, span);
+        }
         let m = method.name.as_str();
         let rty = recv.ty.clone();
         if explicit.is_some() && !matches!(rty, Type::Struct(_) | Type::Enum(..)) {
@@ -5917,6 +6082,23 @@ fn lambda_assigned_names(body: &[Stmt]) -> HashSet<String> {
                         stmts(&a.body, inside, out);
                     }
                 }
+                StmtKind::Comptime(c) => match &**c {
+                    ComptimeStmt::Let { value, .. } => expr(value, inside, out),
+                    ComptimeStmt::If { branches, else_block } => {
+                        for (c, b) in branches {
+                            expr(c, inside, out);
+                            stmts(b, inside, out);
+                        }
+                        if let Some(b) = else_block {
+                            stmts(b, inside, out);
+                        }
+                    }
+                    ComptimeStmt::For { iter, body, .. } => {
+                        expr(iter, inside, out);
+                        stmts(body, inside, out);
+                    }
+                    ComptimeStmt::Match { arms, .. } => arms.iter().for_each(|a| stmts(&a.body, inside, out)),
+                },
                 StmtKind::Break | StmtKind::Continue | StmtKind::Return(None) | StmtKind::Pass => {}
             }
         }
@@ -5959,6 +6141,13 @@ fn lambda_assigned_names(body: &[Stmt]) -> HashSet<String> {
                     stmts(&a.body, inside, out);
                 }
             }
+            ExprKind::Spread { value, iter, cond, .. } => {
+                expr(value, inside, out);
+                expr(iter, inside, out);
+                if let Some(c) = cond {
+                    expr(c, inside, out);
+                }
+            }
             _ => {}
         }
     }
@@ -5997,6 +6186,9 @@ fn stmt_diverges(s: &TStmt) -> bool {
         TStmt::While { cond, body } => matches!(cond.kind, TExprKind::Bool(true)) && !contains_break(body),
         // Matches are exhaustive: one of the cases always runs.
         TStmt::Match { arms, .. } => !arms.is_empty() && arms.iter().all(|a| block_diverges(&a.body)),
+        TStmt::Block(b) => block_diverges(b),
+        // A copy that never finishes is reached, unless a `break` leaves before it.
+        TStmt::Unrolled(iters) => iters.iter().any(|b| block_diverges(b)) && !iters.iter().any(|b| contains_break(b)),
         _ => false,
     }
 }
@@ -6009,6 +6201,7 @@ fn ends_flow(s: &TStmt) -> bool {
             branches.iter().all(|(_, b)| b.iter().any(ends_flow)) && eb.iter().any(ends_flow)
         }
         TStmt::Match { arms, .. } => !arms.is_empty() && arms.iter().all(|a| a.body.iter().any(ends_flow)),
+        TStmt::Block(b) => b.iter().any(ends_flow),
         other => stmt_diverges(other),
     }
 }
@@ -6039,7 +6232,9 @@ fn contains_break(stmts: &[TStmt]) -> bool {
         TStmt::Match { scrutinee, arms } => {
             expr_breaks(scrutinee) || arms.iter().any(|a| a.guard.as_ref().is_some_and(expr_breaks) || contains_break(&a.body))
         }
-        TStmt::Continue | TStmt::Return(None) => false,
+        TStmt::Block(b) => contains_break(b),
+        // (A `break` in a `comptime for` leaves that loop.)
+        TStmt::Continue | TStmt::Return(None) | TStmt::Unrolled(_) => false,
     })
 }
 
@@ -6073,6 +6268,6 @@ fn expr_breaks(e: &TExpr) -> bool {
         TExprKind::Match(x, arms) => {
             expr_breaks(x) || arms.iter().any(|a| a.guard.as_ref().is_some_and(expr_breaks) || contains_break(&a.body) || a.value.as_ref().is_some_and(expr_breaks))
         }
-        TExprKind::Sync(_, _, args) => any(args),
+        TExprKind::Sync(_, _, args) | TExprKind::Meta(_, args) => any(args),
     }
 }

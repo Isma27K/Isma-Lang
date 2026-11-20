@@ -1,0 +1,9 @@
+# expect-error: `id` is generic: it can't be passed as a `Function`
+fn id[T](x: T) -> T:
+    return x
+
+fn names[H: Function](h: H) -> Int:
+    return params(H).len()
+
+fn main():
+    print(names(id))

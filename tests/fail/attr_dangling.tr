@@ -1,0 +1,8 @@
+# expect-error: an attribute must be followed by a function, struct, enum or field
+attribute skip
+
+@skip
+val x = 1
+
+fn main():
+    pass

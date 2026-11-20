@@ -1,0 +1,65 @@
+# The compiler's interpreter gives exactly what the compiled code gives:
+# every result here is computed both ways and compared.
+
+fn floats() -> List[String]:
+    val out: List[String] = []
+    for x in [0.1, 3.0, 1e16, 1e15, 1.5e-7, 0.0001, 0.00001, 123456789.125, -2.5, 1.0 / 3.0, 2.0 / 3.0, 1e300 * 1e10, 0.0 / 0.0 - 0.0]:
+        out.push(x.to_string())
+    out.push((7.5 % 2.0).to_string())
+    out.push(sqrt(2.0).to_string())
+    return out
+
+fn strings() -> List[String]:
+    val s = "  Hello, Wörld! héllo  "
+    val out: List[String] = [s.trim(), s.trim_start(), s.trim_end(), s.upper(), s.lower()]
+    out.push(s.replace("l", "L"))
+    out.push(s.split(",").join("|"))
+    out.push(s.split().join("|"))
+    out.push("a\nb\r\nc\n".lines().join("|"))
+    out.push(f"{s.find("l")} {s.rfind("l")} {s.find("zz")} {s.count("l")} {s.count("")}")
+    out.push(f"{s.len()} {s.char_count()} {s.contains("Wö")} {s.starts_with("  H")} {s.ends_with("o ")}")
+    out.push(s.chars().join("."))
+    out.push("ab".repeat(3) + "x".pad_start(4, "-") + "y".pad_end(3) + "|")
+    out.push(s.substring(2, 7))
+    out.push(f"{"42".to_int() + " 7 ".to_int()} {"x".to_int_or_null()} {" 2.5".to_float()} {"yes".to_bool_or_null()} {"maybe".to_bool_or_null()}")
+    out.push(f"{["a\"b", "c\\d"]}")
+    return out
+
+fn collections() -> List[String]:
+    val xs = [5, 3, 9, 1]
+    xs.sort()
+    xs.insert(1, 4)
+    val popped = xs.pop()
+    xs.reverse()
+    val m: Map[String, Int] = {"b": 2, "a": 1}
+    m["c"] = 3
+    m.remove("a")
+    m["b"] += 10
+    val ys = xs.map(fn(x) -> x * 10).filter(fn(x) -> x > 20)
+    val by_len = ["ccc", "a", "bb"]
+    by_len.sort_by(fn(w) -> w.len())
+    return [f"{xs} {popped} {xs.index_of(4)} {3 in xs}", f"{m} {m.keys()} {m.get("zz", 0)}", f"{ys} {ys.fold(0, fn(a, b) -> a + b)} {ys.min_by(fn(x) -> -x)}", f"{by_len}"]
+
+fn ints() -> List[String]:
+    return [f"{-7 / 2} {-7 % 2} {7 / -2} {9223372036854775807 - 1}", f"{(2.9).to_int()} {(-2.9).to_int()} {(1e30).to_int()} {7.to_float()}"]
+
+fn main():
+    comptime val f1 = floats()
+    comptime val s1 = strings()
+    comptime val c1 = collections()
+    comptime val i1 = ints()
+    val f2 = floats()
+    val s2 = strings()
+    val c2 = collections()
+    val i2 = ints()
+    for (name, a, b) in [("floats", f1, f2), ("strings", s1, s2), ("collections", c1, c2), ("ints", i1, i2)]:
+        var same = a.len() == b.len()
+        for i, x in a:
+            if i < b.len() and x != b[i]:
+                same = false
+                print(f"{name} differ: {x} (compiling) vs {b[i]} (running)")
+        print(f"{name}: {same}")
+    print(f1)
+    print(s1)
+    print(c1)
+    print(i1)

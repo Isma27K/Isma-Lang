@@ -1,0 +1,7 @@
+# expect-error: panic while compiling: index 5 out of bounds for list of length 2
+fn pick(n: Int) -> Int:
+    return [1, 2][n]
+
+fn main():
+    comptime val x = pick(5)
+    print(x)

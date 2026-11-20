@@ -1,0 +1,13 @@
+number 1
+number 2.5
+text 3
+nothing
+maybe text 1
+ints 2
+list of 1
+map ["k"]
+pair number 1 and text 1
+box of box of number 3
+named cat
+size Large
+other Bool

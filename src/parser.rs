@@ -174,6 +174,28 @@ impl Parser {
                     Ok(f) => items.push(Item::Fn(f)),
                     Err(()) => self.synchronize(),
                 },
+                // `@get("/")` lines, then what they're on.
+                Tok::At => match self.attributed_item() {
+                    Ok(Some(item)) => items.push(item),
+                    Ok(None) => {}
+                    Err(()) => self.synchronize(),
+                },
+                // `comptime fn`: only a keyword before `fn`.
+                Tok::Ident(n) if n == "comptime" && matches!(self.peek_nth(1), Tok::Fn) => {
+                    self.bump();
+                    match self.fn_decl() {
+                        Ok(mut f) => {
+                            f.comptime = true;
+                            items.push(Item::Fn(f));
+                        }
+                        Err(()) => self.synchronize(),
+                    }
+                }
+                // `attribute` is only a keyword here, before a name.
+                Tok::Ident(n) if n == "attribute" && matches!(self.peek_nth(1), Tok::Ident(_)) => match self.attribute_decl() {
+                    Ok(a) => items.push(Item::Attribute(a)),
+                    Err(()) => self.synchronize(),
+                },
                 Tok::Struct => match self.struct_decl() {
                     Ok(s) => items.push(Item::Struct(s)),
                     Err(()) => self.synchronize(),
@@ -222,8 +244,8 @@ impl Parser {
                     let span = self.span();
                     let found = self.peek().clone();
                     self.diags.push(
-                        Diagnostic::error(format!("expected `fn`, `struct`, `enum`, `interface` or `val`, found {found}"), span)
-                            .with_note("only functions, structs, enums, interfaces and constants (`val`) may appear at the top level")
+                        Diagnostic::error(format!("expected `fn`, `struct`, `enum`, `interface`, `attribute` or `val`, found {found}"), span)
+                            .with_note("only functions, structs, enums, interfaces, attributes and constants (`val`) may appear at the top level")
                             .with_help("put statements inside `fn main():`"),
                     );
                     self.synchronize();
@@ -231,6 +253,105 @@ impl Parser {
             }
         }
         Program { items }
+    }
+
+    // ---------- attributes ----------
+
+    /// `@name`, `@name(args)` or `@module.name(args)`.
+    fn attribute_use(&mut self) -> PResult<Attribute> {
+        let start = self.expect(Tok::At)?;
+        let first = self.expect_ident("an attribute name after `@`")?;
+        let (module, name) = if self.eat(&Tok::Dot) { (Some(first), self.expect_ident("an attribute name")?) } else { (None, first) };
+        let args = if self.at(&Tok::LParen) {
+            self.bump();
+            self.call_args()?
+        } else {
+            Vec::new()
+        };
+        Ok(Attribute { module, name, args, span: start.merge(self.prev_span) })
+    }
+
+    /// Attribute lines above a declaration, one per line.
+    fn attribute_lines(&mut self) -> PResult<Vec<Attribute>> {
+        let mut attrs = Vec::new();
+        while self.at(&Tok::At) {
+            attrs.push(self.attribute_use()?);
+            self.expect_newline()?;
+            while self.eat(&Tok::Newline) {}
+        }
+        Ok(attrs)
+    }
+
+    fn misplaced_attributes<T>(&mut self, attrs: &[Attribute]) -> PResult<T> {
+        let span = attrs.first().map(|a| a.span).unwrap_or(self.span());
+        let found = self.peek().clone();
+        self.error_diag(
+            Diagnostic::error(format!("an attribute must be followed by a function, struct, enum or field, found {found}"), span)
+                .with_primary("this attribute isn't on anything")
+                .with_note("attributes go on the lines just above a declaration (or before a parameter's name)"),
+        )
+    }
+
+    /// `@get("/")` lines at the top level, and the declaration under them.
+    fn attributed_item(&mut self) -> PResult<Option<Item>> {
+        let attrs = self.attribute_lines()?;
+        let comptime = matches!(self.peek(), Tok::Ident(n) if n == "comptime") && matches!(self.peek_nth(1), Tok::Fn);
+        if comptime {
+            self.bump();
+        }
+        match self.peek() {
+            Tok::Fn => {
+                let mut f = self.fn_decl()?;
+                f.attrs = attrs;
+                f.comptime = comptime;
+                Ok(Some(Item::Fn(f)))
+            }
+            Tok::Struct => {
+                let mut s = self.struct_decl()?;
+                s.attrs = attrs;
+                Ok(Some(Item::Struct(s)))
+            }
+            Tok::Enum => {
+                let mut e = self.enum_decl()?;
+                e.attrs = attrs;
+                Ok(Some(Item::Enum(e)))
+            }
+            _ => self.misplaced_attributes(&attrs),
+        }
+    }
+
+    /// `attribute get(path: String)`, or `attribute skip`.
+    fn attribute_decl(&mut self) -> PResult<AttributeDecl> {
+        let start = self.bump().span; // `attribute`
+        let name = self.expect_ident("attribute name")?;
+        let mut fields = Vec::new();
+        if self.eat(&Tok::LParen) {
+            while !self.at(&Tok::RParen) {
+                if matches!(self.peek(), Tok::Var | Tok::Val) {
+                    let span = self.span();
+                    return self.error_diag(
+                        Diagnostic::error("an attribute's fields are always immutable", span)
+                            .with_primary("remove this")
+                            .with_note("an attribute's value is worked out while compiling and never changes"),
+                    );
+                }
+                fields.push(self.field_head(false)?);
+                if !self.eat(&Tok::Comma) {
+                    break;
+                }
+            }
+            self.expect(Tok::RParen)?;
+        }
+        if self.at(&Tok::Colon) {
+            let span = self.span();
+            return self.error_diag(
+                Diagnostic::error("an attribute has no body", span)
+                    .with_help(format!("list its fields in parentheses: `attribute {}(path: String)`", name.name)),
+            );
+        }
+        let span = start.merge(self.prev_span);
+        self.expect_newline()?;
+        Ok(AttributeDecl { name, fields, span })
     }
 
     /// `import time`, `import shapes.circle`, `import geometry as geo`
@@ -445,6 +566,11 @@ impl Parser {
             {
                 self_param = Some(self.bump().span);
             } else {
+                // `@query page: Int`
+                let mut attrs = Vec::new();
+                while self.at(&Tok::At) {
+                    attrs.push(self.attribute_use()?);
+                }
                 let pname = self.expect_ident("parameter name")?;
                 if !self.at(&Tok::Colon) {
                     let span = pname.span;
@@ -455,7 +581,7 @@ impl Parser {
                 }
                 self.bump();
                 let ty = self.type_expr()?;
-                params.push(Param { name: pname, ty });
+                params.push(Param { name: pname, ty, attrs });
             }
             if !self.eat(&Tok::Comma) {
                 break;
@@ -464,7 +590,7 @@ impl Parser {
         self.expect(Tok::RParen)?;
         let ret = if self.eat(&Tok::Arrow) { Some(self.type_expr()?) } else { None };
         let sig_span = start.merge(self.prev_span);
-        Ok(FnDecl { name, type_params, self_param, params, ret, body: Vec::new(), sig_span })
+        Ok(FnDecl { name, type_params, self_param, params, ret, body: Vec::new(), sig_span, attrs: Vec::new(), comptime: false })
     }
 
     /// `interface Shape:` and its method signatures, one per line.
@@ -569,6 +695,42 @@ impl Parser {
                     Ok(f) => methods.push(f),
                     Err(()) => self.synchronize(),
                 },
+                Tok::Ident(n) if n == "comptime" && matches!(self.peek_nth(1), Tok::Fn) => {
+                    self.bump();
+                    match self.fn_decl() {
+                        Ok(mut f) => {
+                            f.comptime = true;
+                            methods.push(f);
+                        }
+                        Err(()) => self.synchronize(),
+                    }
+                }
+                Tok::At => {
+                    let r = self.attribute_lines().and_then(|attrs| {
+                        let comptime = matches!(self.peek(), Tok::Ident(n) if n == "comptime") && matches!(self.peek_nth(1), Tok::Fn);
+                        if comptime {
+                            self.bump();
+                        }
+                        match self.peek() {
+                            Tok::Fn => {
+                                let mut f = self.fn_decl()?;
+                                f.attrs = attrs;
+                                f.comptime = comptime;
+                                methods.push(f);
+                            }
+                            Tok::Val | Tok::Var | Tok::Ident(_) => {
+                                let mut f = self.field_decl()?;
+                                f.attrs = attrs;
+                                fields.push(f);
+                            }
+                            _ => return self.misplaced_attributes(&attrs),
+                        }
+                        Ok(())
+                    });
+                    if r.is_err() {
+                        self.synchronize();
+                    }
+                }
                 Tok::Val | Tok::Var | Tok::Ident(_) => match self.field_decl() {
                     Ok(f) => fields.push(f),
                     Err(()) => self.synchronize(),
@@ -580,7 +742,7 @@ impl Parser {
             }
         }
         self.eat(&Tok::Dedent);
-        Ok(StructDecl { name, type_params, implements, fields, methods })
+        Ok(StructDecl { name, type_params, implements, fields, methods, attrs: Vec::new() })
     }
 
     fn enum_decl(&mut self) -> PResult<EnumDecl> {
@@ -611,6 +773,27 @@ impl Parser {
                     Ok(f) => methods.push(f),
                     Err(()) => self.synchronize(),
                 },
+                Tok::At => {
+                    let r = self.attribute_lines().and_then(|attrs| {
+                        if !self.at(&Tok::Fn) {
+                            if matches!(self.peek(), Tok::Ident(_)) {
+                                let span = attrs[0].span;
+                                return self.error_diag(
+                                    Diagnostic::error("attributes on enum variants aren't supported yet", span)
+                                        .with_note("attributes go on functions, methods, structs, enums, fields and parameters"),
+                                );
+                            }
+                            return self.misplaced_attributes(&attrs);
+                        }
+                        let mut f = self.fn_decl()?;
+                        f.attrs = attrs;
+                        methods.push(f);
+                        Ok(())
+                    });
+                    if r.is_err() {
+                        self.synchronize();
+                    }
+                }
                 Tok::Ident(_) => match self.variant_decl() {
                     Ok(v) => variants.push(v),
                     Err(()) => self.synchronize(),
@@ -630,7 +813,7 @@ impl Parser {
             }
         }
         self.eat(&Tok::Dedent);
-        Ok(EnumDecl { name, type_params, implements, variants, methods })
+        Ok(EnumDecl { name, type_params, implements, variants, methods, attrs: Vec::new() })
     }
 
     /// `Circle(radius: Float)` or `Empty`
@@ -665,7 +848,7 @@ impl Parser {
                             .with_help("add a static method that builds the variant with the usual values"),
                     );
                 }
-                fields.push(FieldDecl { name: fname, ty, mutable: false, default: None });
+                fields.push(FieldDecl { name: fname, ty, mutable: false, default: None, attrs: Vec::new() });
                 if !self.eat(&Tok::Comma) {
                     break;
                 }
@@ -689,6 +872,13 @@ impl Parser {
             }
             _ => false,
         };
+        let f = self.field_head(mutable)?;
+        self.expect_newline()?;
+        Ok(f)
+    }
+
+    /// `name: Type` or `name: Type = default` (a struct's or an attribute's field).
+    fn field_head(&mut self, mutable: bool) -> PResult<FieldDecl> {
         let name = self.expect_ident("field name")?;
         if !self.at(&Tok::Colon) {
             let span = name.span;
@@ -707,12 +897,21 @@ impl Parser {
             let span = value.span;
             let body = vec![Stmt { kind: StmtKind::Return(Some(value)), span }];
             let name = Ident { name: format!("__default_{}", name.name), span: at };
-            Some(Box::new(FnDecl { name, type_params: Vec::new(), self_param: None, params: Vec::new(), ret: Some(ty.clone()), body, sig_span: at }))
+            Some(Box::new(FnDecl {
+                name,
+                type_params: Vec::new(),
+                self_param: None,
+                params: Vec::new(),
+                ret: Some(ty.clone()),
+                body,
+                sig_span: at,
+                attrs: Vec::new(),
+                comptime: false,
+            }))
         } else {
             None
         };
-        self.expect_newline()?;
-        Ok(FieldDecl { name, ty, mutable, default })
+        Ok(FieldDecl { name, ty, mutable, default, attrs: Vec::new() })
     }
 
     fn type_expr(&mut self) -> PResult<TypeExpr> {
@@ -927,6 +1126,12 @@ impl Parser {
     }
 
     fn stmt(&mut self) -> PResult<Stmt> {
+        if matches!(self.peek(), Tok::Ident(n) if n == "comptime")
+            && (matches!(self.peek_nth(1), Tok::Val | Tok::Var | Tok::If | Tok::For | Tok::Fn | Tok::Elif | Tok::Else | Tok::While)
+                || matches!(self.peek_nth(1), Tok::Ident(m) if m == "match"))
+        {
+            return self.comptime_stmt();
+        }
         if matches!(self.peek(), Tok::Ident(n) if n == "match")
             && let Some(m) = self.try_match_stmt()
         {
@@ -985,6 +1190,102 @@ impl Parser {
             }
             _ => self.simple_stmt(),
         }
+    }
+
+    /// `comptime val`, `comptime if`, `comptime for` or `comptime match`.
+    fn comptime_stmt(&mut self) -> PResult<Stmt> {
+        let start = self.bump().span; // `comptime`
+        let kind = match self.peek() {
+            Tok::Val => {
+                let Stmt { kind, span } = self.let_stmt()?;
+                let StmtKind::Let { name, ty, value, .. } = kind else {
+                    return self.error("`comptime val` takes a single name", span);
+                };
+                ComptimeStmt::Let { name, ty, value }
+            }
+            Tok::Var => {
+                let span = self.span();
+                return self.error_diag(
+                    Diagnostic::error("a value worked out while compiling can't change", span)
+                        .with_help("write `comptime val`"),
+                );
+            }
+            Tok::If => {
+                let Stmt { kind, .. } = self.if_stmt()?;
+                let StmtKind::If { branches, else_block } = kind else { unreachable!() };
+                ComptimeStmt::If { branches, else_block }
+            }
+            Tok::For => {
+                self.bump();
+                let var = self.expect_ident("loop variable")?;
+                let second = if self.eat(&Tok::Comma) { Some(self.expect_ident("second loop variable")?) } else { None };
+                self.expect(Tok::In)?;
+                let iter = self.expr()?;
+                if self.at(&Tok::DotDot) || self.at(&Tok::DotDotEq) {
+                    let span = self.span();
+                    return self.error_diag(
+                        Diagnostic::error("`comptime for` goes over a list", span)
+                            .with_help("write the numbers as a list (`[0, 1, 2]`), or loop over `fields(T)`"),
+                    );
+                }
+                let body = self.block()?;
+                ComptimeStmt::For { var, second, iter, body }
+            }
+            Tok::Ident(n) if n == "match" => {
+                self.bump();
+                let ty = self.type_expr()?;
+                self.expect(Tok::Colon)?;
+                if !self.eat(&Tok::Newline) || !self.at(&Tok::Indent) {
+                    let span = self.span();
+                    return self.error_diag(
+                        Diagnostic::error("expected an indented list of `case`s", span)
+                            .with_help("write each case on its own line:\n\ncomptime match T:\n    case Int:\n        ...\n    case _:\n        ..."),
+                    );
+                }
+                self.bump();
+                let mut arms = Vec::new();
+                while !self.at(&Tok::Dedent) && !self.at(&Tok::Eof) {
+                    if self.eat(&Tok::Newline) {
+                        continue;
+                    }
+                    match self.type_arm() {
+                        Ok(a) => arms.push(a),
+                        Err(()) => self.synchronize(),
+                    }
+                }
+                self.eat(&Tok::Dedent);
+                ComptimeStmt::Match { ty, arms }
+            }
+            _ => {
+                let span = self.span();
+                let found = self.peek().clone();
+                return self.error_diag(
+                    Diagnostic::error(format!("expected `val`, `if`, `for` or `match` after `comptime`, found {found}"), span)
+                        .with_note("`comptime fn` is only allowed at the top level and in structs"),
+                );
+            }
+        };
+        Ok(Stmt { kind: StmtKind::Comptime(Box::new(kind)), span: start.merge(self.prev_span) })
+    }
+
+    /// `case Int | Float:` in a `comptime match`: types, `_` for any.
+    fn type_arm(&mut self) -> PResult<TypeArm> {
+        if !matches!(self.peek(), Tok::Ident(n) if n == "case") {
+            let span = self.span();
+            let found = self.peek().clone();
+            return self.error_diag(
+                Diagnostic::error(format!("expected `case`, found {found}"), span)
+                    .with_note("a `comptime match` contains only `case` lines, each with a type and an indented block"),
+            );
+        }
+        let start = self.bump().span;
+        let mut pats = vec![self.type_expr()?];
+        while self.eat(&Tok::Pipe) {
+            pats.push(self.type_expr()?);
+        }
+        let span = start.merge(self.prev_span);
+        let body = self.block()?;
+        Ok(TypeArm { pats, body, span })
     }
 
     fn simple_stmt(&mut self) -> PResult<Stmt> {
@@ -1566,22 +1867,7 @@ impl Parser {
             match self.peek() {
                 Tok::LParen => {
                     self.bump();
-                    let mut args = Vec::new();
-                    while !self.at(&Tok::RParen) {
-                        let name = if matches!(self.peek(), Tok::Ident(_)) && matches!(self.peek_nth(1), Tok::Assign) {
-                            let id = self.expect_ident("argument name")?;
-                            self.bump(); // `=`
-                            Some(id)
-                        } else {
-                            None
-                        };
-                        let value = self.expr()?;
-                        args.push(Arg { name, value });
-                        if !self.eat(&Tok::Comma) {
-                            break;
-                        }
-                    }
-                    self.expect(Tok::RParen)?;
+                    let args = self.call_args()?;
                     let span = e.span.merge(self.prev_span);
                     e = Expr { kind: ExprKind::Call { callee: Box::new(e), args }, span };
                 }
@@ -1642,6 +1928,37 @@ impl Parser {
         Ok(e)
     }
 
+    /// The arguments of a call, after its `(`, up to and including the `)`.
+    fn call_args(&mut self) -> PResult<Vec<Arg>> {
+        let mut args = Vec::new();
+        while !self.at(&Tok::RParen) {
+            let name = if matches!(self.peek(), Tok::Ident(_)) && matches!(self.peek_nth(1), Tok::Assign) {
+                let id = self.expect_ident("argument name")?;
+                self.bump(); // `=`
+                Some(id)
+            } else {
+                None
+            };
+            let mut value = self.expr()?;
+            // `decode(f) for f in fields(T) if cond`: one argument per element.
+            if self.at(&Tok::For) {
+                self.bump();
+                let var = self.expect_ident("loop variable")?;
+                self.expect(Tok::In)?;
+                let iter = self.expr()?;
+                let cond = if self.eat(&Tok::If) { Some(Box::new(self.expr()?)) } else { None };
+                let span = value.span.merge(self.prev_span);
+                value = Expr { kind: ExprKind::Spread { value: Box::new(value), var, iter: Box::new(iter), cond }, span };
+            }
+            args.push(Arg { name, value });
+            if !self.eat(&Tok::Comma) {
+                break;
+            }
+        }
+        self.expect(Tok::RParen)?;
+        Ok(args)
+    }
+
     /// `[Int]` in `max[Int](a, b)` or `Tree[Int].Leaf`: explicit type
     /// arguments. They look like an index, so this is decided by what follows:
     /// `(` (a call: an indexed value is never callable), or `.` after a type
@@ -1666,6 +1983,11 @@ impl Parser {
             }
         };
         if ok && (self.at(&Tok::LParen) || type_like && self.at(&Tok::Dot)) {
+            return Some(args);
+        }
+        // `type_name(List[User])`, `fields(Box[Int])`: a type as an argument.
+        let all_types = args.iter().all(|t| t.func.is_some() || t.name.name == TUPLE_TYPE || t.name.name.starts_with(|c: char| c.is_ascii_uppercase()));
+        if ok && type_like && all_types && (self.at(&Tok::RParen) || self.at(&Tok::Comma)) {
             return Some(args);
         }
         self.pos = pos;
@@ -1767,6 +2089,14 @@ impl Parser {
                 let mut elems = Vec::new();
                 while !self.at(&Tok::RBracket) {
                     elems.push(self.expr()?);
+                    if self.at(&Tok::For) {
+                        let at = self.span();
+                        return self.error_diag(
+                            Diagnostic::error("Tarn has no list comprehensions", at)
+                                .with_primary("a `for` inside `[...]`")
+                                .with_help("use `xs.map(fn(x) -> ...)` (and `filter`), or a `for` loop that pushes to a list"),
+                        );
+                    }
                     if !self.eat(&Tok::Comma) {
                         break;
                     }
@@ -2099,6 +2429,38 @@ mod tests {
         assert_eq!(i.defaults.iter().map(|m| m.name.name.as_str()).collect::<Vec<_>>(), ["take", "nothing"]);
         let (_, d) = parse("interface Box[T: Shape]:\n    fn get(self) -> T\n");
         assert!(d[0].message.contains("type parameters can't have bounds"), "{d:?}");
+    }
+
+    #[test]
+    fn compile_time_syntax() {
+        let p = parse_ok(
+            "attribute get(path: String, verb: String = \"GET\")\nattribute skip\n\n@get(\"/a\")\n@mylib.tag\ncomptime fn f(x: Int) -> Int:\n    return x\n\nstruct S:\n    @skip\n    x: Int\n    @get(\"/b\")\n    fn m(self, @skip y: Int):\n        pass\n\nfn main():\n    comptime val n = f(1)\n    comptime if n > 0:\n        pass\n    elif n < 0:\n        pass\n    comptime for i, x in fields(S):\n        pass\n    comptime match T:\n        case Int | List[_]:\n            pass\n        case U?:\n            pass\n    print(S(1 for f in fields(S) if f.name != \"y\"))\n    print(type_name(Map[String, Int]))\n    val comptime = 1\n    print(comptime)\n",
+        );
+        let Item::Attribute(a) = &p.items[0] else { panic!("{:?}", p.items[0]) };
+        assert_eq!(a.fields.len(), 2);
+        assert!(a.fields[1].default.is_some());
+        let Item::Fn(f) = &p.items[2] else { panic!() };
+        assert!(f.comptime);
+        assert_eq!(f.attrs.len(), 2);
+        assert_eq!(f.attrs[1].module.as_ref().map(|m| m.name.as_str()), Some("mylib"));
+        let Item::Struct(st) = &p.items[3] else { panic!() };
+        assert_eq!(st.fields[0].attrs.len(), 1);
+        assert_eq!(st.methods[0].attrs.len(), 1);
+        assert_eq!(st.methods[0].params[0].attrs[0].name.name, "skip");
+        let main = &p.items[4];
+        let Item::Fn(main) = main else { panic!() };
+        assert!(matches!(&main.body[0].kind, StmtKind::Comptime(c) if matches!(**c, ComptimeStmt::Let { .. })));
+        assert!(matches!(&main.body[1].kind, StmtKind::Comptime(c) if matches!(&**c, ComptimeStmt::If { branches, .. } if branches.len() == 2)));
+        assert!(matches!(&main.body[2].kind, StmtKind::Comptime(c) if matches!(&**c, ComptimeStmt::For { second: Some(_), .. })));
+        assert!(matches!(&main.body[3].kind, StmtKind::Comptime(c) if matches!(&**c, ComptimeStmt::Match { arms, .. } if arms[0].pats.len() == 2 && arms[1].pats[0].nullable)));
+        let StmtKind::Expr(e) = &main.body[4].kind else { panic!() };
+        let ExprKind::Call { args, .. } = &e.kind else { panic!() };
+        let ExprKind::Call { args, .. } = &args[0].value.kind else { panic!() };
+        assert!(matches!(&args[0].value.kind, ExprKind::Spread { cond: Some(_), .. }));
+        let StmtKind::Expr(e) = &main.body[5].kind else { panic!() };
+        let ExprKind::Call { args, .. } = &e.kind else { panic!() };
+        let ExprKind::Call { args, .. } = &args[0].value.kind else { panic!() };
+        assert!(matches!(&args[0].value.kind, ExprKind::TypeApply(_, t) if t.len() == 2));
     }
 
     #[test]

@@ -1,0 +1,9 @@
+# expect-error: attributes on enum variants aren't supported yet
+attribute label(text: String)
+
+enum Color:
+    @label("red")
+    Red
+
+fn main():
+    pass

@@ -31,6 +31,9 @@ pub(super) struct FnState {
     in_lambda_expr: usize,
     cells: HashMap<LocalId, StructId>,
     cell_assigned: HashMap<LocalId, Span>,
+    ct_locals: HashMap<LocalId, interp::Value>,
+    ct_reads: HashMap<LocalId, (usize, Span)>,
+    ct_unkept: HashMap<LocalId, String>,
 }
 
 impl Default for FnState {
@@ -45,6 +48,9 @@ impl Default for FnState {
             in_lambda_expr: 0,
             cells: HashMap::new(),
             cell_assigned: HashMap::new(),
+            ct_locals: HashMap::new(),
+            ct_reads: HashMap::new(),
+            ct_unkept: HashMap::new(),
         }
     }
 }
@@ -84,6 +90,9 @@ impl Checker {
         std::mem::swap(&mut self.in_lambda_expr, &mut s.in_lambda_expr);
         std::mem::swap(&mut self.cells, &mut s.cells);
         std::mem::swap(&mut self.cell_assigned, &mut s.cell_assigned);
+        std::mem::swap(&mut self.ct_locals, &mut s.ct_locals);
+        std::mem::swap(&mut self.ct_reads, &mut s.ct_reads);
+        std::mem::swap(&mut self.ct_unkept, &mut s.ct_unkept);
     }
 
     /// A struct holding one lambda's captured values (fields are added as
@@ -114,6 +123,7 @@ impl Checker {
             type_args: Vec::new(),
             instance: true,
             iface: false,
+            attribute: false,
             inherited: Vec::new(),
         });
         id
@@ -288,6 +298,10 @@ impl Checker {
             is_drop: false,
         };
         let func = self.add_closure_code(tf, lam.head, &fty);
+        // A lambda in compile-time code only runs while compiling.
+        if self.ct.mode > 0 {
+            self.ct.comptime_only.insert(func);
+        }
         let captures: Vec<TExpr> = frame.captures.into_iter().map(|(_, e, _)| e).collect();
         let sid = (!captures.is_empty()).then_some(sid);
         Self::mk(TExprKind::Closure { func, sid, captures }, fty, span)
@@ -624,6 +638,12 @@ impl Checker {
 
     /// `f(args)` where `f` is a function value.
     pub(super) fn call_value(&mut self, f: TExpr, args: &[Arg], span: Span) -> TExpr {
+        // A function passed as `[H: Function]`: called directly.
+        if matches!(f.ty, Type::Struct(_) | Type::Param(_))
+            && let Some(t) = self.item_call(&f, args, span)
+        {
+            return t;
+        }
         let check_rest = |c: &mut Checker, args: &[Arg]| {
             for a in args {
                 let _ = c.expr(&a.value, None);
@@ -747,6 +767,12 @@ impl CellRewrite<'_> {
                 self.expr(scrutinee);
                 self.arms(arms);
             }
+            TStmt::Block(b) => self.stmts(b),
+            TStmt::Unrolled(iters) => {
+                for b in iters {
+                    self.stmts(b);
+                }
+            }
             TStmt::Break | TStmt::Continue | TStmt::Return(None) => {}
         }
     }
@@ -797,7 +823,7 @@ impl CellRewrite<'_> {
                 self.expr(x);
             }
             TExprKind::Int(_) | TExprKind::Float(_) | TExprKind::Bool(_) | TExprKind::Str(_) | TExprKind::Null => {}
-            TExprKind::Call(_, args) | TExprKind::Builtin(_, args) | TExprKind::StructNew(_, args) | TExprKind::EnumNew(_, _, args) | TExprKind::ListLit(args) | TExprKind::FString(args) => {
+            TExprKind::Meta(_, args) | TExprKind::Call(_, args) | TExprKind::Builtin(_, args) | TExprKind::StructNew(_, args) | TExprKind::EnumNew(_, _, args) | TExprKind::ListLit(args) | TExprKind::FString(args) => {
                 self.exprs(args)
             }
             TExprKind::Binary(_, a, b) | TExprKind::And(a, b) | TExprKind::Or(a, b) | TExprKind::Index(a, b) | TExprKind::Elvis(a, b) | TExprKind::Let(_, a, b) => {

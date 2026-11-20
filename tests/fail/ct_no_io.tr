@@ -1,0 +1,6 @@
+# expect-error: the file system can't run while compiling
+import fs
+
+fn main():
+    comptime val text = fs.read("notes.txt")
+    print(text)

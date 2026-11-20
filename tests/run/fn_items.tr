@@ -1,0 +1,71 @@
+# `[H: Function]`: a type parameter standing for one named function, whose
+# parameters and attributes compile-time code reads, and which it calls.
+
+attribute get(path: String)
+attribute doc(text: String)
+
+# The `{name}` parts of a path.
+fn path_params(path: String) -> List[String]:
+    val out: List[String] = []
+    for seg in path.split("/"):
+        if seg.starts_with("{") and seg.ends_with("}"):
+            out.push(seg.substring(1, seg.len() - 1))
+    return out
+
+fn parse[T](text: String) -> Result[T, String]:
+    comptime match T:
+        case Int:
+            return Ok(text.to_int_or_null() ?: return Err(f"`{text}` isn't a number"))
+        case String:
+            return Ok(text)
+        case _:
+            compile_error(f"a path can't hold a `{type_name(T)}`")
+
+struct Route:
+    path: String
+    run: fn(Map[String, String]) -> Result[String, String]
+
+fn route[H: Function](handler: H) -> Route:
+    comptime val r = attribute(H, get) ?: compile_error(f"`{type_name(H)}` needs `@get`")
+    comptime for name in path_params(r.path):
+        comptime if not params(H).any(fn(p) -> p.name == name):
+            compile_error(f"`{type_name(H)}` has no parameter `{name}`", at = r)
+    val run = fn(args: Map[String, String]) -> Result[String, String]:
+        return Ok(handler(parse(args[p.name])? for p in params(H)))
+    return Route(path = r.path, run = run)
+
+fn describe[H: Function](_h: H) -> String:
+    val names: List[String] = []
+    comptime for p in params(H):
+        names.push(f"{p.name}: {p.type_name}")
+    comptime val d = attribute(H, doc)?.text ?: "(no docs)"
+    return f"{type_name(H)}({names.join(", ")}) - {d}"
+
+@doc("one post")
+@get("/users/{id}/posts/{slug}")
+fn show_post(id: Int, slug: String) -> String:
+    return f"post {slug} of user {id}"
+
+@get("/health")
+fn health() -> String:
+    return "ok"
+
+struct Api:
+    @get("/version")
+    fn version() -> String:
+        return "1.0"
+
+# Calls through a `Function`: the same copy of `twice` for each function.
+fn twice[H: Function](h: H) -> String:
+    return h() + h()
+
+fn main():
+    val routes = [route(show_post), route(health), route(Api.version)]
+    for r in routes:
+        print(r.path)
+    print(routes[0].run({"id": "42", "slug": "hello"}))
+    print(routes[0].run({"id": "x", "slug": "hello"}))
+    print(routes[1].run({}))
+    print(describe(show_post))
+    print(describe(health))
+    print(twice(health))

@@ -1,0 +1,7 @@
+# expect-error: `fields` needs a struct, but this is `Color`
+enum Color:
+    Red
+    Blue
+
+fn main():
+    print(fields(Color))

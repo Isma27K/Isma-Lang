@@ -1,0 +1,10 @@
+# expect-error: `@get` is written twice here
+attribute get(path: String)
+
+@get("/a")
+@get("/b")
+fn a():
+    pass
+
+fn main():
+    a()

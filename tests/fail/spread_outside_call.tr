@@ -1,0 +1,6 @@
+# expect-error: a spread (`... for x in list`) only works as an argument
+struct P:
+    x: Int
+
+fn main():
+    print(f.name for f in fields(P))

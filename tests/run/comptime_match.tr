@@ -1,0 +1,61 @@
+# `comptime match T:` picks a case by type, in each copy of generic code.
+
+interface Named:
+    fn name(self) -> String
+
+struct Cat(Named):
+    fn name(self) -> String:
+        return "cat"
+
+struct Box[T]:
+    value: T
+
+enum Size:
+    Small
+    Large
+
+fn kind[T](v: T) -> String:
+    comptime match T:
+        case Int | Float:
+            return f"number {v}"
+        case String:
+            return f"text {v.len()}"
+        case _?:
+            if v == null:
+                return "nothing"
+            return "maybe " + kind(v!!)
+        case List[Int]:
+            return f"ints {v.len()}"
+        case List[_]:
+            return f"list of {v.len()}"
+        case Map[String, _]:
+            return f"map {v.keys()}"
+        case (_, _):
+            return f"pair {kind(v.0)} and {kind(v.1)}"
+        case Box[_]:
+            return "box of " + kind(v.value)
+        case Named:
+            return f"named {v.name()}"
+        case Size:
+            return f"size {v}"
+        case _:
+            return f"other {type_name(T)}"
+
+fn maybe(s: String) -> String?:
+    return s
+
+fn main():
+    print(kind(1))
+    print(kind(2.5))
+    print(kind("hey"))
+    val n: Int? = null
+    print(kind(n))
+    print(kind(maybe("x")))
+    print(kind([1, 2]))
+    print(kind(["a"]))
+    print(kind({"k": 1.0}))
+    print(kind((1, "b")))
+    print(kind(Box(Box(3))))
+    print(kind(Cat()))
+    print(kind(Size.Large))
+    print(kind(true))

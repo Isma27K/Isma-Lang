@@ -1,0 +1,4 @@
+# expect-error: `comptime for` goes over a list, not a `Int`
+fn main():
+    comptime for x in 5:
+        print(x)

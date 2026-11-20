@@ -1,0 +1,10 @@
+# expect-error: compile-time code runs too long
+fn spin() -> Int:
+    var i = 0
+    while i >= 0:
+        i += 1
+    return i
+
+fn main():
+    comptime val x = spin()
+    print(x)

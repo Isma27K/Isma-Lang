@@ -1,0 +1,13 @@
+users
+["admin", "audit"]
+0.5
+High
+true
+["id: column user_id indexed=true", "name: column  indexed=false", "cache: skipped"]
+/users
+/users
+true
+/health
+page: Int
+size: Int
+page 1 of 20

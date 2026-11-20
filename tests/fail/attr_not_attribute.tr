@@ -1,0 +1,10 @@
+# expect-error: `Point` isn't an attribute
+struct Point:
+    x: Int
+
+@Point(1)
+fn a():
+    pass
+
+fn main():
+    a()

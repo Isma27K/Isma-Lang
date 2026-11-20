@@ -1,0 +1,6 @@
+# expect-error: a spread goes over a list, not a `Int`
+struct P:
+    x: Int
+
+fn main():
+    val p = P(1 for f in 3)

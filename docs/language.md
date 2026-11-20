@@ -1171,6 +1171,176 @@ The panic's message is also printed (`panic in task 2 at app.tr:1:23: ...`). A p
 - If every task is waiting and nothing can wake any of them, the program stops with `deadlock: every task is waiting...` (exit code 101).
 - Starting and joining a task takes about 3 µs; a value through a channel about 100 ns; a `Mutex.update` nobody else wants about 25 ns. A program that never calls `spawn` runs exactly as before: no threads, and none of this costs anything.
 
+## Compile-time code
+
+Code can run while the program compiles: to look at a type's fields, to read attributes written on declarations, and to compute values and reject mistakes before the program ever runs. There's no type information at run time: what the program needs of it is worked out while compiling and put in as plain values, so this code costs nothing when the program runs.
+
+### Reflection: `fields(T)` and `comptime for`
+
+`fields(T)` lists the fields of struct `T`, as `Field`s (with a `name`, a `type_name`, and whether it's `mutable` and `has_default`). A `comptime for` repeats its body once per field, while compiling, and each copy knows which field it's about, so `f.get(value)` reads that field with its own type:
+
+```python
+struct User:
+    id: Int
+    name: String
+
+fn describe[T](value: T) -> String:
+    val parts: List[String] = []
+    comptime for f in fields(T):
+        parts.push(f"{f.name}={f.get(value)}")
+    return f"{type_name(T)}({parts.join(", ")})"
+
+fn main():
+    print(describe(User(id = 7, name = "Ada")))     # User(id=7, name=Ada)
+```
+
+- `comptime for i, f in fields(T)` also gives the index; `break` and `continue` work as in any loop.
+- `type_name(T)` is the type's name as Tarn writes it (`List[Int]`, `User`).
+- A plain `for f in fields(User)` runs when the program runs, over plain `Field` values: it can print their names, but `f.get(x)` needs to know the field while compiling, so it only works in a `comptime for`.
+
+This is most useful in generic code. A generic function is compiled again for each type it's used with (see [generics](#generics)), and that's where `fields(T)` gets its answer: `describe` above becomes one function per type, with the loop unrolled. In the code as written, the parts that depend on what `T` is (the body of a `comptime for` over `fields(T)`, a `comptime if` or `comptime match` on `T`) are checked in each copy instead, so a mistake there is reported where the generic code is used, with a note saying which copy.
+
+### `comptime match` on a type
+
+`comptime match T:` keeps only the case that fits the type, in each copy of the code:
+
+```python
+fn encode[T](v: T) -> String:
+    comptime match T:
+        case Int | Float | Bool:
+            return v.to_string()
+        case String:
+            return f"\"{v}\""
+        case U?:                         # `U`: the type inside, in this case
+            if v == null:
+                return "null"
+            return encode[U](v!!)
+        case List[_]:
+            val parts: List[String] = []
+            for x in v:
+                parts.push(encode(x))
+            return "[" + parts.join(",") + "]"
+        case _:
+            compile_error(f"can't encode a `{type_name(T)}`")
+```
+
+A case is a type, `_` for any type, and `|` between alternatives: `Int`, `List[_]`, `Map[String, _]`, `_?` (any nullable type), `(_, _)` (a pair), `Box[_]` (a generic type with any type arguments), an interface (any type that fits it), or `_`. A single capital letter that isn't a type here (`U`, `E`, `K2`) matches any type and names it inside the case: `case List[E]:`, `case Map[K, V]:`. If no case fits, it's a compile error.
+
+### Deriving methods
+
+An interface's [default method](#default-methods) is compiled for each type that fits the interface, with `Self` that type, so it can loop over `fields(Self)`. That's how a library gives types methods written once, for all of them:
+
+```python
+interface Json:
+    fn to_json(self) -> String:
+        val parts: List[String] = []
+        comptime for f in fields(Self):
+            parts.push(f"\"{f.name}\":{encode(f.get(self))}")
+        return "{" + parts.join(",") + "}"
+
+struct Point(Json):
+    x: Int
+    y: Int
+
+fn main():
+    print(Point(x = 1, y = 2).to_json())        # {"x":1,"y":2}
+```
+
+### Building values: spreads
+
+An argument written `expr for f in list` stands for one argument per element of a list known while compiling. With `fields(T)`, it builds a `T` field by field; each `Field` gives the argument for the field of its name:
+
+```python
+fn decode[T](row: Map[String, String]) -> Result[T, String]:
+    return Ok(T(read(row[f.name])? for f in fields(T)))
+```
+
+- Each value is checked against its field's type, so `read` above is called with the right type each time (`read[Int]`, `read[String]`...). `?` returns from the function, as anywhere.
+- `if cond` keeps some elements: `for f in fields(T) if not f.has(skip)`. The fields left out take their default values (it's an error if one has none), or can be given by name next to the spread.
+- `T(...)` builds the struct `T` stands for, in each copy of generic code.
+- With `params(H)`, it calls a function with one argument per parameter (see [functions as types](#functions-as-types-h-function)).
+
+### `comptime val`, `comptime if`, `comptime fn`
+
+The compiler runs ordinary Tarn code: your functions, the standard library's string, list and map functions, lambdas, `match`, loops. It gives exactly what the compiled program would, including panics, which become compile errors.
+
+```python
+fn primes(n: Int) -> List[Int]:
+    val out: List[Int] = []
+    var k = 2
+    while out.len() < n:
+        if out.all(fn(p) -> k % p != 0):
+            out.push(k)
+        k += 1
+    return out
+
+fn main():
+    comptime val ps = primes(10)       # worked out while compiling
+    print(ps)                          # [2, 3, 5, 7, 11, 13, 17, 19, 23, 29]
+    comptime if ps.len() > 5:          # only this branch is compiled
+        print("many")
+```
+
+- `comptime val name = expr`: computed while compiling. Code that runs reads it like any `val`; it then gets the value as a constant (numbers, strings, lists, maps, structs and enums of those; not a function).
+- `comptime if cond:` (with `elif` and `else`): the condition is worked out while compiling and only the branch it picks is compiled. The others aren't even checked, so they can use what only exists for some types.
+- `comptime fn f(...)`: a function that only runs while compiling. It can take a `Field` or `Parameter` and read its attributes. Called from code that runs, it's run while compiling (its arguments must be known then) and its result is put in.
+- Compile-time code can use literals, constants, `comptime val`s, the variables of `comptime for`, and what functions compute from those. It can't touch files, the network, the environment, the clock or the screen, or start tasks.
+- An endless loop is stopped after 20 million steps, with an error.
+
+### Attributes
+
+An attribute is declared like a small struct, and written with `@` on the lines above a function, method, struct, enum or field, or before a parameter's name:
+
+```python
+attribute get(path: String)
+attribute column(name: String = "", indexed: Bool = false)
+attribute skip
+
+struct User:
+    @column("user_id", indexed = true)
+    id: Int
+    @skip
+    cache: List[Int] = []
+
+@get("/users/{id}")
+fn show_user(id: Int, @skip verbose: Bool) -> String:
+    ...
+```
+
+- Its arguments are checked like a struct's (by position or name, with defaults), and worked out while compiling. Its fields can be `Int`, `Float`, `Bool`, `String`, enums without data, and `T?` or `List[T]` of those.
+- An attribute that isn't declared is an error, and so is writing the same one twice on one declaration. From another module: `from routes import get`, or `@routes.get(...)`.
+- Reading them: `attribute(X, get)` for a type or function `X` (a `get?`: `null` if it isn't there), `f.attribute(column)` and `f.has(skip)` for a `Field` or `Parameter`. Compile-time code reads them; code that runs gets the value as a constant.
+- An attribute does nothing by itself: it's there for libraries to read.
+
+### Functions as types: `[H: Function]`
+
+A type parameter bounded by `Function` stands for one particular named function. Each function passed gets a copy of the generic code, which can read its parameters (`params(H)`, as `Parameter`s) and attributes, and calls it directly:
+
+```python
+fn route[H: Function](handler: H) -> String:
+    comptime val r = attribute(H, get) ?: compile_error(f"`{type_name(H)}` needs `@get`")
+    comptime for name in path_params(r.path):
+        comptime if not params(H).any(fn(p) -> p.name == name):
+            compile_error(f"`{type_name(H)}` has no parameter `{name}`", at = r)
+    return r.path
+```
+
+`route(show_user)` passes the function by name (top-level functions and static methods; not lambdas, methods of a value or generic functions). `handler(arg(p) for p in params(H))` calls it with one argument per parameter.
+
+### `compile_error`
+
+`compile_error(message)` stops compiling with an error. In code compiled only in some cases (the branch a `comptime if` picks, a `comptime match` case), it's reported when that code is compiled; in compile-time code (a `comptime val`, a `comptime fn`), when it runs. It's reported where the program's own code uses the library that raised it, or with `at = x` at an attribute, `Field` or `Parameter`:
+
+```
+error: `show_user` has no parameter `slug`
+  @get("/users/{id}/posts/{slug}")
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ here
+```
+
+### What it costs
+
+Nothing at run time: a `comptime for` becomes straight-line code, and reflection-based code runs exactly as fast as the same code written by hand. While compiling, the interpreter runs about 50 million steps a second.
+
 ## Modules: `import`
 
 Every `.tr` file is a module. A program is one file plus everything it imports.
@@ -1263,6 +1433,11 @@ Available modules:
 | `exit(code: Int)` | Exit the process |
 | `hash(a, b, ...) -> Int` | A hash of the values, mixed into one `Int` (for [`fn hash`](#maps)). Works on numbers, `Bool`, `String`, enums, nullable values, and types with `fn hash(self) -> Int` |
 | `spawn(f: fn() -> T) -> Task[T]` | Start a [task](#tasks) running `f` |
+| `fields(T) -> List[Field]` | The fields of struct `T`, while compiling (see [compile-time code](#compile-time-code)) |
+| `params(H) -> List[Parameter]` | The parameters of function `H` |
+| `attribute(X, a) -> a?` | Attribute `@a(...)` on type or function `X`, or `null` |
+| `type_name(T) -> String` | The name of type `T` as Tarn writes it, or of function `H` |
+| `compile_error(msg, at = x)` | Stop compiling with an error |
 
 ## Panics
 
@@ -1302,4 +1477,8 @@ A panic in a [task](#panics-in-tasks) stops only that task.
 - **A tuple is allocated,** like a struct, and has at most six elements.
 - **An iterator of a nullable type ends at its first `null`.**
 - **`sort()` only sorts lists of `Int`, `Float` and `String`.** For anything else, sort by a key: `people.sort_by(fn(p) -> p.name)`.
+- **Compile-time code that depends on type parameters is checked per type.** Inside a `comptime for` over `fields(T)`, a `comptime if` or `comptime match` on `T`, mistakes show up in the copies of the generic code (where it's used), not where it's written; generic code that's never used isn't checked there.
+- **Compile-time code can't do I/O** (files, network, environment, clock, printing) or start tasks, and stops after 20 million steps.
+- **No attributes on enum variants, and no reflection over an enum's variants.** `fields` only looks at structs; values are built with spreads (there's no `f.set`).
+- **`[H: Function]` takes named functions** (top-level ones and static methods), not lambdas, methods of a value or generic functions.
 - **A lambda with a block body, or a `match` used as a value, can't be written inside parentheses:** both must end their line. A generic method can't be used as a value. See [lambdas](#lambdas-and-function-values).

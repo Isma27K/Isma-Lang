@@ -1,0 +1,3 @@
+# expect-error: a value worked out while compiling can't change
+fn main():
+    comptime var n = 1

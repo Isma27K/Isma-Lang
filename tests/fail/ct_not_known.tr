@@ -1,0 +1,5 @@
+# expect-error: `n` isn't known while compiling
+fn main():
+    val n = args().len()
+    comptime if n > 2:
+        print("many")

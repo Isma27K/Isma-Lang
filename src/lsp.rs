@@ -35,7 +35,7 @@ pub fn run() -> Result<(), BoxError> {
         hover_provider: Some(lt::HoverProviderCapability::Simple(true)),
         definition_provider: Some(lt::OneOf::Left(true)),
         completion_provider: Some(lt::CompletionOptions {
-            trigger_characters: Some(vec![".".into()]),
+            trigger_characters: Some(vec![".".into(), "@".into()]),
             ..Default::default()
         }),
         document_symbol_provider: Some(lt::OneOf::Left(true)),
@@ -317,7 +317,9 @@ impl Server {
         if let Some(items) = self.import_completion(doc, &doc.text[line_start..word_start]) {
             return Some(lt::CompletionResponse::Array(items));
         }
-        let items = if word_start > 0 && bytes[word_start - 1] == b'.' {
+        let items = if word_start > 0 && bytes[word_start - 1] == b'@' {
+            attribute_completion(doc)
+        } else if word_start > 0 && bytes[word_start - 1] == b'.' {
             self.member_completion(doc, word_start - 1, off)?
         } else {
             self.scope_completion(doc, off)
@@ -450,6 +452,8 @@ impl Server {
                     let st = &doc.ide.structs[sid];
                     let (kind, kw) = if st.iface {
                         (lt::CompletionItemKind::INTERFACE, "interface")
+                    } else if st.attribute {
+                        (lt::CompletionItemKind::PROPERTY, "attribute")
                     } else if st.variants.is_some() {
                         (lt::CompletionItemKind::ENUM, "enum")
                     } else {
@@ -1263,6 +1267,38 @@ mod tests {
         assert_eq!(labels, ["new"]);
     }
 
+    const CT_SRC: &str = "# A route.\nattribute get(path: String)\n\nstruct User:\n    id: Int\n\n# Shows users.\n@get(\"/users\")\nfn show() -> String:\n    return \"x\"\n\nfn names[T]() -> List[String]:\n    val out: List[String] = []\n    comptime for f in fields(T):\n        out.push(f.name)\n    return out\n\nfn main():\n    comptime val n = 2 + 3\n    print(n)\n    print(names[User]())\n    print(show())\n";
+
+    #[test]
+    fn compile_time_code_in_the_editor() {
+        let (s, uri) = server_with(CT_SRC);
+        let hover = |needle: &str, delta: usize| {
+            let h = s.hover(lt::HoverParams { text_document_position_params: tdp(&uri, at(CT_SRC, needle, delta)), work_done_progress_params: Default::default() });
+            let lt::HoverContents::Markup(m) = h.unwrap_or_else(|| panic!("no hover at {needle}")).contents else { panic!() };
+            m.value
+        };
+        let shown = hover("get(\"/users", 0);
+        assert!(shown.contains("attribute get(path: String)") && shown.contains("A route."), "{shown}");
+        let shown = hover("n = 2", 0);
+        assert!(shown.contains("= 5"), "{shown}");
+        let shown = hover("fields(T)", 0);
+        assert!(shown.contains("fn fields(T) -> List[Field]"), "{shown}");
+        // The doc comment of a function is found above its attributes.
+        let shown = hover("show() -> String", 0);
+        assert!(shown.contains("Shows users."), "{shown}");
+        // `@` offers attributes; `f.` offers what a `Field` has.
+        let src = "attribute get(path: String)\nattribute skip\n\n@\nfn a():\n    pass\n";
+        let (s2, uri2) = server_with(src);
+        let items = complete(&s2, &uri2, at(src, "@\nfn", 1));
+        let labels: Vec<_> = items.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(labels, ["get", "skip"]);
+        let src = "struct P:\n    x: Int\n\nfn main():\n    for f in fields(P):\n        f.\n";
+        let (s3, uri3) = server_with(src);
+        let items = complete(&s3, &uri3, at(src, "        f.\n", 10));
+        let labels: Vec<_> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.contains(&"name") && labels.contains(&"get") && labels.contains(&"has"), "{labels:?}");
+    }
+
     #[test]
     fn module_files_need_no_main() {
         let a = crate::analyze("fn square(x: Int) -> Int:\n    return x * x\n");
@@ -1393,4 +1429,21 @@ mod tests {
         let lt::HoverContents::Markup(m) = h.unwrap().contents else { panic!() };
         assert!(m.value.contains("fn spawn[T](f: fn() -> T) -> Task[T]"), "{}", m.value);
     }
+}
+
+/// After `@`: the attributes this file can write (its own and imported ones).
+fn attribute_completion(doc: &Document) -> Vec<lt::CompletionItem> {
+    let own = doc.ide.structs.iter().filter(|s| s.attribute && s.ns == 0 && !s.instance);
+    let imported = doc.ide.imported.iter().filter_map(|(name, k)| match k {
+        ImportedSymbol::Struct(sid) if doc.ide.structs[*sid].attribute => Some((name.clone(), &doc.ide.structs[*sid])),
+        _ => None,
+    });
+    own.map(|s| (s.name.clone(), s))
+        .chain(imported)
+        .map(|(name, s)| {
+            let fields: Vec<String> = s.fields.iter().map(|f| format!("{}: {}", f.name, f.ty)).collect();
+            let detail = if fields.is_empty() { format!("attribute {name}") } else { format!("attribute {name}({})", fields.join(", ")) };
+            lt::CompletionItem { label: name, kind: Some(lt::CompletionItemKind::PROPERTY), detail: Some(detail), documentation: s.doc.as_ref().map(|d| markdown(d)), ..Default::default() }
+        })
+        .collect()
 }

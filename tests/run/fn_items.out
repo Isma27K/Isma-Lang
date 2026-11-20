@@ -1,0 +1,9 @@
+/users/{id}/posts/{slug}
+/health
+/version
+Ok(post hello of user 42)
+Err(`x` isn't a number)
+Ok(ok)
+show_post(id: Int, slug: String) - one post
+health() - (no docs)
+okok

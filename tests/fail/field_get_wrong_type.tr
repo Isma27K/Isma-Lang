@@ -1,0 +1,10 @@
+# expect-error: `x` is a field of `P`, but this is a `Q`
+struct P:
+    x: Int
+
+struct Q:
+    x: Int
+
+fn main():
+    comptime for f in fields(P):
+        print(f.get(Q(x = 1)))

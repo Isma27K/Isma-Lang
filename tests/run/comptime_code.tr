@@ -1,0 +1,61 @@
+# Code that runs while compiling: `comptime val`, `comptime if`, `comptime fn`,
+# and ordinary functions run by the compiler.
+
+val LIMIT = 3
+
+struct Version:
+    major: Int
+    minor: Int
+
+fn parse_version(text: String) -> Version:
+    val parts = text.split(".")
+    return Version(major = parts[0].to_int(), minor = parts[1].to_int())
+
+fn primes(n: Int) -> List[Int]:
+    val out: List[Int] = []
+    var k = 2
+    while out.len() < n:
+        if out.all(fn(p) -> k % p != 0):
+            out.push(k)
+        k += 1
+    return out
+
+fn words(text: String) -> Map[String, Int]:
+    val counts: Map[String, Int] = {}
+    for w in text.lower().split():
+        counts[w] = counts.get(w, 0) + 1
+    return counts
+
+# Runs only while compiling: called from code that runs, its result goes in.
+comptime fn banner(name: String, width: Int) -> String:
+    val line = "=".repeat(width)
+    return f"{line}\n{name.upper().pad_start(width)}\n{line}"
+
+fn mode() -> String:
+    comptime if LIMIT > 5:
+        return "big"
+    elif LIMIT > 2:
+        return "medium"
+    else:
+        return "small"
+
+fn main():
+    comptime val v = parse_version("2.14")
+    print(f"{v.major}.{v.minor}")
+    comptime val ps = primes(10)
+    print(ps)
+    comptime val counts = words("the cat and The hat and THE bat")
+    print(counts)
+    print(banner("tarn", 8))
+    print(mode())
+    comptime val pi = 3.0 + 0.14159
+    print(pi)
+    comptime val shown = [1.0 / 3.0, 1e20, 0.000012, -0.0, 2.5].map(fn(x) -> x.to_string())
+    print(shown)
+    comptime val sorted = ["pear", "apple", "fig"]
+    sorted.sort()
+    print(sorted)
+    # Only used while compiling: no value at run time.
+    comptime val n = ps.len()
+    comptime if n == 10:
+        print("ten primes")

@@ -450,6 +450,19 @@ impl<'a> Lower<'a> {
                 self.cur = le;
             }
             TStmt::Match { scrutinee, arms } => self.match_(scrutinee, arms, None),
+            TStmt::Block(b) => self.stmts(b),
+            // `comptime for`: each copy in turn; `continue` goes to the next one.
+            TStmt::Unrolled(iters) => {
+                let end = self.new_block();
+                for body in iters {
+                    let next = self.new_block();
+                    self.loops.push((next, end, self.scopes.len()));
+                    self.stmts(body);
+                    self.loops.pop();
+                    self.start(next);
+                }
+                self.start(end);
+            }
             TStmt::Break => {
                 let (_, target, depth) = *self.loops.last().expect("break outside loop");
                 self.keep_alive_from(depth);
@@ -1150,6 +1163,8 @@ impl<'a> Lower<'a> {
                 let a = self.operands(args);
                 Rvalue::Sync(*op, types.clone(), a, e.span)
             }
+            // The checker leaves no compile-time code in code that's compiled to run.
+            TExprKind::Meta(op, _) => panic!("internal error: compile-time code ({op:?}) left in code that runs"),
             TExprKind::Match(scrutinee, arms) => {
                 if e.ty == Type::Unit {
                     self.match_(scrutinee, arms, None);
@@ -1221,6 +1236,12 @@ fn mark_reassigned(stmts: &[TStmt], out: &mut [bool]) {
             TStmt::Match { arms, .. } => {
                 for a in arms {
                     mark_reassigned(&a.body, out);
+                }
+            }
+            TStmt::Block(b) => mark_reassigned(b, out),
+            TStmt::Unrolled(iters) => {
+                for b in iters {
+                    mark_reassigned(b, out);
                 }
             }
             _ => {}

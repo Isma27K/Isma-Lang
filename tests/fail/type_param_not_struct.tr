@@ -1,0 +1,6 @@
+# expect-error: `T` is `Int` here: it can't be built from fields
+fn make[T]() -> T:
+    return T(x = 1)
+
+fn main():
+    print(make[Int]())

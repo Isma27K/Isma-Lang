@@ -1,0 +1,16 @@
+Point(x=1, y=2)
+User(id=7, name=Ada, email=null, visits=0)
+Box[List[Int]](value=[1, 2], label=list)
+(Int, String, Bool)(0=1, 1=a, 2=true)
+10
+["0:id"]
+id: Int (var: false, default: false)
+name: String (var: false, default: false)
+email: String? (var: false, default: true)
+visits: Int (var: true, default: true)
+2
+Map[String, List[Int?]]
+Box[Point]
+Point(x=0, y=0)
+Box[Int](value=0, label=)
+Box[Int](value=7, label=seven)

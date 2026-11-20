@@ -1,0 +1,3 @@
+# expect-error: `params` needs a function, but this is `String`
+fn main():
+    print(params(String))

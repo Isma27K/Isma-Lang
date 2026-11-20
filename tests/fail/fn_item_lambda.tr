@@ -1,0 +1,6 @@
+# expect-error: needs a named function for `H`
+fn call[H: Function](h: H) -> Int:
+    return h()
+
+fn main():
+    print(call(fn() -> 1))

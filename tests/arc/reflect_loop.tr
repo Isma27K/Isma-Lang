@@ -1,0 +1,22 @@
+# expect-max-allocs: 5
+# A `comptime for` over fields is unrolled: reading the fields allocates
+# nothing, and the `Field` values (only used while compiling) never reach
+# run time.
+struct Stats:
+    hits: Int
+    misses: Int
+    ratio: Float
+
+fn total[T](value: T) -> Int:
+    var sum = 0
+    comptime for f in fields(T):
+        comptime if f.type_name == "Int":
+            sum += f.get(value)
+    return sum
+
+fn main():
+    val s = Stats(hits = 3, misses = 4, ratio = 0.5)
+    var all = 0
+    for i in 0..100000:
+        all += total(s) + i % 2
+    print(all)

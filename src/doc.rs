@@ -61,7 +61,7 @@ pub fn reference() -> Value {
                     s.variants.iter().flatten().map(|v| json!({ "name": v.name, "signature": v.signature, "doc": v.doc })).collect();
                 json!({
                     "name": short(&s.name),
-                    "kind": if s.iface { "interface" } else if s.variants.is_some() { "enum" } else { "struct" },
+                    "kind": if s.iface { "interface" } else if s.attribute { "attribute" } else if s.variants.is_some() { "enum" } else { "struct" },
                     "doc": s.doc,
                     "variants": variants,
                     // Static functions first (`Channel.buffered(n)`), as `kind: "static"`.

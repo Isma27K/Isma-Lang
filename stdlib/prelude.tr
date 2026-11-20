@@ -1,6 +1,7 @@
 # Always available, in every file, without an import: `Result` with `Ok` and
 # `Err`, `Unit`, the structs behind tuples (`(A, B)` is a `Tuple2[A, B]`),
-# and the `Iterator` interface with the iterators its methods give.
+# the `Iterator` interface with the iterators its methods give, and `Field`
+# and `Parameter`, what compile-time reflection describes.
 
 # The outcome of something that can fail: its value (`Ok`) or what went wrong (`Err`).
 #
@@ -485,3 +486,33 @@ struct Atomic:
     # If the value is `expected`, replace it with `value`: did it?
     fn compare_and_set(self, expected: Int, value: Int) -> Bool:
         return __atomic_compare_and_set(self._h, expected, value)
+
+# A field of a struct, as `fields(T)` gives it. Code that runs while
+# compiling loops over them with `comptime for`:
+#
+#     fn show[T](value: T) -> String:
+#         var parts: List[String] = []
+#         comptime for f in fields(T):
+#             parts.append(f"{f.name}={f.get(value)}")
+#         return parts.join(" ")
+#
+# Inside a `comptime for`, the compiler knows which field `f` is, so
+# `f.get(value)` reads it from a `T` (with its own type), `f.attribute(a)` is
+# its `@a(...)` attribute (or `null`) and `f.has(a)` says if it has one.
+struct Field:
+    # Its name, as written in the struct (`"0"`, `"1"`... in a tuple).
+    name: String
+    # Its type, as Tarn writes it: `Int`, `List[String]`, `User?`.
+    type_name: String
+    # Is it declared with `var`?
+    mutable: Bool
+    # Does it have a default value (`port: Int = 8080`)?
+    has_default: Bool
+
+# A parameter of a function, as `params(H)` gives it (for a function passed
+# as `[H: Function]`). `p.attribute(a)` and `p.has(a)` read its attributes.
+struct Parameter:
+    # Its name, as written.
+    name: String
+    # Its type, as Tarn writes it.
+    type_name: String

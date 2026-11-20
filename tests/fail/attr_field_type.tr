@@ -1,0 +1,5 @@
+# expect-error: an attribute's field can't be a `fn(Int) -> Int`
+attribute check(f: fn(Int) -> Int)
+
+fn main():
+    pass

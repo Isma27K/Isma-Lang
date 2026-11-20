@@ -1,0 +1,9 @@
+# expect-error: path
+attribute get(path: String)
+
+@get
+fn a():
+    pass
+
+fn main():
+    a()

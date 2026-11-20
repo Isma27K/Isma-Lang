@@ -1,0 +1,9 @@
+# expect-error: cannot find attribute `gte`
+attribute get(path: String)
+
+@gte("/x")
+fn a():
+    pass
+
+fn main():
+    a()

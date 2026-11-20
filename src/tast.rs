@@ -117,6 +117,11 @@ pub enum TStmt {
     Break,
     Continue,
     Return(Option<TExpr>),
+    /// A block of its own (the branch a `comptime if` or `comptime match` picked).
+    Block(Vec<TStmt>),
+    /// A `comptime for`: its body once per element, in order. `continue`
+    /// goes on to the next copy, `break` past the last one.
+    Unrolled(Vec<Vec<TStmt>>),
 }
 
 #[derive(Debug)]
@@ -471,11 +476,43 @@ pub enum TExprKind {
     /// An operation of tasks, channels or mutexes (standard library only),
     /// on values of the given types.
     Sync(SyncOp, Vec<Type>, Vec<TExpr>),
+    /// Something only code running while compiling can do (see
+    /// `check/comptime.rs`): never in code that's compiled to run.
+    Meta(MetaOp, Vec<TExpr>),
+}
+
+/// What a `TExprKind::Meta` does, in code that runs while compiling.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MetaOp {
+    /// `fields(T)`: the fields of struct `T`, as `Field`s.
+    Fields(Type),
+    /// `params(H)`: the parameters of function `H`, as `Parameter`s.
+    Params(FuncId),
+    /// `attribute(X, a)` on a type or a function (`None`: not known yet,
+    /// in generic code): the attribute (struct id), or `null`.
+    AttrOf(Option<AttrTarget>, StructId),
+    /// `f.attribute(a)` on a `Field` or `Parameter` (the argument).
+    DescAttr(StructId),
+    /// `f.has(a)`.
+    DescHas(StructId),
+    /// `compile_error(message)`, with `at = x` as a second argument if given.
+    CompileError,
+}
+
+/// Something an attribute can be written on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AttrTarget {
+    Fn(FuncId),
+    /// A struct or enum.
+    Type(StructId),
+    /// A struct's field (the generic struct's, for instances).
+    Field(StructId, usize),
+    Param(FuncId, usize),
 }
 
 impl TExpr {
     /// Does evaluating this expression never finish normally (`panic`, `exit`, a jump)?
     pub fn diverges(&self) -> bool {
-        matches!(self.kind, TExprKind::Jump(_) | TExprKind::Builtin(Builtin::Panic | Builtin::Exit, _))
+        matches!(self.kind, TExprKind::Jump(_) | TExprKind::Builtin(Builtin::Panic | Builtin::Exit, _) | TExprKind::Meta(MetaOp::CompileError, _))
     }
 }

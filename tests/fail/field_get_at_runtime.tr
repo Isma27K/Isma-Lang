@@ -1,0 +1,9 @@
+# expect-error: `get` needs to know which field this is while compiling
+struct P:
+    x: Int
+    y: Int
+
+fn main():
+    val p = P(x = 1, y = 2)
+    for f in fields(P):
+        print(f.get(p))

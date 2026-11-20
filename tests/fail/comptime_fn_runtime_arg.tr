@@ -1,0 +1,7 @@
+# expect-error: `twice` is a `comptime fn`: its arguments must be known while compiling
+comptime fn twice(n: Int) -> Int:
+    return n * 2
+
+fn main():
+    val n = args().len()
+    print(twice(n))

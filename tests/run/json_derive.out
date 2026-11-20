@@ -1,0 +1,8 @@
+{"user_id":7,"name":"Ada \"the first\"","nick":null,"tags":["a","b"],"home":{"city":"Paris","zip":75001}}
+[{"user_id":7,"name":"Ada \"the first\"","nick":null,"tags":["a","b"],"home":{"city":"Paris","zip":75001}},{"user_id":8,"name":"Bob","nick":"b","tags":[],"home":null}]
+[1.5,2.0]
+ada 3
+bob null
+missing text
+not a number: many
+{"city":"Oslo","zip":150}

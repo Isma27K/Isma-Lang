@@ -1,0 +1,11 @@
+# expect-error: only numbers please, not `String`
+fn double[T](x: T) -> T:
+    comptime match T:
+        case Int | Float:
+            return x + x
+        case _:
+            compile_error(f"only numbers please, not `{type_name(T)}`")
+
+fn main():
+    print(double(2))
+    print(double("no"))

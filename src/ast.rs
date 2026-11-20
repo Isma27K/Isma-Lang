@@ -8,12 +8,12 @@ pub struct Ident {
     pub span: Span,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Program {
     pub items: Vec<Item>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Item {
     Fn(FnDecl),
     Struct(StructDecl),
@@ -24,11 +24,37 @@ pub enum Item {
     Const(ConstDecl),
     /// `interface Shape:` and the methods a type needs to be a `Shape`.
     Interface(InterfaceDecl),
+    /// `attribute get(path: String)`: something `@get(...)` can put on a
+    /// declaration, for code that runs while compiling to read.
+    Attribute(AttributeDecl),
+}
+
+/// `attribute get(path: String)`, or `attribute skip` (without fields).
+/// Attributes are struct-like values, built while compiling.
+#[derive(Debug, Clone)]
+pub struct AttributeDecl {
+    pub name: Ident,
+    /// Its fields, like a struct's (always immutable; defaults allowed).
+    pub fields: Vec<FieldDecl>,
+    /// From `attribute` to the end of the line.
+    pub span: Span,
+}
+
+/// `@get("/users/{id}")` on a function, struct, enum, field or parameter.
+#[derive(Debug, Clone)]
+pub struct Attribute {
+    /// `traiz` in `@traiz.get(...)`.
+    pub module: Option<Ident>,
+    pub name: Ident,
+    /// The values given to the attribute's fields (like a struct's).
+    pub args: Vec<Arg>,
+    /// From `@` to the end of the attribute.
+    pub span: Span,
 }
 
 /// `interface Shape:` with method signatures (no bodies), or
 /// `interface NamedShape(Shape, Named):`, which adds the methods of others.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct InterfaceDecl {
     pub name: Ident,
     /// `[T]` in `interface Source[T]:`.
@@ -44,13 +70,13 @@ pub struct InterfaceDecl {
 }
 
 /// `T` in `fn max[T]`, or `T: Shape + Named` (with bounds: interfaces `T` must be).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TypeParam {
     pub name: Ident,
     pub bounds: Vec<TypeExpr>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ConstDecl {
     pub name: Ident,
     pub ty: Option<TypeExpr>,
@@ -105,7 +131,7 @@ impl ImportName {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FnDecl {
     pub name: Ident,
     /// `[T, U]` in `fn pair[T, U](a: T, b: U)`.
@@ -117,15 +143,21 @@ pub struct FnDecl {
     pub body: Block,
     /// Span of the signature (`fn name(...) -> T`).
     pub sig_span: Span,
+    /// `@get("/")` lines above it.
+    pub attrs: Vec<Attribute>,
+    /// `comptime fn`: runs only while compiling.
+    pub comptime: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Param {
     pub name: Ident,
     pub ty: TypeExpr,
+    /// `@query` in `fn list(@query page: Int)`.
+    pub attrs: Vec<Attribute>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct StructDecl {
     pub name: Ident,
     /// `[T]` in `struct Box[T]:`.
@@ -134,10 +166,11 @@ pub struct StructDecl {
     pub implements: Vec<TypeExpr>,
     pub fields: Vec<FieldDecl>,
     pub methods: Vec<FnDecl>,
+    pub attrs: Vec<Attribute>,
 }
 
 /// `enum Shape:` with its variants (`Circle(radius: Float)`, `Empty`) and methods.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct EnumDecl {
     pub name: Ident,
     /// `[T]` in `enum Tree[T]:`.
@@ -146,9 +179,10 @@ pub struct EnumDecl {
     pub implements: Vec<TypeExpr>,
     pub variants: Vec<VariantDecl>,
     pub methods: Vec<FnDecl>,
+    pub attrs: Vec<Attribute>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct VariantDecl {
     pub name: Ident,
     /// Always immutable.
@@ -156,7 +190,7 @@ pub struct VariantDecl {
     pub span: Span,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FieldDecl {
     pub name: Ident,
     pub ty: TypeExpr,
@@ -164,6 +198,8 @@ pub struct FieldDecl {
     /// `port: Int = 8080`: the default value, as a hidden static method
     /// (`__default_port`, returning it) that runs at each construction leaving the field out.
     pub default: Option<Box<FnDecl>>,
+    /// `@rename("user_id")` lines above it.
+    pub attrs: Vec<Attribute>,
 }
 
 /// The `name` of a tuple type `(Int, String)` (its elements are the `args`).
@@ -195,7 +231,7 @@ pub struct FnTypeExpr {
 /// val f = fn(x: Int) -> Int:
 ///     return x * 2
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Lambda {
     pub params: Vec<LambdaParam>,
     /// The return type, when written (only with a block body).
@@ -205,14 +241,14 @@ pub struct Lambda {
     pub head: Span,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LambdaParam {
     pub name: Ident,
     /// Written, or taken from the type the lambda is expected to have.
     pub ty: Option<TypeExpr>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum LambdaBody {
     /// `fn(x) -> x * 2`: the value is returned.
     Expr(Box<Expr>),
@@ -221,13 +257,13 @@ pub enum LambdaBody {
 
 pub type Block = Vec<Stmt>;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Stmt {
     pub kind: StmtKind,
     pub span: Span,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum StmtKind {
     Let { mutable: bool, name: Ident, ty: Option<TypeExpr>, value: Expr },
     /// `val (q, r) = divmod(a, b)`: a tuple taken apart into names (`pat`
@@ -247,9 +283,34 @@ pub enum StmtKind {
     Continue,
     Return(Option<Expr>),
     Pass,
+    /// `comptime val`, `comptime if`, `comptime for`, `comptime match`.
+    Comptime(Box<ComptimeStmt>),
 }
 
-#[derive(Debug)]
+/// A statement worked out while compiling (see `check/comptime.rs`).
+#[derive(Debug, Clone)]
+pub enum ComptimeStmt {
+    /// `comptime val n = expr`: a value computed while compiling.
+    Let { name: Ident, ty: Option<TypeExpr>, value: Expr },
+    /// `comptime if cond:`: only the branch the condition picks is compiled.
+    If { branches: Vec<(Expr, Block)>, else_block: Option<Block> },
+    /// `comptime for f in fields(T):`: the body is repeated for each element.
+    For { var: Ident, second: Option<Ident>, iter: Expr, body: Block },
+    /// `comptime match T:` with types as cases: only the case that fits is compiled.
+    Match { ty: TypeExpr, arms: Vec<TypeArm> },
+}
+
+/// `case List[_] | Map[String, _]:` in a `comptime match`.
+#[derive(Debug, Clone)]
+pub struct TypeArm {
+    /// The types (with `_` for any type), one per alternative.
+    pub pats: Vec<TypeExpr>,
+    pub body: Block,
+    /// From `case` to the last pattern.
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
 pub struct MatchArm {
     pub pattern: Pattern,
     /// `case p if cond:`
@@ -259,13 +320,13 @@ pub struct MatchArm {
     pub span: Span,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Pattern {
     pub kind: PatternKind,
     pub span: Span,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum PatternKind {
     /// `_`
     Wild,
@@ -288,25 +349,25 @@ pub enum PatternKind {
     Tuple(Vec<Pattern>),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PatArg {
     pub name: Option<Ident>,
     pub pat: Pattern,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ForIter {
     Range { start: Expr, end: Expr, inclusive: bool },
     Expr(Expr),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Expr {
     pub kind: ExprKind,
     pub span: Span,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ExprKind {
     Int(i64),
     Float(f64),
@@ -346,24 +407,27 @@ pub enum ExprKind {
     /// `match x:` used as a value (`val label = match code:`): each case's
     /// value is its expression, or the last line of its block.
     Match { scrutinee: Box<Expr>, arms: Vec<MatchArm> },
+    /// `decode(f)? for f in fields(T) if cond`, as an argument of a call:
+    /// one argument per element of a list known while compiling.
+    Spread { value: Box<Expr>, var: Ident, iter: Box<Expr>, cond: Option<Box<Expr>> },
     /// Placeholder produced after a parse error.
     Error,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Jump {
     Return(Option<Box<Expr>>),
     Break,
     Continue,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum FStrPart {
     Lit(String),
     Expr(Expr),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Arg {
     pub name: Option<Ident>,
     pub value: Expr,

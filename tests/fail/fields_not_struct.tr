@@ -1,0 +1,3 @@
+# expect-error: `fields` needs a struct, but this is `Int`
+fn main():
+    print(fields(Int))

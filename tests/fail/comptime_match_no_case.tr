@@ -1,0 +1,11 @@
+# expect-error: no case of this `comptime match` fits `Bool`
+fn name[T](x: T) -> String:
+    comptime match T:
+        case Int:
+            return "int"
+        case String:
+            return "string"
+    return "?"
+
+fn main():
+    print(name(true))

@@ -1,0 +1,3 @@
+# expect-error: Tarn has no list comprehensions
+fn main():
+    val xs = [x * 2 for x in [1, 2, 3]]

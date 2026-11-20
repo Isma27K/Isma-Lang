@@ -1,0 +1,68 @@
+# Attributes: declared with `attribute`, written with `@`, read while compiling.
+
+import mylib.routes as r
+from mylib.routes import get
+
+attribute table(name: String)
+attribute column(name: String = "", indexed: Bool = false)
+attribute skip
+attribute tags(values: List[String], weight: Float? = null)
+
+enum Level:
+    Low
+    High
+
+attribute level(of: Level)
+
+@table("users")
+@tags(["admin", "audit"], weight = 0.5)
+struct User:
+    @column("user_id", indexed = true)
+    id: Int
+    @column
+    name: String
+    @skip
+    cache: List[Int] = []
+
+@level(Level.High)
+enum Color:
+    Red
+    Green
+
+@get("/users")
+fn list_users(@r.query page: Int, size: Int) -> String:
+    return f"page {page} of {size}"
+
+@r.post("/users")
+fn add_user():
+    pass
+
+struct Api:
+    @get("/health")
+    fn health() -> String:
+        return "ok"
+
+fn report[T]() -> List[String]:
+    val out: List[String] = []
+    comptime for f in fields(T):
+        comptime if f.has(skip):
+            out.push(f"{f.name}: skipped")
+        else:
+            comptime val c = f.attribute(column)!!
+            out.push(f"{f.name}: column {c.name} indexed={c.indexed}")
+    return out
+
+fn main():
+    print(attribute(User, table)!!.name)
+    print(attribute(User, tags)!!.values)
+    print(attribute(User, tags)!!.weight)
+    print(attribute(Color, level)!!.of)
+    print(attribute(Color, table) == null)
+    print(report[User]())
+    print(attribute(list_users, get)!!.path)
+    print(attribute(add_user, r.post)!!.path)
+    print(attribute(add_user, get) == null)
+    print(attribute(Api.health, get)!!.path)
+    for p in params(list_users):
+        print(f"{p.name}: {p.type_name}")
+    print(list_users(1, 20))

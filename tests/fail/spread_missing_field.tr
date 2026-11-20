@@ -1,0 +1,10 @@
+# expect-error: no value for field `y` of `P`
+struct P:
+    x: Int
+    y: Int
+
+fn make[T]() -> T:
+    return T(1 for f in fields(T) if f.name == "x")
+
+fn main():
+    print(make[P]().x)

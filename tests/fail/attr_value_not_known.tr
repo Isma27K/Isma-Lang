@@ -1,0 +1,11 @@
+# expect-error: can't run while compiling
+import env
+
+attribute get(path: String)
+
+@get(env.get("ROOT") ?: "/")
+fn a():
+    pass
+
+fn main():
+    a()

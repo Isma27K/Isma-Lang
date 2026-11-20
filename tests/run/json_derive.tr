@@ -1,0 +1,92 @@
+# A JSON library written with compile-time reflection: `struct User(Json):`
+# gets `to_json` from the interface's default method, which loops over the
+# fields while compiling; `decode` builds any struct from its fields.
+
+attribute rename(name: String)
+attribute skip
+
+fn quote(s: String) -> String:
+    return "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+
+fn encode[T](v: T) -> String:
+    comptime match T:
+        case Int | Float | Bool:
+            return v.to_string()
+        case String:
+            return quote(v)
+        case _?:
+            if v == null:
+                return "null"
+            return encode(v!!)
+        case List[_]:
+            val parts: List[String] = []
+            for x in v:
+                parts.push(encode(x))
+            return "[" + parts.join(",") + "]"
+        case Json:
+            return v.to_json()
+        case _:
+            compile_error(f"can't encode a `{type_name(T)}` as JSON")
+
+# The key of field `f`: its `@rename`, or its own name.
+comptime fn key(f: Field) -> String:
+    return f.attribute(rename)?.name ?: f.name
+
+interface Json:
+    fn to_json(self) -> String:
+        val parts: List[String] = []
+        comptime for f in fields(Self):
+            comptime if not f.has(skip):
+                parts.push(quote(key(f)) + ":" + encode(f.get(self)))
+        return "{" + parts.join(",") + "}"
+
+# Decoding from flat text values (a real decoder would parse JSON text).
+fn read[T](text: String?) -> Result[T, String]:
+    comptime match T:
+        case U?:
+            if text == null:
+                return Ok(null)
+            return Ok(read[U](text)?)
+        case Int:
+            val t = text ?: return Err("missing number")
+            return Ok(t.to_int_or_null() ?: return Err(f"not a number: {t}"))
+        case String:
+            return Ok(text ?: return Err("missing text"))
+        case _:
+            compile_error(f"can't read a `{type_name(T)}`")
+
+fn decode[T](obj: Map[String, String]) -> Result[T, String]:
+    return Ok(T(read(obj.get(key(f)))? for f in fields(T) if not f.has(skip)))
+
+struct Address(Json):
+    city: String
+    zip: Int
+
+struct User(Json):
+    @rename("user_id")
+    id: Int
+    name: String
+    nick: String?
+    tags: List[String]
+    home: Address?
+    @skip
+    password: String = "secret"
+
+struct Login:
+    @rename("user")
+    name: String
+    tries: Int?
+
+fn main():
+    val u = User(id = 7, name = "Ada \"the first\"", nick = null, tags = ["a", "b"], home = Address(city = "Paris", zip = 75001))
+    print(u.to_json())
+    print(encode([u, User(id = 8, name = "Bob", nick = "b", tags = [], home = null)]))
+    print(encode([1.5, 2.0]))
+    val l = decode[Login]({"user": "ada", "tries": "3"})!!
+    print(f"{l.name} {l.tries}")
+    val l2 = decode[Login]({"user": "bob"})!!
+    print(f"{l2.name} {l2.tries}")
+    print(decode[Login]({"tries": "3"}).error_or_null())
+    print(decode[Login]({"user": "x", "tries": "many"}).error_or_null())
+    val a = decode[Address]({"city": "Oslo", "zip": "150"})!!
+    print(a.to_json())

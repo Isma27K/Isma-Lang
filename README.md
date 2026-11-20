@@ -221,7 +221,31 @@ fn main():
     print(dist(Point(0.0, 0.0), Point(3.0, 4.0)))
 ```
 
-The [**language guide**](docs/language.md) covers everything: types, constants, strictness rules, lints, functions and lambdas, structs (with default values and static methods), enums and `match` (also as a value), operator functions, generics, interfaces (generic, with default methods), iterators, lists, maps, tuples, strings, null safety, modules, built-ins and panics.
+Code can also run while compiling. A library loops over a type's fields and reads attributes written on declarations, and the compiler unrolls it for each type, so nothing is looked up at run time:
+
+```python
+attribute rename(name: String)
+
+interface Json:                              # a library's interface...
+    fn to_json(self) -> String:              # ...whose default method every type gets
+        val parts: List[String] = []
+        comptime for f in fields(Self):      # repeated for each field, while compiling
+            val key = f.attribute(rename)?.name ?: f.name
+            parts.push(f"\"{key}\": {f.get(self)}")
+        return "{" + parts.join(", ") + "}"
+
+struct Point(Json):
+    @rename("X")
+    x: Int
+    y: Int
+
+fn main():
+    print(Point(x = 1, y = 2).to_json())     # {"X": 1, "y": 2}
+    comptime val squares = [1, 2, 3].map(fn(n) -> n * n)   # ordinary code, run by the compiler
+    print(squares)
+```
+
+The [**language guide**](docs/language.md) covers everything: types, constants, strictness rules, lints, functions and lambdas, structs (with default values and static methods), enums and `match` (also as a value), operator functions, generics, interfaces (generic, with default methods), iterators, lists, maps, tuples, strings, null safety, tasks, compile-time code (reflection, attributes, `comptime`), modules, built-ins and panics.
 
 <a id="batteries"></a>
 ## Batteries included
@@ -354,7 +378,7 @@ These are the best of 3 runs on an AMD Ryzen 5 5500. Reproduce them with `./benc
 - [x] **1. Errors and I/O:** recoverable errors (`Result` and `?`), `Bytes`, sockets (`net`), environment variables and signals, strings by character with efficient appends and percent-encoding
 - [x] **2. The type system:** static methods, default field values, generic interfaces and default methods, `match` on the type inside an interface value, `match` as an expression, closures that capture `var`s and methods as values, tuples, iterators for your own types
 - [x] **3. Concurrency:** lightweight tasks on an event loop across every core (`spawn(fn() -> ...)`, no `async`/`await` split), channels, `Mutex` and `Atomic` for shared state (tasks share nothing else), `fn drop` on generic structs, panics that stop only their own task
-- [ ] **4. Compile-time code:** reflection over a type's fields (`struct User(Json):`) and attributes (`@get("/users/{id}")`) that libraries read at compile time
+- [x] **4. Compile-time code:** reflection over a type's fields (`comptime for f in fields(T)`, so `struct User(Json):` gets its encoder from a library), `comptime match` on types, attributes (`@get("/users/{id}")`) that libraries read while compiling, and ordinary Tarn code run by the compiler (`comptime val`, `comptime if`, `comptime fn`, `compile_error`)
 - [ ] **5. Libraries and tools:** Thorn, the package manager, a `json` module, calling C directly (TLS, databases, zlib), crypto and encoding, a `log` module, `tarn test`
 - [ ] **Then Traiz itself,** as its own project and package: an HTTP server, routing, middleware, typed handlers, JSON bodies
 
