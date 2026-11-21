@@ -1,0 +1,8 @@
+import shout
+import greet.words
+from greet import hello
+
+fn main():
+    print(hello("Tarn"))
+    print(shout.shout("thorn"))
+    print(words.hello())

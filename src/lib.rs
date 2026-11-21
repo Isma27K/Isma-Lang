@@ -43,7 +43,7 @@ pub fn load_source(src: &str) -> Project {
 }
 
 /// Problems inside standard-library code are compiler bugs: never show them
-/// as if they were in the user's code.
+/// as if they were in the user's code. Warnings in packages are hidden too.
 fn visible_diagnostics(project: &Project, diags: Vec<Diagnostic>) -> Vec<Diagnostic> {
     diags
         .into_iter()
@@ -52,6 +52,8 @@ fn visible_diagnostics(project: &Project, diags: Vec<Diagnostic>) -> Vec<Diagnos
             match f.kind {
                 FileKind::Std if d.is_error() => Some(internal_error(&d, &f.name)),
                 FileKind::Std => None,
+                // A package's warnings are its authors' business, not yours.
+                FileKind::Package if !d.is_error() => None,
                 _ => Some(d),
             }
         })

@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "packages": {
+    "broken": { "version": "0.1.0", "path": "../../pkgs/broken" },
+    "greet": { "version": "1.0.0", "path": "../../pkgs/greet" },
+    "shout": { "version": "2.1.0", "path": "../../pkgs/shout" }
+  }
+}

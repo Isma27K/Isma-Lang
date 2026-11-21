@@ -1,0 +1,9 @@
+[package]
+name = "app"
+version = "0.1.0"
+
+[dependencies]
+greet = "^1.0"
+shout = "^2.0"
+broken = "*"
+later = "^1.0"

@@ -1,0 +1,5 @@
+# Depends on another package.
+import greet
+
+fn shout(name: String) -> String:
+    return greet.hello(name).upper()

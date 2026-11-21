@@ -1,0 +1,12 @@
+# Greetings, from a package.
+import greet.words
+
+fn hello(name: String) -> String:
+    val unused = 0  # a warning that the users of the package never see
+    return f"{words.hello()}, {name}!"
+
+fn boom():
+    panic("boom from a package")
+
+fn _hidden() -> Int:
+    return 1

@@ -1,0 +1,4 @@
+import broken
+
+fn main():
+    print(broken.oops())

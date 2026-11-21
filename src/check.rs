@@ -1402,16 +1402,22 @@ impl Checker {
         let path = im.path_text();
         let path_span = im.path_span();
         match &r.target {
-            Target::Missing { tried, nearby } => {
+            Target::Missing { tried, nearby, help } => {
                 let mut d = Diagnostic::error(format!("no module named `{path}`"), path_span).with_primary("unknown module");
                 d = match tried.as_slice() {
                     [] => d.with_note(format!("available modules: {}", nearby.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", "))),
                     files => d.with_note(format!("there is no file `{}`", files.join("`, `"))),
                 };
                 let last = im.path.last().map(|i| i.name.as_str()).unwrap_or_default();
-                if let Some(sugg) = suggest(last, nearby.iter().map(|s| s.as_str())) {
+                if let Some(help) = help {
+                    // The package exists but Thorn hasn't installed it.
+                    d = d.with_help(help.clone());
+                } else if let Some(sugg) = suggest(last, nearby.iter().map(|s| s.as_str())) {
                     let fixed = path.rsplit_once('.').map(|(head, _)| format!("{head}.{sugg}")).unwrap_or(sugg);
                     d = d.with_help(format!("did you mean `{fixed}`?"));
+                } else if im.level == 0 && tried.len() == 1 && !tried[0].contains('@') {
+                    let first = &im.path[0].name;
+                    d = d.with_help(format!("if `{first}` is a package, add it with `thorn add {first}`"));
                 }
                 self.err(d);
                 self.fail_import(ns, im);

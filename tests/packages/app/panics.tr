@@ -1,0 +1,4 @@
+import greet
+
+fn main():
+    greet.boom()

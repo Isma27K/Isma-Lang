@@ -1389,6 +1389,19 @@ from . import util                       # `.` is this file's folder
 
 `import *` is not supported: name what you use, or import the module.
 
+### Packages
+
+Libraries from outside your project are packages, installed with Thorn, Tarn's package manager and a project of its own (`thorn add colors`). They're imported by name, like your own modules:
+
+```python
+import colors
+from table import Table
+```
+
+- **Where they come from.** The compiler looks for the nearest `thorn.toml` above the file you run, and reads `.thorn/packages.json` next to it, which Thorn writes: each package's name, version and folder. `TARN_PACKAGES` can name another table. A package's root module is `src/<name>.tr`, its other modules `src/<name>/*.tr`.
+- **Order.** An import looks for a file of yours first, then a package, then the standard library. Package names can't be standard-library module names.
+- **Diagnostics.** A package's warnings aren't shown; its errors and panics are, at their place in the package (`colors@1.0.0/src/colors.tr:12:5`). Importing a package that isn't installed says to run `thorn add` or `thorn sync`.
+
 ### The standard library
 
 ```python
@@ -1459,7 +1472,7 @@ A panic in a [task](#panics-in-tasks) stops only that task.
 
 ## Known limitations
 
-- **No packages to install.** Modules come from your own folders and the standard library; there is no package manager or search path.
+- **Packages are young.** Thorn installs packages from one registry, by version or from a folder: not from git repositories, without workspaces or optional features, and with one version of each package per project.
 - **No global variables.** Top-level `val`s are [constants](#constants) (numbers, `Bool`s and `String`s); everything that changes lives in functions.
 - **Byte-based strings.** `String.len()` and `substring()` count bytes, and there's no `s[i]` indexing; use `for c in s`, `char_count()` or `chars()`.
 - **No TLS yet.**

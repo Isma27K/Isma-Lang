@@ -210,7 +210,7 @@ impl Server {
             let a = crate::analyze_project(&project);
             let others = project.files[1..]
                 .iter()
-                .filter(|f| f.kind == FileKind::User)
+                .filter(|f| matches!(f.kind, FileKind::User | FileKind::Package))
                 .filter_map(|f| {
                     let path = f.path.clone()?;
                     Some(OtherFile { uri: path_to_uri(&path)?, path, base: f.base, len: f.text.len() as u32, lines: LineMap::new(&f.text) })
@@ -541,9 +541,21 @@ impl Server {
                 items.push(module_item(m.name, format!("import {}", m.name), doc, lt::CompletionItemKind::MODULE));
             }
         }
+        let packages = crate::project::find_packages(dir);
+        if level == 0 && folders.is_empty() {
+            for p in &packages.list {
+                let docs = std::fs::read_to_string(p.root.join("src").join(format!("{}.tr", p.name))).ok().and_then(|t| leading_doc(&t));
+                items.push(module_item(&p.name, format!("package {} {}", p.name, p.version), docs, lt::CompletionItemKind::MODULE));
+            }
+        }
         let Some(mut dir) = dir.map(Path::to_path_buf) else { return Some(items) };
         for _ in 1..level.max(1) {
             dir.pop();
+        }
+        // `import colors.co|`: inside the package's `src/`, unless a folder of yours has that name.
+        let first_is_package = level == 0 && folders.first().is_some_and(|f| !dir.join(f).is_dir() && packages.get(f).is_some());
+        if first_is_package && let Some(p) = packages.get(folders[0]) {
+            dir = p.root.join("src");
         }
         for f in folders {
             dir.push(f);
@@ -607,6 +619,13 @@ impl Server {
         if let Some(mut folder) = dir.map(Path::to_path_buf) {
             for _ in 1..level.max(1) {
                 folder.pop();
+            }
+            // `from colors import co|`: the package's own folder of modules.
+            let first = module[level..].split('.').next().unwrap_or_default();
+            if level == 0 && !folder.join(first).is_dir()
+                && let Some(p) = crate::project::find_packages(dir).get(first)
+            {
+                folder = p.root.join("src");
             }
             for seg in module[level..].split('.').filter(|s| !s.is_empty()) {
                 folder.push(seg);

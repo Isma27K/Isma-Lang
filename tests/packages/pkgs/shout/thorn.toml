@@ -1,0 +1,6 @@
+[package]
+name = "shout"
+version = "2.1.0"
+
+[dependencies]
+greet = "^1.0"

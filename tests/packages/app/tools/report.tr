@@ -1,0 +1,5 @@
+# Found from a subfolder: the nearest thorn.toml above is the project's.
+from greet import words
+
+fn main():
+    print(words.hello())

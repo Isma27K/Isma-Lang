@@ -576,6 +576,79 @@ fn language_server_works_across_files() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Packages that Thorn installed: found through the project's
+/// `.thorn/packages.json` (see `tests/packages/README.md`), or `TARN_PACKAGES`.
+#[test]
+fn packages_installed_by_thorn() {
+    let app = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/packages/app");
+    let file = |name: &str| app.join(name).to_str().unwrap().to_string();
+    let stderr = |o: &Output| String::from_utf8_lossy(&o.stderr).into_owned();
+
+    // A package, a submodule of it, and a package that depends on another.
+    let out = tarn_env(&["run", &file("main.tr")], &[("TARN_ARC_CHECK", "1")]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), std::fs::read_to_string(app.join("main.out")).unwrap());
+    // `greet` has an unused variable: its warning is the package's business.
+    assert!(!stderr(&out).contains("warning") && !stderr(&out).contains("unused"), "{}", stderr(&out));
+    // The nearest thorn.toml above the entry file wins, from any subfolder.
+    let out = tarn(&["run", &file("tools/report.tr")]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "Hello\n", "{}", stderr(&out));
+
+    let fails = |name: &str, want: &[&str]| {
+        let out = tarn(&["check", &file(name)]);
+        assert!(!out.status.success(), "{name} compiled");
+        for w in want {
+            assert!(stderr(&out).contains(w), "{name}: no `{w}` in\n{}", stderr(&out));
+        }
+    };
+    // An error in a package is shown where it is, named by package and version.
+    fails("uses_broken.tr", &["broken@0.1.0/src/broken.tr:2:12", "mismatched types"]);
+    fails("missing.tr", &["no module named `nothere`", "add it with `thorn add nothere`"]);
+    fails("not_synced.tr", &["`later` is in `thorn.lock` but isn't installed: run `thorn sync`"]);
+    fails("private.tr", &["`greet._hidden` is private to the `greet` module"]);
+    // Panics inside a package point into the package.
+    let out = tarn(&["run", &file("panics.tr")]);
+    assert_eq!(out.status.code(), Some(101));
+    assert!(stderr(&out).contains("panic at greet@1.0.0/src/greet.tr:9:5: boom from a package"), "{}", stderr(&out));
+
+    // `TARN_PACKAGES` names the table for a program outside any project.
+    let dir = scratch("packages-env");
+    let lone = dir.join("lone.tr");
+    std::fs::write(&lone, "import greet\n\nfn main():\n    print(greet.hello(\"env\"))\n").unwrap();
+    let table = app.join(".thorn/packages.json");
+    let out = tarn_env(&["run", lone.to_str().unwrap()], &[("TARN_PACKAGES", table.to_str().unwrap())]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "Hello, env!\n", "{}", stderr(&out));
+    // A broken table says so, and what to do about it.
+    std::fs::write(dir.join("thorn.toml"), "[package]\nname = \"lone\"\nversion = \"0.1.0\"\n").unwrap();
+    std::fs::create_dir_all(dir.join(".thorn")).unwrap();
+    std::fs::write(dir.join(".thorn/packages.json"), "{\"version\": 1, \"packages\": [}").unwrap();
+    let out = tarn(&["check", lone.to_str().unwrap()]);
+    assert!(stderr(&out).contains("`.thorn/packages.json` is malformed") && stderr(&out).contains("run `thorn sync`"), "{}", stderr(&out));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // The editor: hover, go to definition into the package, completion of package names.
+    let main = app.join("main.tr");
+    let main_uri = format!("file://{}", main.display());
+    let text = std::fs::read_to_string(&main).unwrap();
+    let mut lsp = Lsp::start();
+    let diags = lsp.open(&main_uri, &text);
+    assert!(diags["params"]["diagnostics"].as_array().unwrap().is_empty(), "{diags}");
+    let def = lsp.at("textDocument/definition", &main_uri, 5, 11);
+    let greet_file = std::fs::canonicalize(app.join("../pkgs/greet/src/greet.tr")).unwrap();
+    assert_eq!(def["result"]["uri"], format!("file://{}", greet_file.display()).as_str(), "{def}");
+    lsp.stop();
+    let mut lsp = Lsp::start();
+    lsp.open(&main_uri, "import \nimport greet.\nfrom greet import \nfn main():\n    pass\n");
+    let labels = |v: &serde_json::Value| -> Vec<String> { v["result"].as_array().unwrap().iter().map(|i| i["label"].as_str().unwrap().to_string()).collect() };
+    let top = labels(&lsp.at("textDocument/completion", &main_uri, 0, 7));
+    assert!(["greet", "shout", "time"].iter().all(|w| top.iter().any(|l| l == w)), "{top:?}");
+    let sub = labels(&lsp.at("textDocument/completion", &main_uri, 1, 13));
+    assert!(sub.iter().any(|l| l == "words"), "{sub:?}");
+    let names = labels(&lsp.at("textDocument/completion", &main_uri, 2, 18));
+    assert!(names.iter().any(|l| l == "hello") && names.iter().any(|l| l == "words") && !names.iter().any(|l| l == "_hidden"), "{names:?}");
+    lsp.stop();
+}
+
 /// `tarn doc --json` lists the standard library and the built-in types, with
 /// signatures and doc comments (the website's reference pages are made from it).
 #[test]
